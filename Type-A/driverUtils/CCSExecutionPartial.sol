@@ -2,7 +2,9 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
- - 2025-07-20: Updated _transferMarginToListing to allow transfers from any address (not just msg.sender) to support cancelPosition in CCSExecutionDriver, incremented version to 0.0.6.
+ - 2025-07-20: Fixed TypeError by adding makerTokenMargin to ICSStorage interface, corrected ParserError in priceParams2 function declaration, removed incorrect CCOrderRouter.sol import, incremented version to 0.0.8.
+ - 2025-07-20: Added orderRouter state variable, setOrderRouter, getOrderRouter, and helper functions (_createOrderForPosition, _updateExcessTokens) to integrate order creation via CCOrderRouter during position activation, updated _processPendingPosition to use these helpers, incremented version to 0.0.7.
+ - 2025-07-20: Updated _transferMarginToListing to allow transfers from any address to support cancelPosition in CCSExecutionDriver, incremented version to 0.0.6.
  - 2025-07-19: Refactored _processActivePosition to address stack too deep error by splitting into _prepareActivePositionCheck and _executeActivePositionClose helpers, optimized parameter passing, maintained incremental ICSStorage updates, incremented version to 0.0.5.
  - 2025-07-19: Fixed incorrect emit syntax for PositionClosed event, resolved shadowed storageContract declarations by renaming function parameters, incremented version to 0.0.4.
  - 2025-07-19: Fixed shadowed storageContract declarations, added bytesToString helper for CSUpdate string conversion, moved PositionClosed event earlier in ICSStorage interface, maintained split CSUpdate calls and zero-bound entry price execution, incremented version to 0.0.3.
@@ -53,7 +55,6 @@ interface ISSLiquidityTemplate {
     function liquidityDetailsView(address caller) external view returns (uint256, uint256, uint256, uint256);
 }
 
-// Inlined ICSStorage interface with necessary structs and functions
 interface ICSStorage {
     event PositionClosed(uint256 indexed positionId, address indexed maker, uint256 payout); // Moved earlier for visibility
     struct PositionCore1 {
@@ -123,16 +124,45 @@ interface ICSStorage {
     ) external;
 }
 
+interface ICCOrderRouter {
+    function createBuyOrder(
+        address listingAddress,
+        address recipientAddress,
+        uint256 inputAmount,
+        uint256 maxPrice,
+        uint256 minPrice
+    ) external payable;
+    function createSellOrder(
+        address listingAddress,
+        address recipientAddress,
+        uint256 inputAmount,
+        uint256 maxPrice,
+        uint256 minPrice
+    ) external payable;
+}
+
 contract CCSExecutionPartial is Ownable {
     using SafeERC20 for IERC20;
 
     uint256 public constant DECIMAL_PRECISION = 1e18;
     address public agentAddress;
     ICSStorage public storageContract; // Reference to external storage contract
+    ICCOrderRouter public orderRouter; // Reference to order router contract
 
     constructor(address _storageContract) {
         require(_storageContract != address(0), "Invalid storage address"); // Ensures valid storage contract address
         storageContract = ICSStorage(_storageContract);
+    }
+
+    // Sets order router address
+    function setOrderRouter(address newOrderRouter) external onlyOwner {
+        require(newOrderRouter != address(0), "Invalid order router address"); // Validates order router address
+        orderRouter = ICCOrderRouter(newOrderRouter);
+    }
+
+    // Returns order router address
+    function getOrderRouter() external view returns (address) {
+        return address(orderRouter); // Returns current order router address
     }
 
     // Helper function to convert bytes to string for CSUpdate
@@ -231,6 +261,49 @@ contract CCSExecutionPartial is Ownable {
             index: 0,
             value: amount,
             addr: address(0),
+            recipient: address(0)
+        });
+        ISSListing(listingAddress).update(address(this), updates);
+    }
+
+    // Creates order for position activation
+    function _createOrderForPosition(
+        uint256 positionId,
+        uint8 positionType,
+        address listingAddress,
+        uint256 marginAmount
+    ) internal {
+        address token = positionType == 0 ? ISSListing(listingAddress).tokenA() : ISSListing(listingAddress).tokenB();
+        uint256 denormalizedMargin = denormalizeAmount(token, marginAmount);
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        bool success = IERC20(token).transfer(address(orderRouter), denormalizedMargin);
+        require(success, "Transfer to order router failed"); // Ensures successful transfer to order router
+        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+        require(balanceBefore - balanceAfter == denormalizedMargin, "Balance update failed"); // Verifies balance update
+        if (positionType == 0) {
+            orderRouter.createSellOrder(listingAddress, listingAddress, denormalizedMargin, 0, 0);
+        } else {
+            orderRouter.createBuyOrder(listingAddress, listingAddress, denormalizedMargin, 0, 0);
+        }
+    }
+
+    // Updates listing balances for excess tokens
+    function _updateExcessTokens(address listingAddress, address tokenA, address tokenB) internal {
+        uint256 balanceA = IERC20(tokenA).balanceOf(listingAddress);
+        uint256 balanceB = IERC20(tokenB).balanceOf(listingAddress);
+        ISSListing.UpdateType[] memory updates = new ISSListing.UpdateType[](2);
+        updates[0] = ISSListing.UpdateType({
+            updateType: 0,
+            index: 0,
+            value: balanceA,
+            addr: tokenA,
+            recipient: address(0)
+        });
+        updates[1] = ISSListing.UpdateType({
+            updateType: 0,
+            index: 1,
+            value: balanceB,
+            addr: tokenB,
             recipient: address(0)
         });
         ISSListing(listingAddress).update(address(this), updates);
@@ -518,7 +591,7 @@ contract CCSExecutionPartial is Ownable {
         ICSStorage.PositionCore2 memory core2 = storageContract.positionCore2(positionId);
         ICSStorage.PriceParams1 memory price1 = storageContract.priceParams1(positionId);
         ICSStorage.PriceParams2 memory price2 = storageContract.priceParams2(positionId);
-        ICSStorage.ExitParams memory exit = storageContract.exitParams(positionId);
+        ICSStorage.MarginParams1 memory margin1 = storageContract.marginParams1(positionId);
         _updateLiquidationPrices(positionId, core1.makerAddress, positionType, listingAddress);
         price2 = storageContract.priceParams2(positionId);
         bool shouldLiquidate = positionType == 0 ? currentPrice <= price2.liquidationPrice : currentPrice >= price2.liquidationPrice;
@@ -528,6 +601,9 @@ contract CCSExecutionPartial is Ownable {
             emit ICSStorage.PositionClosed(positionId, core1.makerAddress, payout);
             return true;
         } else if (price1.minEntryPrice == 0 && price1.maxEntryPrice == 0 || (currentPrice >= price1.minEntryPrice && currentPrice <= price1.maxEntryPrice)) {
+            uint256 marginAmount = margin1.taxedMargin + margin1.excessMargin;
+            _createOrderForPosition(positionId, positionType, listingAddress, marginAmount);
+            _updateExcessTokens(listingAddress, ISSListing(listingAddress).tokenA(), ISSListing(listingAddress).tokenB());
             _updatePositionStatus(positionId, ICSStorage.PositionCore2(true, 0));
             if (price1.minEntryPrice == 0 && price1.maxEntryPrice == 0) {
                 _updatePriceParams(positionId, ICSStorage.PriceParams1(0, 0, 0, currentPrice, price1.leverage), ICSStorage.PriceParams2(price2.liquidationPrice));

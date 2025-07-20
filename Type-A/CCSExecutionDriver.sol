@@ -2,6 +2,9 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-20: Fixed DeclarationError by replacing setOrderRouter call in constructor with direct orderRouter assignment, corrected typo in closeAllShorts ssUpdate call to use core1.listingAddress, incremented version to 0.0.9.
+ - 2025-07-20: Incremented version to 0.0.8 to align with CCSExecutionPartial fixes.
+ - 2025-07-20: Updated constructor to initialize orderRouter in CCSExecutionPartial, incremented version to 0.0.7.
  - 2025-07-20: Refactored cancelAllLongs and cancelAllShorts to address stack too deep error by splitting into helper functions (_prepareCancelPosition, _executeCancelPosition, _updatePositionParams, _updateMarginAndIndex) with prep and execute phases, split by parameter groups, incremented version to 0.0.6.
  - 2025-07-20: Added cancelPosition function to handle cancellation of pending positions, including margin transfer to listing contract and update call, incremented version to 0.0.5.
  - 2025-07-19: Removed redundant storageContract declaration, fixed constructor to call CCSExecutionPartial with _storageContract, cleaned up redundant inheritance entries, incremented version to 0.0.4.
@@ -30,8 +33,10 @@ contract CCSExecutionDriver is ReentrancyGuard, CCSExecutionPartial {
     event HyxRemoved(address indexed hyx); // Emitted when a hyx is removed
     event PositionCancelled(uint256 indexed positionId, address indexed maker); // Emitted when a position is cancelled
 
-    constructor(address _storageContract) CCSExecutionPartial(_storageContract) {
+    constructor(address _storageContract, address _orderRouter) CCSExecutionPartial(_storageContract) {
         require(_storageContract != address(0), "Invalid storage address"); // Ensures valid storage contract address
+        require(_orderRouter != address(0), "Invalid order router address"); // Ensures valid order router address
+        orderRouter = ICCOrderRouter(_orderRouter); // Initializes order router directly
     }
 
     // Authorizes a hyx contract to call update functions
