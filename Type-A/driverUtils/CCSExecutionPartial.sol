@@ -2,6 +2,7 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-20: Updated _transferMarginToListing to allow transfers from any address (not just msg.sender) to support cancelPosition in CCSExecutionDriver, incremented version to 0.0.6.
  - 2025-07-19: Refactored _processActivePosition to address stack too deep error by splitting into _prepareActivePositionCheck and _executeActivePositionClose helpers, optimized parameter passing, maintained incremental ICSStorage updates, incremented version to 0.0.5.
  - 2025-07-19: Fixed incorrect emit syntax for PositionClosed event, resolved shadowed storageContract declarations by renaming function parameters, incremented version to 0.0.4.
  - 2025-07-19: Fixed shadowed storageContract declarations, added bytesToString helper for CSUpdate string conversion, moved PositionClosed event earlier in ICSStorage interface, maintained split CSUpdate calls and zero-bound entry price execution, incremented version to 0.0.3.
@@ -216,7 +217,7 @@ contract CCSExecutionPartial is Ownable {
     function _transferMarginToListing(address token, uint256 amount, address listingAddress) internal returns (uint256 normalizedAmount) {
         normalizedAmount = normalizeAmount(token, amount);
         uint256 balanceBefore = IERC20(token).balanceOf(listingAddress);
-        bool success = IERC20(token).transferFrom(msg.sender, listingAddress, amount);
+        bool success = IERC20(token).transferFrom(address(this), listingAddress, amount);
         require(success, "TransferFrom failed"); // Ensures successful transfer
         uint256 balanceAfter = IERC20(token).balanceOf(listingAddress);
         require(balanceAfter - balanceBefore == amount, "Balance update failed"); // Verifies balance update

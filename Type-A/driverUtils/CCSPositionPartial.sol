@@ -2,6 +2,8 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-20: Moved executionDriver state variable, setExecutionDriver, and getExecutionDriver from CCSPositionDriver.sol to CCSPositionPartial.sol; updated _transferMarginToListing to access executionDriver directly, resolving DeclarationError. Version set to 0.0.12.
+ - 2025-07-20: Updated _transferMarginToListing to transfer margins to executionDriver instead of listing contract, removing ISSListing.UpdateType call as executionDriver will handle margin updates. Version set to 0.0.11.
  - 2025-07-19: Modified _parseEntryPriceInternal to always set priceAtEntry to 0, ensuring all positions are pending by default (status1 = false, status2 = 0) regardless of minEntryPrice and maxEntryPrice, removing immediate execution logic as execution will be handled by a separate contract. Version set to 0.0.10.
  - 2025-07-19: Refactored _prepEnterLong and _prepEnterShort to address stack too deep errors by splitting into internal helper functions (_parsePriceParams, _calcFeeAndMargin, _updateMakerMargin, _calcLoanAndLiquidationLong, _calcLoanAndLiquidationShort, _checkLiquidityLimitLong, _checkLiquidityLimitShort, _transferMarginToListing) organized by task, reducing stack usage while preserving functionality. Version set to 0.0.9.
  - 2025-07-18: Added 'external' visibility specifier to liquidityDetailsView function in ISSLiquidityTemplate interface to fix TypeError and SyntaxError. Version set to 0.0.8.
@@ -18,6 +20,7 @@ pragma solidity ^0.8.2;
 
 import "../imports/SafeERC20.sol";
 import "../imports/ReentrancyGuard.sol";
+import "../imports/Ownable.sol";
 
 interface ISSListing {
     struct UpdateType {
@@ -250,8 +253,20 @@ interface ICSStorage {
     function LiquidationRiskCount(address listingAddress, uint256 maxIterations) external view returns (uint256 count);
 }
 
-contract CCSPositionPartial is ReentrancyGuard {
+contract CCSPositionPartial is ReentrancyGuard, Ownable {
     uint256 public constant DECIMAL_PRECISION = 1e18;
+    address public executionDriver;
+
+    // Sets execution driver address
+    function setExecutionDriver(address _executionDriver) external onlyOwner {
+        require(_executionDriver != address(0), "Invalid execution driver address");
+        executionDriver = _executionDriver;
+    }
+
+    // Returns the execution driver address
+    function getExecutionDriver() external view returns (address) {
+        return executionDriver;
+    }
 
     // Struct for preparing position data
     struct PrepPosition {
@@ -349,7 +364,7 @@ contract CCSPositionPartial is ReentrancyGuard {
         }
     }
 
-    // Transfers margin to listing contract
+    // Transfers margin to execution driver
     function _transferMarginToListing(
         address token,
         address listingAddress,
@@ -362,22 +377,13 @@ contract CCSPositionPartial is ReentrancyGuard {
         uint256 transferAmount = taxedMargin + excessMargin;
         _transferLiquidityFee(listingAddress, token, fee, positionType);
         if (transferAmount > 0) {
+            require(executionDriver != address(0), "Execution driver not set");
             uint256 denormalizedAmount = denormalizeAmount(token, transferAmount);
-            uint256 balanceBefore = IERC20(token).balanceOf(listingAddress);
-            bool success = IERC20(token).transferFrom(msg.sender, listingAddress, denormalizedAmount);
+            uint256 balanceBefore = IERC20(token).balanceOf(executionDriver);
+            bool success = IERC20(token).transferFrom(msg.sender, executionDriver, denormalizedAmount);
             require(success, "TransferFrom failed");
-            uint256 balanceAfter = IERC20(token).balanceOf(listingAddress);
+            uint256 balanceAfter = IERC20(token).balanceOf(executionDriver);
             require(balanceAfter - balanceBefore == denormalizedAmount, "Balance update failed");
-
-            ISSListing.UpdateType[] memory updates = new ISSListing.UpdateType[](1);
-            updates[0] = ISSListing.UpdateType({
-                updateType: 0,
-                index: positionType,
-                value: denormalizedAmount,
-                addr: address(0),
-                recipient: address(0)
-            });
-            ISSListing(listingAddress).update(address(this), updates);
         }
     }
 
@@ -587,7 +593,7 @@ contract CCSPositionPartial is ReentrancyGuard {
         // Check liquidity limit
         _checkLiquidityLimitLong(context.listingAddress, params.initialLoan, context.leverage);
 
-        // Transfer margin to listing contract
+        // Transfer margin to execution driver
         _transferMarginToListing(
             tokenA,
             context.listingAddress,
@@ -628,7 +634,7 @@ contract CCSPositionPartial is ReentrancyGuard {
         // Check liquidity limit
         _checkLiquidityLimitShort(context.listingAddress, params.initialLoan, context.leverage);
 
-        // Transfer margin to listing contract
+        // Transfer margin to execution driver
         _transferMarginToListing(
             tokenB,
             context.listingAddress,
