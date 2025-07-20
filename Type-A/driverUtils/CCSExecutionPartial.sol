@@ -2,6 +2,7 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-20: Fixed _createOrderForPosition to approve orderRouter for margin transfer using IERC20.approve instead of direct transfer, then call createBuyOrder/createSellOrder, incremented version to 0.0.9.
  - 2025-07-20: Fixed TypeError by adding makerTokenMargin to ICSStorage interface, corrected ParserError in priceParams2 function declaration, removed incorrect CCOrderRouter.sol import, incremented version to 0.0.8.
  - 2025-07-20: Added orderRouter state variable, setOrderRouter, getOrderRouter, and helper functions (_createOrderForPosition, _updateExcessTokens) to integrate order creation via CCOrderRouter during position activation, updated _processPendingPosition to use these helpers, incremented version to 0.0.7.
  - 2025-07-20: Updated _transferMarginToListing to allow transfers from any address to support cancelPosition in CCSExecutionDriver, incremented version to 0.0.6.
@@ -275,11 +276,8 @@ contract CCSExecutionPartial is Ownable {
     ) internal {
         address token = positionType == 0 ? ISSListing(listingAddress).tokenA() : ISSListing(listingAddress).tokenB();
         uint256 denormalizedMargin = denormalizeAmount(token, marginAmount);
-        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        bool success = IERC20(token).transfer(address(orderRouter), denormalizedMargin);
-        require(success, "Transfer to order router failed"); // Ensures successful transfer to order router
-        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
-        require(balanceBefore - balanceAfter == denormalizedMargin, "Balance update failed"); // Verifies balance update
+        bool success = IERC20(token).approve(address(orderRouter), denormalizedMargin);
+        require(success, "Approval failed"); // Ensures successful approval
         if (positionType == 0) {
             orderRouter.createSellOrder(listingAddress, listingAddress, denormalizedMargin, 0, 0);
         } else {
