@@ -2,6 +2,8 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-20: Fixed ParserError by correcting 'giv' to 'address' in _validateAndInit function for tokenA declaration; moved executionDriver state variable, setExecutionDriver, and getExecutionDriver to CCSPositionPartial.sol to resolve DeclarationError in _transferMarginToListing. Version set to 0.0.12.
+ - 2025-07-20: Added executionDriver state variable with setExecutionDriver (owner-only) and getExecutionDriver view functions; updated margin transfers in prepEnterLong and prepEnterShort to target executionDriver instead of listing contract; removed cancelPosition function and related logic as cancellation will be handled by executionDriver. Version set to 0.0.11.
  - 2025-07-19: Renamed `storageContract` parameter to `sContract` in _prepDriftCSUpdateParams, _executeDriftCSUpdate, _prepDriftPayout, and _prepDriftMargin functions to avoid shadowing the public state variable `storageContract`, resolving compiler warnings. Version set to 0.0.10.
  - 2025-07-19: Refactored _storeEntryData to address stack too deep error by splitting into dedicated internal helper functions (_prepCoreParams, _prepPriceParams, _prepMarginParams, _prepExitAndInterestParams, _prepMakerMarginParams, _prepPositionArrayParams) for each parameter group, each calling CSUpdate independently, leveraging CSStorage's incremental update capability. Version set to 0.0.9.
  - 2025-07-18: Refactored drift function to address stack too deep error by breaking it into internal helper functions (prep and execute pattern) sorted by parameter type, reducing stack usage while preserving functionality. Version set to 0.0.8.
@@ -17,9 +19,8 @@
 pragma solidity ^0.8.2;
 
 import "./driverUtils/CCSPositionPartial.sol";
-import "./imports/Ownable.sol";
 
-contract CCSPositionDriver is CCSPositionPartial, Ownable {
+contract CCSPositionDriver is CCSPositionPartial {
     // Storage contract instance
     ICSStorage public storageContract;
     address public agentAddress;
@@ -30,7 +31,6 @@ contract CCSPositionDriver is CCSPositionPartial, Ownable {
     // Events for position actions
     event PositionEntered(uint256 indexed positionId, address indexed maker, uint8 positionType);
     event PositionClosed(uint256 indexed positionId, address indexed maker, uint256 payout);
-    event PositionCancelled(uint256 indexed positionId, address indexed maker);
     event HyxAdded(address indexed hyx);
     event HyxRemoved(address indexed hyx);
 
@@ -566,71 +566,6 @@ contract CCSPositionDriver is CCSPositionPartial, Ownable {
         );
         storageContract.removePositionIndex(positionId, core1.positionType, core1.listingAddress);
         emit PositionClosed(positionId, core1.makerAddress, payout);
-    }
-
-    // Cancels a position
-    function cancelPosition(uint256 positionId) external nonReentrant {
-        ICSStorage.PositionCore1 memory core1 = storageContract.positionCore1(positionId);
-        ICSStorage.PositionCore2 memory core2 = storageContract.positionCore2(positionId);
-        require(core1.positionId == positionId, "Invalid position");
-        require(core2.status2 == 0, "Position closed");
-        require(!core2.status1, "Position active");
-        require(core1.makerAddress == msg.sender, "Not maker");
-        ICSStorage.MarginParams1 memory margin1 = storageContract.marginParams1(positionId);
-        address token = core1.positionType == 0 ? ISSListing(core1.listingAddress).tokenA() : ISSListing(core1.listingAddress).tokenB();
-        _deductMarginAndRemoveToken(
-            msg.sender,
-            token,
-            margin1.taxedMargin,
-            margin1.excessMargin,
-            storageContract
-        );
-        string memory coreParams = string(abi.encodePacked(
-            positionId, "-", core1.listingAddress, "-", toString(core1.makerAddress), "-", uint256(core1.positionType)
-        ));
-        string memory priceParams = string(abi.encodePacked(
-            storageContract.priceParams1(positionId).minEntryPrice, "-",
-            storageContract.priceParams1(positionId).maxEntryPrice, "-",
-            storageContract.priceParams1(positionId).minPrice, "-",
-            storageContract.priceParams1(positionId).priceAtEntry, "-",
-            uint256(storageContract.priceParams1(positionId).leverage)
-        ));
-        string memory marginParams = string(abi.encodePacked(
-            margin1.initialMargin, "-",
-            margin1.taxedMargin, "-",
-            margin1.excessMargin, "-",
-            margin1.fee, "-",
-            storageContract.marginParams2(positionId).initialLoan
-        ));
-        string memory exitAndInterestParams = string(abi.encodePacked(
-            storageContract.exitParams(positionId).stopLossPrice, "-",
-            storageContract.exitParams(positionId).takeProfitPrice, "-",
-            uint256(0), "-",
-            storageContract.openInterest(positionId).leverageAmount, "-",
-            storageContract.openInterest(positionId).timestamp
-        ));
-        string memory makerMarginParams = string(abi.encodePacked(
-            toString(msg.sender), "-", toString(token), "-", storageContract.makerTokenMargin(msg.sender, token)
-        ));
-        storageContract.CSUpdate(
-            positionId,
-            coreParams,
-            priceParams,
-            marginParams,
-            exitAndInterestParams,
-            makerMarginParams,
-            "", // positionArrayParams
-            ""  // historicalInterestParams
-        );
-        storageContract.removePositionIndex(positionId, core1.positionType, core1.listingAddress);
-        ISSListing.PayoutUpdate[] memory updates = new ISSListing.PayoutUpdate[](1);
-        updates[0] = ISSListing.PayoutUpdate({
-            payoutType: core1.positionType,
-            recipient: msg.sender,
-            required: denormalizeAmount(token, margin1.taxedMargin + margin1.excessMargin)
-        });
-        ISSListing(core1.listingAddress).ssUpdate(address(this), updates);
-        emit PositionCancelled(positionId, msg.sender);
     }
 
     // Allows any address to create positions on behalf of a maker
