@@ -2,6 +2,7 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-23: Added liquidation price updates in addExcessMargin, closeLongPosition, closeShortPosition, and restricted pullMargin to only allow withdrawals when no open or pending positions exist for the maker in the specified token and listing. Confirmed _updatePositionLiquidationPrices in pullMargin is unnecessary due to the restriction and removed it for gas optimization. Incremented version to 0.0.10.
  - 2025-07-20: Fixed DeclarationError by replacing setOrderRouter call in constructor with direct orderRouter assignment, corrected typo in closeAllShorts ssUpdate call to use core1.listingAddress, incremented version to 0.0.9.
  - 2025-07-20: Incremented version to 0.0.8 to align with CCSExecutionPartial fixes.
  - 2025-07-20: Updated constructor to initialize orderRouter in CCSExecutionPartial, incremented version to 0.0.7.
@@ -78,17 +79,74 @@ contract CCSExecutionDriver is ReentrancyGuard, CCSExecutionPartial {
         uint256 normalizedAmount = _transferMarginToListing(token, amount, listingAddress);
         _updateListingMargin(listingAddress, amount);
         _updateMakerMargin(maker, token, normalizedAmount);
-        _updatePositionLiquidationPrices(maker, token, listingAddress);
+        _updatePositionLiquidationPrices(maker, token, listingAddress); // Updates liquidation prices for all relevant positions
         _updateHistoricalInterest(normalizedAmount, 0, listingAddress);
     }
 
-    // Withdraws margin for a maker
+    // Withdraws margin for a maker, restricted to no open or pending positions
     function pullMargin(address listingAddress, bool tokenA, uint256 amount) external nonReentrant {
         (address token, uint256 normalizedAmount) = _validateAndNormalizePullMargin(listingAddress, tokenA, amount);
-        _updatePositionLiquidationPrices(msg.sender, token, listingAddress);
+        uint256 positionCount = storageContract.positionCount();
+        for (uint256 i = 1; i <= positionCount; i++) {
+            ICSStorage.PositionCore1 memory core1 = storageContract.positionCore1(i);
+            ICSStorage.PositionCore2 memory core2 = storageContract.positionCore2(i);
+            if (
+                core1.positionId == i &&
+                core2.status2 == 0 &&
+                core1.makerAddress == msg.sender &&
+                storageContract.positionToken(i) == token &&
+                core1.listingAddress == listingAddress
+            ) {
+                revert("Cannot pull margin with open positions"); // Reverts if any open or pending positions exist
+            }
+        }
         _reduceMakerMargin(msg.sender, token, normalizedAmount);
         _executeMarginPayout(listingAddress, msg.sender, amount);
         _updateHistoricalInterest(normalizedAmount, 1, listingAddress);
+    }
+
+    // Closes a single long position
+    function closeLongPosition(uint256 positionId) external nonReentrant {
+        ICSStorage.PositionCore1 memory core1 = storageContract.positionCore1(positionId);
+        ICSStorage.PositionCore2 memory core2 = storageContract.positionCore2(positionId);
+        require(core1.positionId == positionId, "Invalid position"); // Ensures position exists
+        require(core2.status2 == 0, "Position closed"); // Ensures position is open
+        require(core2.status1, "Position not active"); // Ensures position is active
+        require(core1.makerAddress == msg.sender, "Not maker"); // Ensures caller is maker
+        address tokenB = ISSListing(core1.listingAddress).tokenB();
+        uint256 payout = _prepCloseLong(positionId, core1.listingAddress);
+        storageContract.removePositionIndex(positionId, 0, core1.listingAddress);
+        ISSListing.PayoutUpdate[] memory updates = new ISSListing.PayoutUpdate[](1);
+        updates[0] = ISSListing.PayoutUpdate({
+            payoutType: 0,
+            recipient: msg.sender,
+            required: denormalizeAmount(tokenB, payout)
+        });
+        ISSListing(core1.listingAddress).ssUpdate(address(this), updates);
+        _updatePositionLiquidationPrices(msg.sender, ISSListing(core1.listingAddress).tokenA(), core1.listingAddress); // Updates liquidation prices for remaining positions
+        emit ICSStorage.PositionClosed(positionId, msg.sender, payout);
+    }
+
+    // Closes a single short position
+    function closeShortPosition(uint256 positionId) external nonReentrant {
+        ICSStorage.PositionCore1 memory core1 = storageContract.positionCore1(positionId);
+        ICSStorage.PositionCore2 memory core2 = storageContract.positionCore2(positionId);
+        require(core1.positionId == positionId, "Invalid position"); // Ensures position exists
+        require(core2.status2 == 0, "Position closed"); // Ensures position is open
+        require(core2.status1, "Position not active"); // Ensures position is active
+        require(core1.makerAddress == msg.sender, "Not maker"); // Ensures caller is maker
+        address tokenA = ISSListing(core1.listingAddress).tokenA();
+        uint256 payout = _prepCloseShort(positionId, core1.listingAddress);
+        storageContract.removePositionIndex(positionId, 1, core1.listingAddress);
+        ISSListing.PayoutUpdate[] memory updates = new ISSListing.PayoutUpdate[](1);
+        updates[0] = ISSListing.PayoutUpdate({
+            payoutType: 1,
+            recipient: msg.sender,
+            required: denormalizeAmount(tokenA, payout)
+        });
+        ISSListing(core1.listingAddress).ssUpdate(address(this), updates);
+        _updatePositionLiquidationPrices(msg.sender, ISSListing(core1.listingAddress).tokenB(), core1.listingAddress); // Updates liquidation prices for remaining positions
+        emit ICSStorage.PositionClosed(positionId, msg.sender, payout);
     }
 
     // Updates stop-loss price for a position
@@ -141,6 +199,7 @@ contract CCSExecutionDriver is ReentrancyGuard, CCSExecutionPartial {
                 required: denormalizeAmount(tokenB, payout)
             });
             ISSListing(core1.listingAddress).ssUpdate(address(this), updates);
+            _updatePositionLiquidationPrices(maker, ISSListing(core1.listingAddress).tokenA(), core1.listingAddress); // Updates liquidation prices for remaining positions
             emit ICSStorage.PositionClosed(positionId, maker, payout);
             processed++;
         }
@@ -251,6 +310,7 @@ contract CCSExecutionDriver is ReentrancyGuard, CCSExecutionPartial {
                 required: denormalizeAmount(tokenA, payout)
             });
             ISSListing(core1.listingAddress).ssUpdate(address(this), updates);
+            _updatePositionLiquidationPrices(maker, ISSListing(core1.listingAddress).tokenB(), core1.listingAddress); // Updates liquidation prices for remaining positions
             emit ICSStorage.PositionClosed(positionId, maker, payout);
             processed++;
         }
