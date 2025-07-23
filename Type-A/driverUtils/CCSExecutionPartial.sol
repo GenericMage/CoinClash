@@ -2,6 +2,7 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
+ - 2025-07-23: Added liquidation price updates in _executePositions for all relevant positions before processing, ensuring accurate liquidation checks. Incremented version to 0.0.10.
  - 2025-07-20: Fixed _createOrderForPosition to approve orderRouter for margin transfer using IERC20.approve instead of direct transfer, then call createBuyOrder/createSellOrder, incremented version to 0.0.9.
  - 2025-07-20: Fixed TypeError by adding makerTokenMargin to ICSStorage interface, corrected ParserError in priceParams2 function declaration, removed incorrect CCOrderRouter.sol import, incremented version to 0.0.8.
  - 2025-07-20: Added orderRouter state variable, setOrderRouter, getOrderRouter, and helper functions (_createOrderForPosition, _updateExcessTokens) to integrate order creation via CCOrderRouter during position activation, updated _processPendingPosition to use these helpers, incremented version to 0.0.7.
@@ -590,7 +591,7 @@ contract CCSExecutionPartial is Ownable {
         ICSStorage.PriceParams1 memory price1 = storageContract.priceParams1(positionId);
         ICSStorage.PriceParams2 memory price2 = storageContract.priceParams2(positionId);
         ICSStorage.MarginParams1 memory margin1 = storageContract.marginParams1(positionId);
-        _updateLiquidationPrices(positionId, core1.makerAddress, positionType, listingAddress);
+        _updateLiquidationPrices(positionId, core1.makerAddress, positionType, listingAddress); // Updates liquidation price before processing
         price2 = storageContract.priceParams2(positionId);
         bool shouldLiquidate = positionType == 0 ? currentPrice <= price2.liquidationPrice : currentPrice >= price2.liquidationPrice;
         if (shouldLiquidate) {
@@ -618,7 +619,7 @@ contract CCSExecutionPartial is Ownable {
         address listingAddress,
         uint256 currentPrice
     ) internal returns (bool shouldClose, uint256 payout) {
-        _updateLiquidationPrices(positionId, storageContract.positionCore1(positionId).makerAddress, positionType, listingAddress);
+        _updateLiquidationPrices(positionId, storageContract.positionCore1(positionId).makerAddress, positionType, listingAddress); // Updates liquidation price before checking
         ICSStorage.PriceParams2 memory price2 = storageContract.priceParams2(positionId);
         ICSStorage.ExitParams memory exit = storageContract.exitParams(positionId);
         bool shouldLiquidate = positionType == 0 ? currentPrice <= price2.liquidationPrice : currentPrice >= price2.liquidationPrice;
