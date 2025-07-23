@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2
+// Version: 0.0.3
 // Changes:
+// - v0.0.3: Modified _verifyAndSetUniswapV2Pair to recognize WETH in Uniswap V2 pair for native ETH listings while storing address(0) for native ETH.
 // - v0.0.2: Added IUniswapV2Pair interface for token verification.
 // - v0.0.2: Added _verifyAndSetUniswapV2Pair helper to verify tokenA/tokenB against Uniswap V2 pair and set pair address.
 // - v0.0.2: Modified _initializeListing to call _verifyAndSetUniswapV2Pair.
@@ -49,6 +50,11 @@ interface IUniswapV2Pair {
     function token1() external view returns (address);
 }
 
+interface IWETH {
+    function deposit() external payable;
+    function withdraw(uint256 wad) external;
+}
+
 contract CCAgent is Ownable {
     using SafeERC20 for IERC20;
 
@@ -57,6 +63,7 @@ contract CCAgent is Ownable {
     address public liquidityLogicAddress; // CCLiquidityLogic contract address
     address public registryAddress; // Registry contract address
     uint256 public listingCount; // Counter for total listings created
+    address public wethAddress; // WETH contract address
 
     mapping(address => mapping(address => address)) public getListing; // tokenA => tokenB => listing address
     address[] public allListings; // Array of all listing addresses
@@ -116,6 +123,14 @@ contract CCAgent is Ownable {
     event GlobalOrderChanged(uint256 listingId, address tokenA, address tokenB, uint256 orderId, bool isBuy, address maker, uint256 amount, uint8 status);
     event RouterAdded(address indexed router); // Emitted when a router is added
     event RouterRemoved(address indexed router); // Emitted when a router is removed
+    event WETHAddressSet(address indexed weth); // Emitted when WETH address is set
+
+    // Sets WETH contract address, restricted to owner
+    function setWETHAddress(address _wethAddress) external onlyOwner {
+        require(_wethAddress != address(0), "Invalid WETH address");
+        wethAddress = _wethAddress;
+        emit WETHAddressSet(_wethAddress); // Emit event for WETH address setting
+    }
 
     // Checks if a token exists in allListedTokens
     function tokenExists(address token) internal view returns (bool) {
@@ -137,12 +152,16 @@ contract CCAgent is Ownable {
         return false;
     }
 
-    // Verifies tokenA and tokenB match Uniswap V2 pair tokens and sets the pair address
+    // Verifies tokenA and tokenB match Uniswap V2 pair tokens, handling WETH for native ETH, and sets the pair address
     function _verifyAndSetUniswapV2Pair(address listingAddress, address tokenA, address tokenB, address uniswapV2Pair) internal {
         require(uniswapV2Pair != address(0), "Invalid Uniswap V2 pair address");
+        require(wethAddress != address(0), "WETH address not set");
         address pairToken0 = IUniswapV2Pair(uniswapV2Pair).token0();
         address pairToken1 = IUniswapV2Pair(uniswapV2Pair).token1();
-        bool isTokenAMatch = (tokenA == pairToken0 && tokenB == pairToken1) || (tokenA == pairToken1 && tokenB == pairToken0);
+        // Replace address(0) with wethAddress for verification if tokenA or tokenB is native ETH
+        address verifyTokenA = tokenA == address(0) ? wethAddress : tokenA;
+        address verifyTokenB = tokenB == address(0) ? wethAddress : tokenB;
+        bool isTokenAMatch = (verifyTokenA == pairToken0 && verifyTokenB == pairToken1) || (verifyTokenA == pairToken1 && verifyTokenB == pairToken0);
         require(isTokenAMatch, "Tokens do not match Uniswap V2 pair");
         ICCListingTemplate(listingAddress).setUniswapV2Pair(uniswapV2Pair); // Set Uniswap V2 pair address
     }
