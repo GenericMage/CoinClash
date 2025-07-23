@@ -1,5 +1,5 @@
 # Cross Chain Contracts Documentation
-The System comprises of CCAgent, CCListingLogic, SSLiquidityLogic, CCListingTemplate, SSLiquidityTemplate, SSRouter, SSCrossDriver, and SSIsolatedDriver.
+The System comprises of CCAgent, CCListingLogic, SSLiquidityLogic, CCListingTemplate, SSLiquidityTemplate, CCOrderRouter, CCSettlementRouter CCLiquidityRouter, CSStorage, CCSPositionDriver, CCSExecutionDriver, SIStorage, CISPositionDriver and CISExecutionDriver. 
 
 Together they form an AMM Orderbook Hybrid for leverage trading on the EVM.
 
@@ -44,7 +44,7 @@ The listing logic inherits CCListingTemplate and is used by the CCAgent to deplo
   - `address`: Address of the newly deployed CCListingTemplate contract.
 
 ## CCAgent Contract
-The agent manages token listings and global data, enables the creation of unique listings and liquidities for token pairs, verifies Uniswap V2 pair tokens, and arbitrates valid listings, templates, and routers.
+The agent manages token listings and global data, enables the creation of unique listings and liquidities for token pairs, verifies Uniswap V2 pair tokens (handling WETH for native ETH), and arbitrates valid listings, templates, and routers.
 
 ### Structs
 - **GlobalOrder**: Stores order details for a token pair.
@@ -98,6 +98,7 @@ The agent manages token listings and global data, enables the creation of unique
 - `liquidityLogicAddress` (address): Address of the SSLiquidityLogic contract, set post-deployment.
 - `registryAddress` (address): Address of the registry contract, set post-deployment.
 - `listingCount` (uint256): Counter for the number of listings created, incremented per listing.
+- `wethAddress` (address): Address of the WETH contract, set post-deployment via setWETHAddress.
 
 ### Functions
 
@@ -144,6 +145,14 @@ The agent manages token listings and global data, enables the creation of unique
     - Requires non-zero address.
     - Updates registryAddress state variable.
     - Restricted to owner via onlyOwner modifier.
+- **setWETHAddress**
+  - **Parameters:**
+    - `_wethAddress` (address): Address to set as the WETH contract.
+  - **Actions:**
+    - Requires non-zero address.
+    - Updates wethAddress state variable.
+    - Emits WETHAddressSet event.
+    - Restricted to owner via onlyOwner modifier.
 
 #### Listing Functions
 - **listToken**
@@ -174,7 +183,7 @@ The agent manages token listings and global data, enables the creation of unique
     - Checks tokens are not identical and pair isn’t already listed.
     - Verifies at least one router, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
     - Calls _deployPair to create listing and liquidity contracts.
-    - Calls _initializeListing to set up listing contract with routers array, listing ID, liquidity address, tokens, agent, registry, and verifies tokenA/tokenB against uniswapV2Pair tokens, then sets uniswapV2Pair.
+    - Calls _initializeListing to set up listing contract with routers array, listing ID, liquidity address, tokens, agent, registry, and verifies tokenA/tokenB against uniswapV2Pair tokens (replacing address(0) with wethAddress for verification), then sets uniswapV2Pair.
     - Calls _initializeLiquidity to set up liquidity contract with routers array, listing ID, listing address, tokens, and agent.
     - Calls _updateState to update mappings and arrays.
     - Emits ListingCreated event.
