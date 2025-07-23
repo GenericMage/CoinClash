@@ -1,13 +1,13 @@
 # CCSExecutionDriver Contract Documentation
 
 ## Overview
-The `CCSExecutionDriver` contract, implemented in Solidity (^0.8.2), manages trading positions for long and short cross margin strategies, inheriting functionality from `CCSExecutionPartial` while integrating with external interfaces (`ISSListing`, `ISSLiquidityTemplate`, `ISSAgent`, `ICSStorage`, `ICCOrderRouter`) for position execution, margin management, and state updates. It uses `IERC20` for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The suite handles position closure, cancellation, margin adjustments, stop-loss/take-profit updates, and hyx-driven operations, with gas optimization and safety mechanisms. State variables are hidden, accessed via view functions, and decimal precision is maintained across tokens. All transfers to or from the listing correctly call the `ISSListing.update` function to reflect changes, as seen in `_transferMarginToListing` and `_updateListingMargin`. The suite supports immediate execution of market orders when `minEntryPrice` and `maxEntryPrice` are zero, aligning with `SSCrossDriver` behavior but using `ICSStorage` for state management. 
+The `CCSExecutionDriver` contract, implemented in Solidity (^0.8.2), manages trading positions for long and short cross margin strategies, inheriting functionality from `CCSExecutionPartial` while integrating with external interfaces (`ISSListing`, `ISSLiquidityTemplate`, `ISSAgent`, `ICSStorage`, `ICCOrderRouter`) for position execution, margin management, and state updates. It uses `IERC20` for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The suite handles position closure, cancellation, margin adjustments, stop-loss/take-profit updates, and hyx-driven operations, with gas optimization and safety mechanisms. State variables are hidden, accessed via view functions, and decimal precision is maintained across tokens. All transfers to or from the listing correctly call the `ISSListing.update` function to reflect changes, as seen in `_transferMarginToListing` and `_updateListingMargin`. The suite supports immediate execution of market orders when `minEntryPrice` and `maxEntryPrice` are zero, aligning with `SSCrossDriver` behavior but using `ICSStorage` for state management. The `pullMargin` function restricts withdrawals to scenarios with no open or pending positions, optimizing gas by removing redundant `_updatePositionLiquidationPrices` calls.
 
 **Inheritance Tree:** `CCSExecutionDriver` → `CCSExecutionPartial` → `ReentrancyGuard`, `Ownable`
 
 **SPDX License:** BSL-1.1 - Peng Protocol 2025
 
-**Version:** 0.0.9 (last updated 2025-07-20)
+**Version:** 0.0.10 (last updated 2025-07-23)
 
 ## State Variables
 - **DECIMAL_PRECISION** (uint256, constant, public): Set to 1e18 for normalizing amounts and prices across token decimals (defined in `CCSExecutionPartial`).
@@ -85,12 +85,12 @@ Formulas align with `SSCrossDriver` specifications, adapted for `ICSStorage` upd
 
 8. **Payout (Long)**:
    - **Formula**: `payout = baseValue > initialLoan ? baseValue - initialLoan : 0`, where `baseValue = (taxedMargin + totalMargin + leverageAmount) / currentPrice`
-   - **Used in**: `_computePayoutLong`, `prepCloseLong`.
+   - **Used in**: `_computePayoutLong`, `_prepCloseLong`.
    - **Description**: Payout for long position closure in tokenB, normalized.
 
 9. **Payout (Short)**:
    - **Formula**: `payout = profit + (taxedMargin + totalMargin) * currentPrice / DECIMAL_PRECISION`, where `profit = (priceAtEntry - currentPrice) * initialMargin * leverage`
-   - **Used in**: `_computePayoutShort`, `prepCloseShort`.
+   - **Used in**: `_computePayoutShort`, `_prepCloseShort`.
    - **Description**: Payout for short position closure in tokenA, normalized.
 
 ## External Functions
@@ -163,20 +163,20 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
   - `tokenA` (bool): True for tokenA, false for tokenB.
   - `amount` (uint256): Margin to add (denormalized).
   - `maker` (address): Margin owner.
-- **Behavior**: Adds margin to `maker`’s balance, transfers to `listingAddress`, updates liquidation prices, and records interest. No event emitted.
+- **Behavior**: Adds margin to `maker`’s balance, transfers to `listingAddress`, updates liquidation prices for all relevant positions, and records interest. No event emitted.
 - **Internal Call Flow**:
   - Validates inputs (`amount > 0`, `maker`, `listingAddress` non-zero).
   - Calls `ISSAgent.isValidListing` (input: `listingAddress`, returns: `isValid`).
   - Selects token via `ISSListing.tokenA` or `tokenB`.
   - `_transferMarginToListing` transfers `amount` to `listingAddress` using `IERC20.transferFrom` (input: `address(this)`, `listingAddress`, `amount`, returns: `bool success`), with pre/post balance checks, followed by `_updateListingMargin` calling `ISSListing.update` (input: `UpdateType[]`, returns: none).
   - `_updateMakerMargin` updates `makerTokenMargin`, `makerMarginTokens`.
-  - `_updatePositionLiquidationPrices` iterates `positionCount`, updating `priceParams2.liquidationPrice` using `_computeLoanAndLiquidationLong` or `_computeLoanAndLiquidationShort`.
+  - `_updatePositionLiquidationPrices` iterates `positionCount`, updating `priceParams2.liquidationPrice` for all positions of `maker` with matching `positionToken` and `listingAddress` using `_computeLoanAndLiquidationLong` or `_computeLoanAndLiquidationShort`.
   - `_updateHistoricalInterest` updates `longIOByHeight` (positionType = 0).
 - **Balance Checks**:
   - **Pre-Balance Check**: `IERC20.balanceOf(listingAddress)` before transfer.
   - **Post-Balance Check**: `balanceAfter - balanceBefore == amount`.
 - **Mappings/Structs Used**:
-  - **Mappings**: `makerTokenMargin`, `makerMarginTokens`, `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `longIOByHeight`.
+  - **Mappings**: `makerTokenMargin`, `makerMarginTokens`, `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `longIOByHeight`, `positionToken`.
   - **Structs**: `PositionCore1`, `PositionCore2`, `PriceParams1`, `PriceParams2`.
 - **Restrictions**: `nonReentrant`, reverts if `amount == 0`, `maker` or `listingAddress` is zero, listing is invalid, or transfer fails.
 - **Gas Usage Controls**: Single transfer, pop-and-swap, full iteration for liquidation prices.
@@ -187,10 +187,10 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
   - `listingAddress` (address): Listing contract address.
   - `tokenA` (bool): True for tokenA, false for tokenB.
   - `amount` (uint256): Margin to withdraw (denormalized).
-- **Behavior**: Withdraws margin from `msg.sender`’s balance, updates liquidation prices, transfers to `msg.sender`, records interest.
+- **Behavior**: Withdraws margin from `msg.sender`’s balance if no open or pending positions exist for the specified token and listing, transfers to `msg.sender`, records interest. No liquidation price update is performed, as the restriction ensures no relevant positions exist.
 - **Internal Call Flow**:
   - `_validateAndNormalizePullMargin` validates inputs, checks listing, normalizes `amount`, ensures `normalizedAmount <= makerTokenMargin`.
-  - `_updatePositionLiquidationPrices` updates `priceParams2.liquidationPrice`.
+  - Iterates `positionCount` to ensure no open or pending positions (`status2 == 0`) exist for `msg.sender` with matching `positionToken` and `listingAddress`, reverting if any are found (`"Cannot pull margin with open positions"`).
   - `_reduceMakerMargin` deducts `normalizedAmount` from `makerTokenMargin`, calls `removeToken` if zero.
   - `_executeMarginPayout` calls `ISSListing.ssUpdate` (input: `PayoutUpdate[]`, returns: none) to transfer `amount` to `msg.sender`.
   - `_updateHistoricalInterest` updates `shortIOByHeight` (positionType = 1).
@@ -198,10 +198,10 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
   - **Pre-Balance Check**: `normalizedAmount <= makerTokenMargin[msg.sender][token]`.
   - **Post-Balance Check**: None, handled by `ISSListing`.
 - **Mappings/Structs Used**:
-  - **Mappings**: `makerTokenMargin`, `makerMarginTokens`, `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `shortIOByHeight`.
-  - **Structs**: `PositionCore1`, `PositionCore2`, `PriceParams1`, `PriceParams2`.
-- **Restrictions**: `nonReentrant`, reverts if `amount == 0`, listing is invalid, or margin is insufficient.
-- **Gas Usage Controls**: Minimal updates, pop-and-swap, full iteration for liquidation prices.
+  - **Mappings**: `makerTokenMargin`, `makerMarginTokens`, `positionCore1`, `positionCore2`, `positionToken`, `shortIOByHeight`.
+  - **Structs**: `PositionCore1`, `PositionCore2`.
+- **Restrictions**: `nonReentrant`, reverts if `amount == 0`, listing is invalid, margin is insufficient, or open/pending positions exist for the token and listing.
+- **Gas Usage Controls**: Minimal updates, pop-and-swap, full iteration for position check.
 
 ### updateSL(uint256 positionId, uint256 newStopLossPrice)
 - **Contract**: `CCSExecutionDriver`
@@ -236,24 +236,69 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
 - **Restrictions**: `nonReentrant`, reverts if position is invalid, closed, not owned, or `newTakeProfitPrice` is invalid.
 - **Gas Usage Controls**: Minimal gas, single `CSUpdate`.
 
+### closeLongPosition(uint256 positionId)
+- **Contract**: `CCSExecutionDriver`
+- **Parameters**:
+  - `positionId` (uint256): Position ID to close.
+- **Behavior**: Closes a single active long position, pays out in tokenB, updates liquidation prices for remaining positions, emits `PositionClosed`.
+- **Internal Call Flow**:
+  - Validates position in `positionCore1`, active (`status1 == true`), not closed (`status2 == 0`), owned by `msg.sender`.
+  - Calls `_prepCloseLong`:
+    - `_computePayoutLong` calculates payout in tokenB.
+    - Updates `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin` via `CSUpdate`.
+  - Calls `removePositionIndex` to update `positionsByType` and `pendingPositions`.
+  - Calls `_updatePositionLiquidationPrices` to update `priceParams2.liquidationPrice` for remaining positions of `msg.sender` with matching `positionToken` (tokenA) and `listingAddress`.
+  - Calls `ISSListing.ssUpdate` (input: `PayoutUpdate[]`, returns: none) for tokenB payout to `msg.sender`.
+- **Balance Checks**:
+  - **Pre-Balance Check**: `makerTokenMargin[maker][tokenA] >= taxedMargin + excessMargin`.
+  - **Post-Balance Check**: None, handled by `ISSListing`.
+- **Mappings/Structs Used**:
+  - **Mappings**: `positionCore1`, `positionCore2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin`, `makerMarginTokens`, `positionToken`, `positionsByType`, `pendingPositions`, `priceParams1`, `priceParams2`.
+  - **Structs**: `PositionCore1`, `PositionCore2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`, `PriceParams1`, `PriceParams2`.
+- **Restrictions**: `nonReentrant`, reverts if position is invalid, closed, not active, or not owned.
+- **Gas Usage Controls**: Minimal gas, single position processing, full iteration for liquidation prices.
+
+### closeShortPosition(uint256 positionId)
+- **Contract**: `CCSExecutionDriver`
+- **Parameters**:
+  - `positionId` (uint256): Position ID to close.
+- **Behavior**: Closes a single active short position, pays out in tokenA, updates liquidation prices for remaining positions, emits `PositionClosed`.
+- **Internal Call Flow**:
+  - Validates position in `positionCore1`, active (`status1 == true`), not closed (`status2 == 0`), owned by `msg.sender`.
+  - Calls `_prepCloseShort`:
+    - `_computePayoutShort` calculates payout in tokenA.
+    - Updates `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin` via `CSUpdate`.
+  - Calls `removePositionIndex` to update `positionsByType` and `pendingPositions`.
+  - Calls `_updatePositionLiquidationPrices` to update `priceParams2.liquidationPrice` for remaining positions of `msg.sender` with matching `positionToken` (tokenB) and `listingAddress`.
+  - Calls `ISSListing.ssUpdate` (input: `PayoutUpdate[]`, returns: none) for tokenA payout to `msg.sender`.
+- **Balance Checks**:
+  - **Pre-Balance Check**: `makerTokenMargin[maker][tokenB] >= taxedMargin + excessMargin`.
+  - **Post-Balance Check**: None, handled by `ISSListing`.
+- **Mappings/Structs Used**:
+  - **Mappings**: `positionCore1`, `positionCore2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin`, `makerMarginTokens`, `positionToken`, `positionsByType`, `pendingPositions`, `priceParams1`, `priceParams2`.
+  - **Structs**: `PositionCore1`, `PositionCore2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`, `PriceParams1`, `PriceParams2`.
+- **Restrictions**: `nonReentrant`, reverts if position is invalid, closed, not active, or not owned.
+- **Gas Usage Controls**: Minimal gas, single position processing, full iteration for liquidation prices.
+
 ### closeAllLongs(uint256 maxIterations)
 - **Contract**: `CCSExecutionDriver`
 - **Parameters**:
   - `maxIterations` (uint256): Maximum positions to process.
-- **Behavior**: Closes all active long positions for `msg.sender`, pays out in tokenB, emits `AllLongsClosed` and `PositionClosed` per position.
+- **Behavior**: Closes all active long positions for `msg.sender`, pays out in tokenB, updates liquidation prices for remaining positions, emits `AllLongsClosed` and `PositionClosed` per position.
 - **Internal Call Flow**:
   - Iterates `positionCount` up to `maxIterations`, processing long, active, non-closed positions owned by `msg.sender`.
   - Calls `_prepCloseLong`:
     - `_computePayoutLong` calculates payout in tokenB.
     - Updates `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin` via `CSUpdate`.
   - Calls `removePositionIndex` to update `positionsByType` and `pendingPositions`.
+  - Calls `_updatePositionLiquidationPrices` to update `priceParams2.liquidationPrice` for remaining positions of `msg.sender` with matching `positionToken` (tokenA) and `listingAddress`.
   - Calls `ISSListing.ssUpdate` (input: `PayoutUpdate[]`, returns: none) for tokenB payout to `msg.sender`.
 - **Balance Checks**:
   - **Pre-Balance Check**: `makerTokenMargin[maker][tokenA] >= taxedMargin + excessMargin`.
   - **Post-Balance Check**: None, handled by `ISSListing`.
 - **Mappings/Structs Used**:
-  - **Mappings**: `positionCore1`, `positionCore2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin`, `makerMarginTokens`, `positionToken`, `positionsByType`, `pendingPositions`.
-  - **Structs**: `PositionCore1`, `PositionCore2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`.
+  - **Mappings**: `positionCore1`, `positionCore2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin`, `makerMarginTokens`, `positionToken`, `positionsByType`, `pendingPositions`, `priceParams1`, `priceParams2`.
+  - **Structs**: `PositionCore1`, `PositionCore2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`, `PriceParams1`, `PriceParams2`.
 - **Restrictions**: `nonReentrant`, skips non-matching positions.
 - **Gas Usage Controls**: `maxIterations`, `gasleft() >= 50000`, pop-and-swap.
 
@@ -281,20 +326,21 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
 - **Contract**: `CCSExecutionDriver`
 - **Parameters**:
   - `maxIterations` (uint256): Maximum positions to process.
-- **Behavior**: Closes all active short positions for `msg.sender`, pays out in tokenA, emits `AllShortsClosed` and `PositionClosed` per position.
+- **Behavior**: Closes all active short positions for `msg.sender`, pays out in tokenA, updates liquidation prices for remaining positions, emits `AllShortsClosed` and `PositionClosed` per position.
 - **Internal Call Flow**:
   - Iterates `positionCount` up to `maxIterations`, processing short, active, non-closed positions owned by `msg.sender`.
   - Calls `_prepCloseShort`:
     - `_computePayoutShort` calculates payout in tokenA.
     - Updates `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin` via `CSUpdate`.
   - Calls `removePositionIndex` to update `positionsByType` and `pendingPositions`.
+  - Calls `_updatePositionLiquidationPrices` to update `priceParams2.liquidationPrice` for remaining positions of `msg.sender` with matching `positionToken` (tokenB) and `listingAddress`.
   - Calls `ISSListing.ssUpdate` (input: `PayoutUpdate[]`, returns: none) for tokenA payout to `msg.sender`, using `core1.listingAddress` for correct listing interaction.
 - **Balance Checks**:
   - **Pre-Balance Check**: `makerTokenMargin[maker][tokenB] >= taxedMargin + excessMargin`.
   - **Post-Balance Check**: None, handled by `ISSListing`.
 - **Mappings/Structs Used**:
-  - **Mappings**: `positionCore1`, `positionCore2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin`, `makerMarginTokens`, `positionToken`, `positionsByType`, `pendingPositions`.
-  - **Structs**: `PositionCore1`, `PositionCore2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`.
+  - **Mappings**: `positionCore1`, `positionCore2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `makerTokenMargin`, `makerMarginTokens`, `positionToken`, `positionsByType`, `pendingPositions`, `priceParams1`, `priceParams2`.
+  - **Structs**: `PositionCore1`, `PositionCore2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`, `PriceParams1`, `PriceParams2`.
 - **Restrictions**: `nonReentrant`, skips non-matching positions.
 - **Gas Usage Controls**: `maxIterations`, `gasleft() >= 50000`, pop-and-swap.
 
@@ -338,19 +384,19 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
 - **Gas Usage Controls**: Minimal gas, single position processing.
 
 ### executePositions(address listingAddress, uint256 maxIterations)
+- **Contract**: `CCSExecutionDriver`
 - **Parameters**:
   - `listingAddress` (address): The address of the listing contract managing the token pair.
   - `maxIterations` (uint256): The maximum number of positions to process in a single transaction to control gas usage.
-- **Behavior**: Iterates through pending and active positions for both long and short types, activating pending positions within price ranges or closing positions due to liquidation, stop-loss, or take-profit triggers, with payouts issued in tokenB for long positions and tokenA for short positions.
+- **Behavior**: Iterates through pending and active positions for both long and short types, updating liquidation prices for all relevant positions before processing, activating pending positions within price ranges or closing positions due to liquidation, stop-loss, or take-profit triggers, with payouts issued in tokenB for long positions and tokenA for short positions.
 - **Internal Call Flow**:
   - Calls `_executePositions` (defined in `CCSExecutionPartial`):
     - **Validation**: Ensures `listingAddress` is non-zero, reverting with `"Invalid listing address"` if not.
     - **Iteration**: Processes long (positionType = 0) and short (positionType = 1) positions in two phases:
-    - **Pending Positions**:
-      - Retrieves position IDs from `pendingPositions[listingAddress][positionType]`.
+      - **Pending Positions**:
+       - Retrieves position IDs from `pendingPositions[listingAddress][positionType]`.
        - For each position (up to `maxIterations` and `gasleft() >= 50000`):
        - Calls `_processPendingPosition`:
-     
        - Updates `priceParams2.liquidationPrice` via `_updateLiquidationPrices`, computing liquidation prices using `_computeLoanAndLiquidationLong` or `_computeLoanAndLiquidationShort`.
        - Fetches current price via `_parseEntryPriceInternal` (calls `ISSListing.prices(listingAddress)`), normalizing with `normalizePrice` based on token decimals (tokenB for long, tokenA for short).
        - Checks for liquidation (long: `currentPrice <= liquidationPrice`; short: `currentPrice >= liquidationPrice`):
@@ -369,7 +415,7 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
        - Calls `_processActivePosition`:
        - Validates position (`positionCore1.listingAddress == listingAddress`, `status2 == 0`).
        - Calls `_prepareActivePositionCheck`:
-       - Updates `priceParams2.liquidationPrice` via `_updateLiquidationPrices`.
+       - Updates `priceParams2.liquidationPrice` via `_updateLiquidationPrices` for all relevant positions before checking.
        - Checks for liquidation, stop-loss (`stopLossPrice > 0 && (long: currentPrice <= stopLossPrice; short: currentPrice >= stopLossPrice)`), or take-profit (`takeProfitPrice > 0 && (long: currentPrice >= takeProfitPrice; short: currentPrice <= takeProfitPrice)`).
        - If triggered, calls `_prepCloseLong` or `_prepCloseShort` to compute payout and update state.
        - Calls `_executeActivePositionClose`:
@@ -403,7 +449,9 @@ Functions are implemented in `CCSExecutionDriver` unless specified, with interna
 - **Events**: `StopLossUpdated`, `TakeProfitUpdated`, `PositionClosed`, `AllLongsClosed`, `AllLongsCancelled`, `AllShortsClosed`, `AllShortsCancelled`, `HyxAdded`, `HyxRemoved`, `PositionCancelled`.
 - **Position Activation**: Pending positions are activated by approving `orderRouter` to spend margin and creating buy/sell orders, with market orders (zero `minEntryPrice` and `maxEntryPrice`) activating instantly if not liquidated.
 - **Payouts**: Long positions pay out in tokenB, short positions in tokenA, using `ISSListing.ssUpdate` to handle transfers to `positionCore1.makerAddress`.
-- **Safety**: Balance checks, explicit casting, no inline assembly, liquidation price updates.
+- **Safety**: Balance checks, explicit casting, no inline assembly, liquidation price updates in `addExcessMargin`, `closeLongPosition`, `closeShortPosition`, and `executePositions`.
 - **Hyx Functionality**: Replaces `mux` from `SSCrossDriver`, with `addHyx`, `removeHyx`, `getHyxes` for delegated operations. No equivalent to `drift` or `drive` yet, pending implementation.
 - **Listing Updates**: All transfers to/from listing call `ISSListing.update` via `_updateListingMargin`.
 - **Stack Optimization**: `_processActivePosition` split into `_prepareActivePositionCheck` and `_executeActivePositionClose`, and `cancelAllLongs`/`cancelAllShorts` split into `_prepareCancelPosition`, `_updatePositionParams`, `_updateMarginAndIndex`, `_executeCancelPosition` to address stack-too-deep errors, maintaining incremental `CSUpdate` usage.
+- **Liquidation Price Updates**: Added in version 0.0.10 to `addExcessMargin`, `closeLongPosition`, `closeShortPosition`, and `_executePositions` to ensure accurate liquidation checks for all relevant positions, iterating `positionCount` with matching `maker`, `positionToken`, and `listingAddress`.
+- **pullMargin Optimization**: Version 0.0.10 restricts withdrawals to cases with no open or pending positions, removing `_updatePositionLiquidationPrices` call for gas efficiency, as no positions exist to update. Including the call is safe but redundant, incurring unnecessary gas costs.
