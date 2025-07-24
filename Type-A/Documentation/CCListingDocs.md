@@ -1,11 +1,11 @@
-# CCListingTemplate Specifications
+# CCListingTemplate Documentation 
 
 ## Overview
 The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentralized trading platform component that manages buy/sell orders, payouts, and volume balances, integrating with Uniswap V2 for price derivation. It inherits `ReentrancyGuard` for security and uses `SafeERC20` for token operations, interfacing with `ISSAgent`, `ITokenRegistry`, and `IUniswapV2Pair` for global updates, synchronization, and reserve fetching. State variables are private, accessed via view functions with unique names, and amounts are normalized to 1e18 for precision across token decimals. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.2 (Updated 2025-07-14)
+**Version**: 0.0.3 (Updated 2025-07-24)
 
 ### State Variables
 - **`routersSet`**: `bool public` - Tracks if routers are set, prevents re-setting.
@@ -22,7 +22,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **`nextOrderId`**: `uint256 public` - Next available order ID for payouts/orders.
 - **`lastDayFee`**: `LastDayFee public` - Stores `xFees`, `yFees`, and `timestamp` for daily fee tracking.
 - **`volumeBalance`**: `VolumeBalance public` - Stores `xBalance`, `yBalance`, `xVolume`, `yVolume`.
-- **`price`**: `uint256 public` - Current price, derived from Uniswap V2 pair reserves as `(normalizedReserveX * 1e18) / normalizedReserveY`.
+- **`price`**: `uint256 public` - Current price, derived from Uniswap V2 pair reserves as `(normalizedReserveX * 1e18) / normalizedReserveY`, updated in `update` and `transact`.
 - **`pendingBuyOrders`**: `uint256[] public` - Array of pending buy order IDs.
 - **`pendingSellOrders`**: `uint256[] public` - Array of pending sell order IDs.
 - **`longPayoutsByIndex`**: `uint256[] public` - Array of long payout order IDs.
@@ -422,3 +422,5 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - Hidden state variables (`tokenX`, `tokenY`, `decimalX`, `decimalY`, `uniswapV2Pair`, `uniswapV2PairSet`) accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
 - **Compatibility**: Aligned with `SSRouter` (v0.0.62), `SSAgent` (v0.0.2), `SSOrderPartial` (v0.0.18), `SSLiquidityTemplate` (v0.0.3), and Uniswap V2 for price derivation.
+- **Price vs Prices Clarification**: `price` is a state variable updated in `update` and `transact`, this makes the data a bit laggy. Wheres `prices` is a view function that computes price on-demand from Uniswap V2 reserves, using the same formula as `price`.
+  -  `prices` is better for external queries to avoid stale data. There are no conflicts, but `prices` ensures real-time accuracy for external calls.
