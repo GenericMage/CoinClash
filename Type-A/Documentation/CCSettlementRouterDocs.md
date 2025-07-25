@@ -1,28 +1,30 @@
 # CCSettlementRouter Contract Documentation
 
 ## Overview
-The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform, integrating with Uniswap V2 for order execution and SSliquidityTemplates for liquid settlement. It inherits functionality from `CCSettlementPartial`, which extends `CCUniPartial` and `CCMainPartial`, and integrates with external interfaces (`ISSListingTemplate`, `ISSLiquidityTemplate`, `IUniswapV2Pair`, `IUniswapV2Router02`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles order settlement (`settleBuyOrders`, `settleSellOrders`) via Uniswap V2 swaps and liquid settlement (`settleBuyLiquid`, `settleSellLiquid`) via SSliquidityTemplates, with robust gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation. All transfers to or from the listing correctly call `listingContract.update` after successful Uniswap V2 swaps or liquidity transfers, ensuring state consistency.
+The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform, integrating with Uniswap V2 for order execution and `ICCLiquidity` for liquid settlement. It inherits functionality from `CCSettlementPartial`, which extends `CCUniPartial` and `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `ICCLiquidity`, `IUniswapV2Pair`, `IUniswapV2Router02`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles order settlement (`settleBuyOrders`, `settleSellOrders`) via Uniswap V2 swaps and liquid settlement (`settleBuyLiquid`, `settleSellLiquid`) via `ICCLiquidity`, with robust gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation. All transfers to or from the listing correctly call `listingContract.update` after successful Uniswap V2 swaps or liquidity transfers, ensuring state consistency.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.2 (updated 2025-07-16)
+**Version:** 0.0.3 (updated 2025-07-25)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 ## Mappings
-- None defined directly in `CCSettlementRouter`. Relies on `ISSListingTemplate` view functions (e.g., `pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
+- None defined directly in `CCSettlementRouter`. Relies on `ICCListing` view functions (e.g., `pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
 
 ## Structs
-- **OrderContext**: Contains `listingContract` (ISSListingTemplate), `tokenIn` (address), `tokenOut` (address), `liquidityAddr` (address).
+- **OrderContext**: Contains `listingContract` (ICCListing), `tokenIn` (address), `tokenOut` (address), `liquidityAddr` (address).
 - **PrepOrderUpdateResult**: Contains `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized).
 - **MaxAmountInContext**: Contains `reserveIn` (uint256), `decimalsIn` (uint8), `normalizedReserveIn` (uint256), `currentPrice` (uint256).
-- **BuySwapContext**: Contains `listingContract` (ISSListingTemplate), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `tokenIn` (address), `tokenOut` (address), `decimalsIn` (uint8), `decimalsOut` (uint8), `denormAmountIn` (uint256), `denormAmountOutMin` (uint256), `price` (uint256), `expectedAmountOut` (uint256).
+- **BuySwapContext**: Contains `listingContract` (ICCListing), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `tokenIn` (address), `tokenOut` (address), `decimalsIn` (uint8), `decimalsOut` (uint8), `denormAmountIn` (uint256), `denormAmountOutMin` (uint256), `price` (uint256), `expectedAmountOut` (uint256).
 - **SellSwapContext**: Same as `BuySwapContext` for sell orders.
 - **SwapImpactContext**: Contains `reserveIn` (uint256), `reserveOut` (uint256), `decimalsIn` (uint8), `decimalsOut` (uint8), `normalizedReserveIn` (uint256), `normalizedReserveOut` (uint256), `amountInAfterFee` (uint256), `price` (uint256), `amountOut` (uint256).
 - **BuyOrderUpdateContext**: Contains `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized, tokenA for buy).
 - **SellOrderUpdateContext**: Same as `BuyOrderUpdateContext`, with `amountSent` (tokenB for sell).
 
 ## Formulas
+The formulas below govern Uniswap V2 swaps and price calculations, as implemented in `CCUniPartial.sol`. Note that simpler formulas like `principal / price = output` for buys and `principal * price = output` for sells are not compatible, as they assume a fixed price and ignore Uniswap V2's constant product formula, price impact, and 0.3% fee.
+
 1. **Price Impact**:
    - **Formula**: `price = (inputAmount * 1e18) / amountOut`
    - **Used in**: `_computeSwapImpact`, `_checkPricing`, `_prepareSwapData`, `_prepareSellSwapData`.
@@ -74,7 +76,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **Balance Checks**:
   - Pre/post balance checks in `_executeBuyETHSwap` and `_executeBuyTokenSwap` ensure `amountReceived > 0`.
 - **Mappings/Structs Used**:
-  - **Structs**: `BuySwapContext`, `BuyOrderUpdateContext`, `UpdateType`.
+  - **Structs**: `BuySwapContext`, `BuyOrderUpdateContext`, `ICCListing.UpdateType`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Skips orders with zero pending amount, invalid pricing, or failed swaps.
@@ -88,13 +90,13 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
   - Executes swap via `_executePartialSellSwap`, using `_executeSellETHSwap` (if `tokenOut == address(0)`) or `_executeSellTokenSwap`.
 - **Balance Checks**: Same as `settleBuyOrders`.
 - **Mappings/Structs Used**:
-  - **Structs**: `SellSwapContext`, `SellOrderUpdateContext`, `UpdateType`.
+  - **Structs**: `SellSwapContext`, `SellOrderUpdateContext`, `ICCListing.UpdateType`.
 - **Restrictions**: Same as `settleBuyOrders`.
 - **Gas Usage Controls**: Same as `settleBuyOrders`.
 
 ### settleBuyLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyOrders`.
-- **Behavior**: Settles buy orders with SSliquidityTemplate up to `maxIterations`, transferring tokenA to recipients, updating liquidity (tokenB), tracking `amountSent` (tokenA), and calling `listingContract.update` after successful transfers.
+- **Behavior**: Settles buy orders with `ICCLiquidity` up to `maxIterations`, transferring tokenA to recipients, updating liquidity (tokenB), tracking `amountSent` (tokenA), and calling `listingContract.update` after successful transfers.
 - **Internal Call Flow**:
   - Fetches `orderIdentifiers` via `pendingBuyOrdersView`.
   - Iterates up to `maxIterations`:
@@ -103,13 +105,13 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
       - Computes `amountOut` via `_prepareLiquidityTransaction`.
       - Transfers tokenA via `liquidityContract.transact`.
       - Updates liquidity (tokenB) via `_updateLiquidity`.
-      - Creates `UpdateType[]` via `_prepBuyLiquidUpdates` and `_createBuyOrderUpdates`.
+      - Creates `ICCListing.UpdateType[]` via `_prepBuyLiquidUpdates` and `_createBuyOrderUpdates`.
   - Collects updates in `tempUpdates`, resizes to `finalUpdates`, and applies via `listingContract.update`.
 - **Balance Checks**:
   - `_checkAndTransferPrincipal` ensures `amountSent > 0` and `amountReceived > 0` for principal transfer.
   - Pre/post balance checks in `_prepBuyOrderUpdate` and `_prepBuyLiquidUpdates` for tokenA transfer.
 - **Mappings/Structs Used**:
-  - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `BuyOrderUpdateContext`, `UpdateType`.
+  - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `BuyOrderUpdateContext`, `ICCListing.UpdateType`.
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Requires router registration in `liquidityContract.routers(address(this))`.
@@ -118,24 +120,24 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ### settleSellLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyOrders`.
-- **Behavior**: Settles sell orders with SSliquidityTemplate up to `maxIterations`, transferring tokenB to recipients, updating liquidity (tokenA), tracking `amountSent` (tokenB), and calling `listingContract.update` after successful transfers.
+- **Behavior**: Settles sell orders with `ICCLiquidity` up to `maxIterations`, transferring tokenB to recipients, updating liquidity (tokenA), tracking `amountSent` (tokenB), and calling `listingContract.update` after successful transfers.
 - **Internal Call Flow**:
   - Similar to `settleBuyLiquid`, using `pendingSellOrdersView` and `executeSingleSellLiquid`.
   - Updates liquidity (tokenA) via `_updateLiquidity`.
-  - Creates `UpdateType[]` via `_prepSellLiquidUpdates` and `_createSellOrderUpdates`.
+  - Creates `ICCListing.UpdateType[]` via `_prepSellLiquidUpdates` and `_createSellOrderUpdates`.
 - **Balance Checks**: Same as `settleBuyLiquid`.
 - **Mappings/Structs Used**:
-  - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `SellOrderUpdateContext`, `UpdateType`.
+  - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `SellOrderUpdateContext`, `ICCListing.UpdateType`.
 - **Restrictions**: Same as `settleBuyLiquid`.
 - **Gas Usage Controls**: Same as `settleBuyLiquid`.
 
 ### setAgent(address newAgent)
 - **Parameters**:
-  - `newAgent` (address): New ISSAgent address.
+  - `newAgent` (address): New ICCAgent address.
 - **Behavior**: Updates `agent` state variable for listing validation, inherited from `CCMainPartial`.
 - **Internal Call Flow**: Direct state update, validates `newAgent` is non-zero.
 - **Mappings/Structs Used**:
-  - **agent** (state variable): Stores ISSAgent address.
+  - **agent** (state variable): Stores ICCAgent address.
 - **Restrictions**:
   - Restricted to `onlyOwner`.
   - Reverts if `newAgent` is zero (`"Invalid agent address"`).
@@ -146,7 +148,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
   - `newRouter` (address): New Uniswap V2 router address.
 - **Behavior**: Updates `uniswapV2Router` state variable for swap operations, inherited from `CCMainPartial`.
 - **Internal Call Flow**: Direct state update, validates `newRouter` is non-zero.
-- **Mappings/ entrepreneStructs Used**:
+- **Mappings/Structs Used**:
   - **uniswapV2Router** (state variable): Stores Uniswap V2 router address.
 - **Restrictions**:
   - Restricted to `onlyOwner`.
@@ -160,8 +162,8 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **Price Validation**: `_checkPricing` uses `_computeSwapImpact` to ensure swap price stays within `maxPrice` and `minPrice`, accounting for 0.3% Uniswap V2 fee.
 - **Path Construction**: Swap paths are constructed with `tokenIn` and `tokenOut` based on order type, ensuring correct token pair ordering per Uniswap V2 pair (`token0`, `token1`).
 
-### SSliquidityTemplate Integration
-- **Liquid Settlement Process**: `settleBuyLiquid` and `settleSellLiquid` transfer principal from listing to SSliquidityTemplate (`_checkAndTransferPrincipal`), update liquidity (`_updateLiquidity`), transfer output tokens to recipients, and call `listingContract.update` after successful transfers.
+### ICCLiquidity Integration
+- **Liquid Settlement Process**: `settleBuyLiquid` and `settleSellLiquid` transfer principal from listing to `ICCLiquidity` (`_checkAndTransferPrincipal`), update liquidity (`_updateLiquidity`), transfer output tokens to recipients, and call `listingContract.update` after successful transfers.
 - **Router Registration**: Functions interacting with `liquidityContract` require `routers(address(this))` to return true, ensuring only authorized routers can execute liquid settlements.
 - **Balance Checks**: `_checkAndTransferPrincipal` verifies principal transfer with pre/post balance checks, handling fee-on-transfer tokens and ETH.
 
@@ -179,21 +181,21 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **Max Iterations**: `maxIterations` limits loop iterations in all settlement functions, preventing gas limit issues.
 - **Dynamic Arrays**: `tempUpdates` is oversized (`iterationCount * 2`) and resized to `finalUpdates` to minimize gas while collecting updates.
 - **Helper Functions**: Complex logic is split into helpers (e.g., `_prepareSwapData`, `_executeBuyETHSwap`, `_computeSwapImpact`) to reduce stack depth and gas usage.
-- **Try-Catch**: External calls (transfers, swaps, liquidity updates) use try-catch to handle failures gracefully, returning empty `UpdateType[]` arrays.
+- **Try-Catch**: External calls (transfers, swaps, liquidity updates) use try-catch to handle failures gracefully, returning empty `ICCListing.UpdateType[]` arrays.
 
 ### Security Measures
 - **Reentrancy Protection**: All external functions use `nonReentrant` modifier.
-- **Listing Validation**: `onlyValidListing` ensures `listingAddress` is registered with `ISSAgent`.
+- **Listing Validation**: `onlyValidListing` ensures `listingAddress` is registered with `ICCAgent`.
 - **Safe Transfers**: `SafeERC20.safeTransferFrom` and `safeApprove` are used for token operations, handling non-standard ERC20 tokens.
 - **Balance Checks**: Pre/post balance checks in `_checkAndTransferPrincipal`, `_executeBuyETHSwap`, `_executeBuyTokenSwap`, `_executeSellETHSwap`, and `_executeSellTokenSwap` ensure transfer success.
 - **Router Validation**: Uniswap V2 router and pair addresses are validated as non-zero before use.
 
 ### Limitations and Assumptions
 - **No Order Creation/Cancellation**: Unlike `CCOrderRouter`, `CCSettlementRouter` does not handle order creation (`createBuyOrder`, `createSellOrder`) or cancellation (`clearSingleOrder`, `clearOrders`).
-- **No Payouts**: Long and short payout settlement (`settleLongPayouts`, `settleShortPayouts`, `settleLongLiquid`, `settleShortLiquid`) is not supported, is handled in `CCCLiquidityRouter`. 
+- **No Payouts**: Long and short payout settlement (`settleLongPayouts`, `settleShortPayouts`, `settleLongLiquid`, `settleShortLiquid`) is not supported, is handled in `CCCLiquidityRouter`.
 - **No Liquidity Management**: Functions like `deposit`, `withdraw`, `claimFees`, and `changeDepositor` are absent, as `CCSettlementRouter` focuses on settlement.
 - **Uniswap V2 Dependency**: Relies on a configured `uniswapV2Router` and valid `uniswapV2PairView` from `listingContract`.
-- **Zero-Amount Handling**: Zero pending amounts or failed swaps/liquid settlements return empty `UpdateType[]` arrays, ensuring no state changes for invalid operations.
+- **Zero-Amount Handling**: Zero pending amounts or failed swaps/liquid settlements return empty `ICCListing.UpdateType[]` arrays, ensuring no state changes for invalid operations.
 
 ### Differences from SSRouter
 - **Scope**: `CCSettlementRouter` focuses on market and liquid settlements, omitting order creation, cancellation, payouts, and liquidity management present in `SSRouter`.
@@ -205,14 +207,26 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **Decimal Handling**: Uses `normalize` and `denormalize` from `CCMainPartial` for 1e18 precision, with decimals fetched via `IERC20.decimals` or set to 18 for ETH.
 - **Reentrancy Protection**: All state-changing functions use `nonReentrant`.
 - **Gas Optimization**: Uses `maxIterations`, dynamic arrays, helper functions, and try-catch for efficient execution.
-- **Listing Validation**: `onlyValidListing` checks `ISSAgent.getListing` for listing integrity.
+- **Listing Validation**: `onlyValidListing` checks `ICCAgent.getListing` for listing integrity.
 - **Token Usage**:
   - Buy orders: Input tokenB, output tokenA, `amountSent` tracks tokenA.
   - Sell orders: Input tokenA, output tokenB, `amountSent` tracks tokenB.
 - **Events**: Relies on `listingContract` and `liquidityContract` events for logging.
 - **Safety**:
-  - Explicit casting for interfaces (e.g., `ISSListingTemplate`, `IUniswapV2Router02`).
+  - Explicit casting for interfaces (e.g., `ICCListing`, `IUniswapV2Router02`).
   - No inline assembly, using high-level Solidity.
   - Try-catch blocks for external calls (transfers, swaps, liquidity updates).
   - Hidden state variables (`agent`, `uniswapV2Router`) accessed via `agentView` and `uniswapV2RouterView`.
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
+- **Uniswap V2 Input Parameters**:
+  The contract correctly supplies all required parameters for Uniswap V2 swaps:
+  - **amountIn**: Set as `context.denormAmountIn`, denormalized from `amountIn` to match input token decimals (e.g., `denormalize(amountIn, decimalsIn)` in `_prepareSwapData`).
+  - **amountOutMin**: Set as `context.denormAmountOutMin`, calculated as `denormalize((amountIn * 1e18) / maxPrice, decimalsOut)`, ensuring slippage protection within order’s `maxPrice`.
+  - **path**: Array of `[tokenIn, tokenOut]`:
+    - Buy orders: `[tokenB, tokenA]` (from `_prepareSwapData`).
+    - Sell orders: `[tokenA, tokenB]` (from `_prepareSellSwapData`).
+  - **to**: Set to `context.recipientAddress`, retrieved from `getBuyOrderCore` or `getSellOrderCore`, ensuring output tokens reach the order’s recipient.
+  - **deadline**: Set to `block.timestamp + 300` (5 minutes), preventing stale transactions.
+  - **Token Approvals**: For token-to-token swaps, `IERC20(tokenIn).safeApprove(uniswapV2Router, denormAmountIn)` is called.
+  - **ETH Transfers**: For ETH swaps, `listingContract.transactNative{value: denormAmountIn}` sends ETH.
+  - **Validation**: Checks non-zero `uniswapV2Router` and `uniswapV2PairView`, valid pricing (`price` within `minPrice` and `maxPrice`), and non-zero reserves.
