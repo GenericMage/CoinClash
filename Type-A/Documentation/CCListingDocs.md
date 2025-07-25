@@ -1,11 +1,11 @@
-# CCListingTemplate Documentation 
+# CCListingTemplate Documentation
 
 ## Overview
 The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentralized trading platform component that manages buy/sell orders, payouts, and volume balances, integrating with Uniswap V2 for price derivation. It inherits `ReentrancyGuard` for security and uses `SafeERC20` for token operations, interfacing with `ISSAgent`, `ITokenRegistry`, and `IUniswapV2Pair` for global updates, synchronization, and reserve fetching. State variables are private, accessed via view functions with unique names, and amounts are normalized to 1e18 for precision across token decimals. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.3 (Updated 2025-07-24)
+**Version**: 0.0.3 (Updated 2025-07-25)
 
 ### State Variables
 - **`routersSet`**: `bool public` - Tracks if routers are set, prevents re-setting.
@@ -22,7 +22,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **`nextOrderId`**: `uint256 public` - Next available order ID for payouts/orders.
 - **`lastDayFee`**: `LastDayFee public` - Stores `xFees`, `yFees`, and `timestamp` for daily fee tracking.
 - **`volumeBalance`**: `VolumeBalance public` - Stores `xBalance`, `yBalance`, `xVolume`, `yVolume`.
-- **`price`**: `uint256 public` - Current price, derived from Uniswap V2 pair reserves as `(normalizedReserveX * 1e18) / normalizedReserveY`, updated in `update` and `transact`.
+- **`price`**: `uint256 public` - Current price, derived from Uniswap V2 pair reserves as `(normalizedReserveX * 1e18) / normalizedReserveY`, updated in `update`, `transactToken`, and `transactNative`.
 - **`pendingBuyOrders`**: `uint256[] public` - Array of pending buy order IDs.
 - **`pendingSellOrders`**: `uint256[] public` - Array of pending sell order IDs.
 - **`longPayoutsByIndex`**: `uint256[] public` - Array of long payout order IDs.
@@ -122,7 +122,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 ### Formulas
 1. **Price Calculation**:
    - **Formula**: `price = (normalizedReserveX * 1e18) / normalizedReserveY`
-   - **Used in**: `update`, `transact`, `prices`
+   - **Used in**: `update`, `transactToken`, `transactNative`, `prices`
    - **Description**: Computes current price from Uniswap V2 pair reserves (`reserve0`, `reserve1`), normalized to 1e18 using `decimalX` and `decimalY`, used for order pricing and historical data.
 
 2. **Daily Yield**:
@@ -208,31 +208,50 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Internal Call Flow**:
   - Creates `LongPayoutStruct` (tokenY) or `ShortPayoutStruct` (tokenX), updates `longPayoutsByIndex`, `shortPayoutsByIndex`, `userPayoutIDs`.
   - Increments `nextOrderId`, emits `PayoutOrderCreated`.
-- **Balance Checks**: None, defers to `transact`.
+- **Balance Checks**: None, defers to `transactToken` or `transactNative`.
 - **Mappings/Structs Used**:
   - **Mappings**: `longPayouts`, `shortPayouts`, `longPayoutsByIndex`, `shortPayoutsByIndex`, `userPayoutIDs`.
   - **Structs**: `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`.
 - **Restrictions**: `nonReentrant`, requires `routers[caller]`.
 - **Gas Usage Controls**: Loop over `payoutUpdates`, dynamic arrays, minimal state writes.
 
-#### transact(address caller, address token, uint256 amount, address recipient)
+#### transactToken(address caller, address token, uint256 amount, address recipient)
 - **Parameters**:
   - `caller` - Router address.
-  - `token` - TokenX or tokenY.
+  - `token` - TokenX or tokenY (non-zero address).
   - `amount` - Denormalized amount.
   - `recipient` - Recipient address.
-- **Behavior**: Transfers tokens/ETH, updates balances, derives price from Uniswap V2 pair, and updates registry.
+- **Behavior**: Transfers ERC20 tokens, updates balances and volumes, derives price from Uniswap V2 pair, updates registry.
 - **Internal Call Flow**:
   - Normalizes `amount` using `decimalX` or `decimalY`.
   - Checks `xBalance` (tokenX) or `yBalance` (tokenY).
-  - Transfers via `SafeERC20.safeTransfer` or ETH call with try-catch.
+  - Transfers via `SafeERC20.safeTransfer`.
   - Updates `xVolume`/`yVolume`, `lastDayFee`, `price` from Uniswap V2 reserves.
   - Calls `_updateRegistry`, emits `BalancesUpdated`.
 - **Balance Checks**: Pre-transfer balance check for `xBalance` or `yBalance`.
 - **Mappings/Structs Used**:
   - **Mappings**: `volumeBalance`.
   - **Structs**: `VolumeBalance`.
-- **Restrictions**: `nonReentrant`, requires `routers[caller]`, valid token.
+- **Restrictions**: `nonReentrant`, requires `routers[caller]`, valid non-zero token.
+- **Gas Usage Controls**: Single transfer, minimal state updates, Uniswap V2 reserve call.
+
+#### transactNative(address caller, uint256 amount, address recipient)
+- **Parameters**:
+  - `caller` - Router address.
+  - `amount` - Denormalized amount (ETH).
+  - `recipient` - Recipient address.
+- **Behavior**: Transfers native ETH, updates balances and volumes, derives price from Uniswap V2 pair, updates registry.
+- **Internal Call Flow**:
+  - Normalizes `amount` using 18 decimals.
+  - Checks `xBalance` (if tokenX is ETH) or `yBalance` (if tokenY is ETH).
+  - Transfers ETH via low-level call with try-catch.
+  - Updates `xVolume`/`yVolume`, `lastDayFee`, `price` from Uniswap V2 reserves.
+  - Calls `_updateRegistry`, emits `BalancesUpdated`.
+- **Balance Checks**: Pre-transfer balance check for `xBalance` or `yBalance`.
+- **Mappings/Structs Used**:
+  - **Mappings**: `volumeBalance`.
+  - **Structs**: `VolumeBalance`.
+- **Restrictions**: `nonReentrant`, requires `routers[caller]`, one token must be ETH.
 - **Gas Usage Controls**: Single transfer, minimal state updates, try-catch error handling, Uniswap V2 reserve call.
 
 #### queryYield(bool isA, uint256 maxIterations)
@@ -416,11 +435,10 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - Short payouts: Output tokenX, no `amountSent`.
 - **Events**: `OrderUpdated`, `PayoutOrderCreated`, `BalancesUpdated`.
 - **Safety**:
-  - Explicit casting for interfaces (e.g., `ISSListingTemplate`, `IERC20`, `IUniswapV2Pair`).
+  - Explicit casting for interfaces (e.g., `ISSListing`, `IERC20`, `IUniswapV2Pair`).
   - No inline assembly, uses high-level Solidity.
   - Try-catch for external calls to handle failures gracefully.
   - Hidden state variables (`tokenX`, `tokenY`, `decimalX`, `decimalY`, `uniswapV2Pair`, `uniswapV2PairSet`) accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
 - **Compatibility**: Aligned with `SSRouter` (v0.0.62), `SSAgent` (v0.0.2), `SSOrderPartial` (v0.0.18), `SSLiquidityTemplate` (v0.0.3), and Uniswap V2 for price derivation.
-- **Price vs Prices Clarification**: `price` is a state variable updated in `update` and `transact`, this makes the data a bit laggy. Wheres `prices` is a view function that computes price on-demand from Uniswap V2 reserves, using the same formula as `price`.
-  -  `prices` is better for external queries to avoid stale data. There are no conflicts, but `prices` ensures real-time accuracy for external calls.
+- **Price vs Prices Clarification**: `price` is a state variable updated in `update`, `transactToken`, and `transactNative`, potentially laggy. `prices` is a view function computing price on-demand from Uniswap V2 reserves, using the same formula, preferred for real-time external queries.
