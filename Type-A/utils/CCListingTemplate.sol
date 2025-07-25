@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2
+// Version: 0.0.3
 // Changes:
+// - v0.0.3: Split transact function into transactToken and transactNative to separate ERC20 and ETH transfers (lines 565-604).
 // - v0.0.2: Added uniswapV2PairView function to retrieve Uniswap V2 pair address (lines 668-670).
 // - v0.0.1: Changed license to BSL 1.1 - Peng Protocol 2025.
 // - v0.0.1: Added uniswapV2Pair state variable and setUniswapV2Pair function for one-time LP address setting (lines 88-89, 315-321).
@@ -582,11 +583,13 @@ contract CCListingTemplate is ReentrancyGuard {
         }
     }
 
-    // Handles token transfers
-    function transact(address caller, address token, uint256 amount, address recipient) external nonReentrant {
+    // Handles ERC20 token transfers
+    function transactToken(address caller, address token, uint256 amount, address recipient) external nonReentrant {
         require(routers[caller], "Router only");
+        require(token != address(0), "Use transactNative for ETH");
+        require(token == tokenX || token == tokenY, "Invalid token");
         VolumeBalance storage balances = volumeBalance;
-        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        uint8 decimals = IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
 
         if (lastDayFee.timestamp == 0 || block.timestamp >= lastDayFee.timestamp + 86400) {
@@ -599,25 +602,50 @@ contract CCListingTemplate is ReentrancyGuard {
             require(balances.xBalance >= normalizedAmount, "Insufficient xBalance");
             balances.xBalance -= normalizedAmount;
             balances.xVolume += normalizedAmount;
-            if (token == address(0)) {
-                (bool success, ) = recipient.call{value: amount}("");
-                require(success, "ETH transfer failed");
-            } else {
-                IERC20(token).safeTransfer(recipient, amount);
-            }
-        } else if (token == tokenY) {
+        } else {
             require(balances.yBalance >= normalizedAmount, "Insufficient yBalance");
             balances.yBalance -= normalizedAmount;
             balances.yVolume += normalizedAmount;
-            if (token == address(0)) {
-                (bool success, ) = recipient.call{value: amount}("");
-                require(success, "ETH transfer failed");
-            } else {
-                IERC20(token).safeTransfer(recipient, amount);
-            }
-        } else {
-            revert("Invalid token");
         }
+        IERC20(token).safeTransfer(recipient, amount);
+
+        if (uniswapV2Pair != address(0)) {
+            (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(uniswapV2Pair).getReserves();
+            uint256 reserveX = tokenX == IUniswapV2Pair(uniswapV2Pair).token0() ? reserve0 : reserve1;
+            uint256 reserveY = tokenY == IUniswapV2Pair(uniswapV2Pair).token1() ? reserve1 : reserve0;
+            uint256 normalizedReserveX = normalize(reserveX, decimalX);
+            uint256 normalizedReserveY = normalize(reserveY, decimalY);
+            price = normalizedReserveX > 0 && normalizedReserveY > 0 ? (normalizedReserveX * 1e18) / normalizedReserveY : 0;
+        }
+        emit BalancesUpdated(listingId, balances.xBalance, balances.yBalance);
+        _updateRegistry();
+    }
+
+    // Handles native ETH transfers
+    function transactNative(address caller, uint256 amount, address recipient) external nonReentrant {
+        require(routers[caller], "Router only");
+        require(tokenX == address(0) || tokenY == address(0), "No native token in pair");
+        VolumeBalance storage balances = volumeBalance;
+        uint256 normalizedAmount = normalize(amount, 18);
+
+        if (lastDayFee.timestamp == 0 || block.timestamp >= lastDayFee.timestamp + 86400) {
+            lastDayFee.xFees = volumeBalance.xVolume;
+            lastDayFee.yFees = volumeBalance.yVolume;
+            lastDayFee.timestamp = _floorToMidnight(block.timestamp);
+        }
+
+        if (tokenX == address(0)) {
+            require(balances.xBalance >= normalizedAmount, "Insufficient xBalance");
+            balances.xBalance -= normalizedAmount;
+            balances.xVolume += normalizedAmount;
+        } else {
+            require(balances.yBalance >= normalizedAmount, "Insufficient yBalance");
+            balances.yBalance -= normalizedAmount;
+            balances.yVolume += normalizedAmount;
+        }
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "ETH transfer failed");
+
         if (uniswapV2Pair != address(0)) {
             (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(uniswapV2Pair).getReserves();
             uint256 reserveX = tokenX == IUniswapV2Pair(uniswapV2Pair).token0() ? reserve0 : reserve1;
