@@ -17,7 +17,7 @@ pragma solidity ^0.8.2;
 import "../imports/SafeERC20.sol";
 import "../imports/ReentrancyGuard.sol";
 
-interface ISSListing {
+interface ICCListing {
     function prices(uint256) external view returns (uint256); // Ignores listingId, returns price
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance); // Ignores listingId
     function liquidityAddressView(uint256) external view returns (address); // Ignores listingId
@@ -39,7 +39,7 @@ interface IUniswapV2Pair {
     function token1() external view returns (address);
 }
 
-interface ISSAgent {
+interface ICCAgent {
     function globalizeOrders(
         uint256 listingId,
         address tokenA,
@@ -53,7 +53,7 @@ interface ISSAgent {
     ) external;
 }
 
-interface ISSLiquidityTemplate {
+interface ICCLiquidityTemplate {
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
     function setRouters(address[] memory _routers) external;
     function setListingId(uint256 _listingId) external;
@@ -212,7 +212,7 @@ contract CCListingTemplate is ReentrancyGuard {
     }
 
     // Checks if two timestamps are on the same day
-    function _isSameDay(uint256 time1, uint256 time2) internal pure returns (bool) {
+    function _ICCameDay(uint256 time1, uint256 time2) internal pure returns (bool) {
         uint256 midnight1 = time1 - (time1 % 86400);
         uint256 midnight2 = time2 - (time2 % 86400);
         return midnight1 == midnight2;
@@ -253,13 +253,13 @@ contract CCListingTemplate is ReentrancyGuard {
     // Queries annualized yield for tokenX or tokenY
     function queryYield(bool isA, uint256 maxIterations) external view returns (uint256) {
         require(maxIterations > 0, "Invalid maxIterations");
-        if (lastDayFee.timestamp == 0 || historicalData.length == 0 || !_isSameDay(block.timestamp, lastDayFee.timestamp)) {
+        if (lastDayFee.timestamp == 0 || historicalData.length == 0 || !_ICCameDay(block.timestamp, lastDayFee.timestamp)) {
             return 0;
         }
         uint256 feeDifference = isA ? volumeBalance.xVolume - lastDayFee.xFees : volumeBalance.yVolume - lastDayFee.yFees;
         if (feeDifference == 0) return 0;
         uint256 liquidity = 0;
-        try ISSLiquidityTemplate(liquidityAddress).liquidityAmounts() returns (uint256 xLiquid, uint256 yLiquid) {
+        try ICCLiquidityTemplate(liquidityAddress).liquidityAmounts() returns (uint256 xLiquid, uint256 yLiquid) {
             liquidity = isA ? xLiquid : yLiquid;
         } catch {
             return 0;
@@ -359,7 +359,7 @@ contract CCListingTemplate is ReentrancyGuard {
             BuyOrderCore memory order = buyOrderCores[orderId];
             BuyOrderAmounts memory amounts = buyOrderAmounts[orderId];
             if (order.status == 1 || order.status == 2) {
-                try ISSAgent(agent).globalizeOrders(
+                try ICCAgent(agent).globalizeOrders(
                     listingId,
                     tokenX,
                     tokenY,
@@ -377,7 +377,7 @@ contract CCListingTemplate is ReentrancyGuard {
             SellOrderCore memory order = sellOrderCores[orderId];
             SellOrderAmounts memory amounts = sellOrderAmounts[orderId];
             if (order.status == 1 || order.status == 2) {
-                try ISSAgent(agent).globalizeOrders(
+                try ICCAgent(agent).globalizeOrders(
                     listingId,
                     tokenX,
                     tokenY,
