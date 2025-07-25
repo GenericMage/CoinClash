@@ -1,33 +1,70 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.13
+// Version: 0.0.16
 // Changes:
-// - v0.0.13: Fixed TypeError in _executeBuyETHSwap and _executeBuyTokenSwap by adding listingContract field to BuySwapContext struct; split Uniswap-adjacent functionality into CCUniPartial.sol, importing and inheriting from it; moved CCMainPartial import to CCUniPartial.
-// - v0.0.12: Refactored _executePartialBuySwap to use BuySwapContext struct and helper functions (_prepareSwapData, _executeBuyTokenSwap, _executeBuyETHSwap) to resolve stack too deep error.
-// - v0.0.11: Refactored _computeMaxAmountIn to use internal call tree with helper functions (_getReserveData, _computePriceImpact, _finalizeMaxAmountIn) and MaxAmountInContext struct to resolve stack too deep error.
-// - v0.0.10: Restructured _computeMaxAmountIn to reduce stack usage by computing currentPrice before conditional block.
-// - v0.0.9: Replaced uniswapV2RouterView() with direct uniswapV2Router access in _executePartialBuySwap and _executePartialSellSwap.
-// - v0.0.8: Removed WETH handling, using swapExactETHForTokens for buy orders (tokenIn == address(0)) and swapExactTokensForETH for sell orders (tokenOut == address(0)).
-// - v0.0.7: Updated _processBuyOrder and _processSellOrder to use pendingAmount when maxAmountIn <= pendingAmount, added ETH handling in swaps, confirmed decimal usage.
-// - v0.0.6: Updated _processBuyOrder and _processSellOrder to check currentPrice against maxPrice/minPrice, replaced _computeMaxAmountIn with formula-based calculation.
-// - v0.0.5: Replaced _computeImpact with _computeSwapImpact, added partial swap functions, updated order processing.
-// - v0.0.4: Fixed DeclarationError by replacing executeBuyOrder with executeSingleBuyLiquid and executeSellOrder with executeSingleSellLiquid.
-// - v0.0.3: Removed invalid "RECOMMENDATION:" syntax in _computeImpact, set visibility to private.
-// - v0.0.2: Added PrepOrderUpdateResult struct to resolve DeclarationError in _prepBuyOrderUpdate and _prepSellOrderUpdate.
-// - v0.0.1: Created CCSettlementPartial.sol by extracting order processing and liquidation functions from SSRouter.sol v0.0.61.
-// - v0.0.1: Imported SSMainPartial.sol v0.0.25 for normalize, denormalize, and onlyValidListing modifier.
-// - v0.0.1: Included necessary structs and interfaces from SSRouter.sol and SSSettlementPartial.sol.
-// - v0.0.1: Added SafeERC20 usage for token transfers.
-// Compatible with SSListingTemplate.sol (v0.0.10), SSLiquidityTemplate.sol (v0.0.6), CCUniPartial.sol (v0.0.1), SSOrderPartial.sol (v0.0.19), SSSettlementPartial.sol (v0.0.58), CCListingTemplate.sol (v0.0.2).
+// - v0.0.16: Removed duplicated _prepareSellSwapData (inherited from CCUniPartial.sol), added routers function to ICCLiquidity.
+// - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
+// - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
+// Compatible with ICCListing.sol (v0.0.3), ICCLiquidity.sol, CCUniPartial.sol (v0.0.6), CCSettlementRouter.sol (v0.0.2).
 
 import "./CCUniPartial.sol";
+
+interface ICCLiquidity {
+    struct UpdateType {
+        uint8 updateType; // 0=balance, 1=fees, 2=xSlot, 3=ySlot
+        uint256 index; // 0=xFees/xLiquid, 1=yFees/yLiquid, or slot index
+        uint256 value; // Normalized amount or allocation
+        address addr; // Depositor address
+        address recipient; // Unused recipient address
+    }
+    struct PreparedWithdrawal {
+        uint256 amountA; // Normalized withdrawal amount for token A
+        uint256 amountB; // Normalized withdrawal amount for token B
+    }
+    struct Slot {
+        address depositor; // Address of the slot owner
+        address recipient; // Unused recipient address
+        uint256 allocation; // Normalized liquidity allocation
+        uint256 dFeesAcc; // Cumulative fees at deposit or last claim
+        uint256 timestamp; // Slot creation timestamp
+    }
+    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
+    function getPrice() external view returns (uint256);
+    function getRegistryAddress() external view returns (address);
+    function setRouters(address[] memory _routers) external;
+    function setListingId(uint256 _listingId) external;
+    function setListingAddress(address _listingAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+    function setAgent(address _agent) external;
+    function update(address caller, UpdateType[] memory updates) external;
+    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external;
+    function depositToken(address caller, address token, uint256 amount) external;
+    function depositNative(address caller, uint256 amount) external payable;
+    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
+    function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external;
+    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
+    function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external;
+    function claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 volume) external;
+    function transactToken(address caller, address token, uint256 amount, address recipient) external;
+    function transactNative(address caller, uint256 amount, address recipient) external payable;
+    function addFees(address caller, bool isX, uint256 fee) external;
+    function updateLiquidity(address caller, bool isX, uint256 amount) external;
+    function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
+    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
+    function activeXLiquiditySlotsView() external view returns (uint256[] memory);
+    function activeYLiquiditySlotsView() external view returns (uint256[] memory);
+    function userIndexView(address user) external view returns (uint256[] memory);
+    function getXSlotView(uint256 index) external view returns (Slot memory);
+    function getYSlotView(uint256 index) external view returns (Slot memory);
+    function routers(address router) external view returns (bool);
+}
 
 contract CCSettlementPartial is CCUniPartial {
     using SafeERC20 for IERC20;
 
     struct OrderContext {
-        ISSListingTemplate listingContract;
+        ICCListing listingContract;
         address tokenIn;
         address tokenOut;
         address liquidityAddr;
@@ -49,7 +86,7 @@ contract CCSettlementPartial is CCUniPartial {
         bool isBuyOrder
     ) internal view returns (address tokenAddress, uint8 tokenDecimals) {
         // Retrieves token address and decimals based on order type
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         tokenAddress = isBuyOrder ? listingContract.tokenB() : listingContract.tokenA();
         tokenDecimals = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
     }
@@ -61,7 +98,7 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 pendingAmount
     ) internal view returns (bool) {
         // Validates order pricing against max/min price constraints
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         uint256 maxPrice;
         uint256 minPrice;
         if (isBuyOrder) {
@@ -79,9 +116,9 @@ contract CCSettlementPartial is CCUniPartial {
         bool isBuyOrder
     ) internal view returns (uint256 amountOut, address tokenIn, address tokenOut) {
         // Prepares liquidity transaction, calculating output amount
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(listingContract.getListingId());
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
         (uint256 impactPrice, uint256 computedAmountOut) = _computeSwapImpact(listingAddress, inputAmount, isBuyOrder);
@@ -103,7 +140,7 @@ contract CCSettlementPartial is CCUniPartial {
         address tokenIn,
         uint256 inputAmount,
         address liquidityAddr,
-        ISSListingTemplate listingContract
+        ICCListing listingContract
     ) internal returns (uint256 actualAmount, uint8 tokenDecimals) {
         // Checks and transfers principal amount, tracking actual amounts sent/received
         tokenDecimals = tokenIn == address(0) ? 18 : IERC20(tokenIn).decimals();
@@ -114,12 +151,12 @@ contract CCSettlementPartial is CCUniPartial {
             ? liquidityAddr.balance
             : IERC20(tokenIn).balanceOf(liquidityAddr);
         if (tokenIn == address(0)) {
-            try listingContract.transact{value: inputAmount}(address(this), address(0), inputAmount, liquidityAddr) {} catch {
-                revert("Principal transfer failed");
+            try listingContract.transactNative{value: inputAmount}(address(this), inputAmount, liquidityAddr) {} catch {
+                revert("Native transfer failed");
             }
         } else {
-            try listingContract.transact(address(this), tokenIn, inputAmount, liquidityAddr) {} catch {
-                revert("Principal transfer failed");
+            try listingContract.transactToken(address(this), tokenIn, inputAmount, liquidityAddr) {} catch {
+                revert("Token transfer failed");
             }
         }
         uint256 listingPostBalance = tokenIn == address(0)
@@ -146,13 +183,13 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 inputAmount
     ) internal {
         // Updates liquidity pool with transferred tokens
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(listingContract.getListingId());
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         uint256 actualAmount;
         uint8 tokenDecimals;
         (actualAmount, tokenDecimals) = _checkAndTransferPrincipal(
-            address(listingAddress),
+            listingAddress,
             tokenIn,
             inputAmount,
             liquidityAddr,
@@ -184,13 +221,20 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 amountOut
     ) internal returns (PrepOrderUpdateResult memory result) {
         // Prepares buy order update data, including token transfer
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
-        try listingContract.transact(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress) {} catch {
-            result.amountReceived = 0;
-            result.normalizedReceived = 0;
+        if (result.tokenAddress == address(0)) {
+            try listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress) {} catch {
+                result.amountReceived = 0;
+                result.normalizedReceived = 0;
+            }
+        } else {
+            try listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress) {} catch {
+                result.amountReceived = 0;
+                result.normalizedReceived = 0;
+            }
         }
         if (result.amountReceived > 0) {
             result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
@@ -204,13 +248,20 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 amountOut
     ) internal returns (PrepOrderUpdateResult memory result) {
         // Prepares sell order update data, including token transfer
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
         (result.recipientAddress, result.makerAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
-        try listingContract.transact(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress) {} catch {
-            result.amountReceived = 0;
-            result.normalizedReceived = 0;
+        if (result.tokenAddress == address(0)) {
+            try listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress) {} catch {
+                result.amountReceived = 0;
+                result.normalizedReceived = 0;
+            }
+        } else {
+            try listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress) {} catch {
+                result.amountReceived = 0;
+                result.normalizedReceived = 0;
+            }
         }
         if (result.amountReceived > 0) {
             result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
@@ -222,10 +273,10 @@ contract CCSettlementPartial is CCUniPartial {
         OrderContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Prepares updates for buy order liquidation
         if (!_checkPricing(address(context.listingContract), orderIdentifier, true, pendingAmount)) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         uint256 amountOut;
         address tokenIn;
@@ -252,15 +303,22 @@ contract CCSettlementPartial is CCUniPartial {
             updateContext.amountSent = prepResult.amountSent;
             uint8 tokenDecimals = prepResult.tokenDecimals;
             uint256 denormalizedAmount = denormalize(amountOut, tokenDecimals);
-            try ISSLiquidityTemplate(context.liquidityAddr).transact(address(this), tokenOut, denormalizedAmount, updateContext.recipient) {} catch {
-                return new ISSListingTemplate.UpdateType[](0);
+            ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+            if (tokenOut == address(0)) {
+                try liquidityContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, updateContext.recipient) {} catch {
+                    return new ICCListing.UpdateType[](0);
+                }
+            } else {
+                try liquidityContract.transactToken(address(this), tokenOut, denormalizedAmount, updateContext.recipient) {} catch {
+                    return new ICCListing.UpdateType[](0);
+                }
             }
             updateContext.amountReceived = denormalizedAmount;
             updateContext.normalizedReceived = normalize(denormalizedAmount, tokenDecimals);
             updateContext.amountSent = _computeAmountSent(tokenOut, updateContext.recipient, denormalizedAmount);
         }
         if (updateContext.normalizedReceived == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         _updateLiquidity(address(context.listingContract), tokenIn, false, pendingAmount);
         return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
@@ -270,10 +328,10 @@ contract CCSettlementPartial is CCUniPartial {
         OrderContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Prepares updates for sell order liquidation
         if (!_checkPricing(address(context.listingContract), orderIdentifier, false, pendingAmount)) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         uint256 amountOut;
         address tokenIn;
@@ -300,81 +358,42 @@ contract CCSettlementPartial is CCUniPartial {
             updateContext.amountSent = prepResult.amountSent;
             uint8 tokenDecimals = prepResult.tokenDecimals;
             uint256 denormalizedAmount = denormalize(amountOut, tokenDecimals);
-            try ISSLiquidityTemplate(context.liquidityAddr).transact(address(this), tokenOut, denormalizedAmount, updateContext.recipient) {} catch {
-                return new ISSListingTemplate.UpdateType[](0);
+            ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+            if (tokenOut == address(0)) {
+                try liquidityContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, updateContext.recipient) {} catch {
+                    return new ICCListing.UpdateType[](0);
+                }
+            } else {
+                try liquidityContract.transactToken(address(this), tokenOut, denormalizedAmount, updateContext.recipient) {} catch {
+                    return new ICCListing.UpdateType[](0);
+                }
             }
             updateContext.amountReceived = denormalizedAmount;
             updateContext.normalizedReceived = normalize(denormalizedAmount, tokenDecimals);
             updateContext.amountSent = _computeAmountSent(tokenOut, updateContext.recipient, denormalizedAmount);
         }
         if (updateContext.normalizedReceived == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         _updateLiquidity(address(context.listingContract), tokenIn, true, pendingAmount);
         return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
     }
 
-    function _processBuyOrder(
-        address listingAddress,
-        uint256 orderIdentifier,
-        ISSListingTemplate listingContract
-    ) internal returns (ISSListingTemplate.UpdateType[] memory updates) {
-        // Processes a single buy order using Uniswap V2 swap, uses pendingAmount if maxAmountIn <= pendingAmount
-        (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getBuyOrderAmounts(orderIdentifier);
-        if (pendingAmount == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
-        }
-        (uint256 maxPrice, uint256 minPrice) = listingContract.getBuyOrderPricing(orderIdentifier);
-        uint256 currentPrice = _computeCurrentPrice(listingAddress);
-        if (currentPrice < minPrice || currentPrice > maxPrice) {
-            return new ISSListingTemplate.UpdateType[](0);
-        }
-        uint256 maxAmountIn = _computeMaxAmountIn(listingAddress, maxPrice, minPrice, pendingAmount, true);
-        uint256 swapAmount = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
-        if (swapAmount == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
-        }
-        updates = _executePartialBuySwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
-    }
-
-    function _processSellOrder(
-        address listingAddress,
-        uint256 orderIdentifier,
-        ISSListingTemplate listingContract
-    ) internal returns (ISSListingTemplate.UpdateType[] memory updates) {
-        // Processes a single sell order using Uniswap V2 swap, uses pendingAmount if maxAmountIn <= pendingAmount
-        (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getSellOrderAmounts(orderIdentifier);
-        if (pendingAmount == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
-        }
-        (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
-        uint256 currentPrice = _computeCurrentPrice(listingAddress);
-        if (currentPrice < minPrice || currentPrice > maxPrice) {
-            return new ISSListingTemplate.UpdateType[](0);
-        }
-        uint256 maxAmountIn = _computeMaxAmountIn(listingAddress, maxPrice, minPrice, pendingAmount, false);
-        uint256 swapAmount = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
-        if (swapAmount == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
-        }
-        updates = _executePartialSellSwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
-    }
-
     function executeSingleBuyLiquid(
         address listingAddress,
         uint256 orderIdentifier
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes a single buy order liquidation
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getBuyOrderAmounts(orderIdentifier);
         if (pendingAmount == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         OrderContext memory context = OrderContext({
             listingContract: listingContract,
             tokenIn: listingContract.tokenB(),
             tokenOut: listingContract.tokenA(),
-            liquidityAddr: listingContract.liquidityAddressView()
+            liquidityAddr: listingContract.liquidityAddressView(listingContract.getListingId())
         });
         return _prepBuyLiquidUpdates(context, orderIdentifier, pendingAmount);
     }
@@ -382,19 +401,65 @@ contract CCSettlementPartial is CCUniPartial {
     function executeSingleSellLiquid(
         address listingAddress,
         uint256 orderIdentifier
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes a single sell order liquidation
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getSellOrderAmounts(orderIdentifier);
         if (pendingAmount == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         OrderContext memory context = OrderContext({
             listingContract: listingContract,
             tokenIn: listingContract.tokenA(),
             tokenOut: listingContract.tokenB(),
-            liquidityAddr: listingContract.liquidityAddressView()
+            liquidityAddr: listingContract.liquidityAddressView(listingContract.getListingId())
         });
         return _prepSellLiquidUpdates(context, orderIdentifier, pendingAmount);
+    }
+
+    function _processBuyOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        ICCListing listingContract
+    ) internal returns (ICCListing.UpdateType[] memory updates) {
+        // Processes a single buy order using Uniswap V2 swap
+        (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getBuyOrderAmounts(orderIdentifier);
+        if (pendingAmount == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        (uint256 maxPrice, uint256 minPrice) = listingContract.getBuyOrderPricing(orderIdentifier);
+        uint256 currentPrice = _computeCurrentPrice(listingAddress);
+        if (currentPrice < minPrice || currentPrice > maxPrice) {
+            return new ICCListing.UpdateType[](0);
+        }
+        uint256 maxAmountIn = _computeMaxAmountIn(listingAddress, maxPrice, minPrice, pendingAmount, true);
+        uint256 swapAmount = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
+        if (swapAmount == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        updates = _executePartialBuySwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
+    }
+
+    function _processSellOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        ICCListing listingContract
+    ) internal returns (ICCListing.UpdateType[] memory updates) {
+        // Processes a single sell order using Uniswap V2 swap
+        (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getSellOrderAmounts(orderIdentifier);
+        if (pendingAmount == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
+        uint256 currentPrice = _computeCurrentPrice(listingAddress);
+        if (currentPrice < minPrice || currentPrice > maxPrice) {
+            return new ICCListing.UpdateType[](0);
+        }
+        uint256 maxAmountIn = _computeMaxAmountIn(listingAddress, maxPrice, minPrice, pendingAmount, false);
+        uint256 swapAmount = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
+        if (swapAmount == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        updates = _executePartialSellSwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
     }
 }

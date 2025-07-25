@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.03
+// Version: 0.0.06
 // Changes:
-// - v0.0.03: Fixed DeclarationError by replacing invalid 'rekord' modifier with 'view' in checkValidListing.
-// - v0.0.02: Fixed TypeError in checkValidListing by removing invalid setAgent return assignment, using agentView instead.
-// - v0.0.01: Inlined ICCListing interface from CCListing.sol v0.0.3, removed ICCListingTemplate import, renamed to ICCListing. Split transact into transactToken and transactNative to align with CCListing.sol. Updated function signatures to match CCListing.sol v0.0.3.
-// Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.6).
+// - v0.0.06: Updated ICCListing's transactNative to payable to resolve TypeError in CCUniPartial.sol.
+// - v0.0.05: Updated ICCLiquidityTemplate, split transact/deposit, updated Slot timestamp to uint256.
+// - v0.0.04: Integrated uniswapV2Router state variable and setters.
+// - v0.0.03: Fixed DeclarationError in checkValidListing.
+// - v0.0.02: Fixed TypeError in checkValidListing.
+// - v0.0.01: Inlined ICCListing, split transact into token/native.
+// Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.6), CCUniPartial.sol (v0.0.6), ICCLiquidity.sol.
 
 import "../imports/ReentrancyGuard.sol";
 import "../imports/Ownable.sol";
@@ -72,7 +75,7 @@ interface ICCListing {
     function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
     function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
     function transactToken(address caller, address token, uint256 amount, address recipient) external returns (bool);
-    function transactNative(address caller, uint256 amount, address recipient) external returns (bool);
+    function transactNative(address caller, uint256 amount, address recipient) external payable returns (bool);
     function uniswapV2PairView() external view returns (address);
     function setUniswapV2Pair(address _uniswapV2Pair) external;
     function setRouters(address[] memory _routers) external;
@@ -87,46 +90,51 @@ interface ICCListing {
 
 interface ICCLiquidityTemplate {
     struct UpdateType {
-        uint8 updateType;
-        uint256 index;
-        uint256 value;
-        address addr;
-        address receiver;
+        uint8 updateType; // 0=balance, 1=fees, 2=xSlot, 3=ySlot
+        uint256 index; // 0=xFees/xLiquid, 1=yFees/yLiquid, or slot index
+        uint256 value; // Normalized amount or allocation
+        address addr; // Depositor address
+        address recipient; // Unused recipient address
     }
     struct PreparedWithdrawal {
-        uint256 amountA;
-        uint256 amountB;
+        uint256 amountA; // Normalized withdrawal amount for token A
+        uint256 amountB; // Normalized withdrawal amount for token B
     }
     struct Slot {
-        address depositor;
-        address receiver;
-        uint256 allocation;
-        uint256 dVolume;
-        uint64 timestamp;
+        address depositor; // Address of the slot owner
+        address recipient; // Unused recipient address
+        uint256 allocation; // Normalized liquidity allocation
+        uint256 dFeesAcc; // Cumulative fees at deposit or last claim
+        uint256 timestamp; // Slot creation timestamp
     }
+    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
+    function getPrice() external view returns (uint256);
+    function getRegistryAddress() external view returns (address);
+    function setRouters(address[] memory _routers) external;
+    function setListingId(uint256 _listingId) external;
+    function setListingAddress(address _listingAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+    function setAgent(address _agent) external;
     function update(address caller, UpdateType[] memory updates) external;
-    function transact(address caller, address token, uint256 amount, address receiver) external;
-    function deposit(address caller, address token, uint256 amount) external payable;
-    function updateLiquidity(address caller, bool isX, uint256 amount) external;
-    function addFees(address caller, bool isX, uint256 fee) external;
+    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external;
+    function depositToken(address caller, address token, uint256 amount) external;
+    function depositNative(address caller, uint256 amount) external payable;
     function xPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
     function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external;
     function yPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
     function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external;
     function claimFees(address caller, address listingAddress, uint256 liquidityIndex, bool isX, uint256 volume) external;
-    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external;
+    function transactToken(address caller, address token, uint256 amount, address recipient) external;
+    function transactNative(address caller, uint256 amount, address recipient) external;
+    function addFees(address caller, bool isX, uint256 fee) external;
+    function updateLiquidity(address caller, bool isX, uint256 amount) external;
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
-    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees);
+    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory);
     function activeYLiquiditySlotsView() external view returns (uint256[] memory);
     function userIndexView(address user) external view returns (uint256[] memory);
     function getXSlotView(uint256 index) external view returns (Slot memory);
     function getYSlotView(uint256 index) external view returns (Slot memory);
-    function getListingAddress() external view returns (address);
-    function listingId() external view returns (uint256);
-    function tokenA() external view returns (address);
-    function tokenB() external view returns (address);
-    function routers(address router) external view returns (bool);
 }
 
 interface ICCAgent {
@@ -137,6 +145,7 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
     address internal agent;
+    address internal uniswapV2Router;
 
     struct BuyOrderDetails {
         uint256 orderId;
@@ -161,7 +170,7 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
     }
 
     struct OrderClearData {
-        uint256 orderId;
+        uint256 id;
         bool isBuy;
         uint256 amount;
     }
@@ -201,8 +210,19 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
         agent = newAgent;
     }
 
+    function setUniswapV2Router(address newRouter) external onlyOwner {
+        // Sets Uniswap V2 router address
+        require(newRouter != address(0), "Invalid router address");
+        uniswapV2Router = newRouter;
+    }
+
     function agentView() external view returns (address) {
         // Returns current agent address
         return agent;
+    }
+
+    function uniswapV2RouterView() external view returns (address) {
+        // Returns Uniswap V2 router address
+        return uniswapV2Router;
     }
 }

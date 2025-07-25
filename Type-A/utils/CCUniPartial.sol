@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.3
+// Version: 0.0.6
 // Changes:
-// - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext struct and helper functions (_getSwapReserves, _computeSwapOutput) to resolve stack too deep error by reducing local variables.
-// - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext struct and helper functions (_prepareSellSwapData, _executeSellTokenSwap, _executeSellETHSwap) to resolve stack too deep error.
-// - v0.0.1: Created CCUniPartial.sol to handle Uniswap-adjacent functionality, including _computeCurrentPrice, _computeSwapImpact, _computeMaxAmountIn, _executePartialBuySwap, _executePartialSellSwap, and related helpers/structs.
-// - v0.0.1: Imported CCMainPartial.sol for normalize, denormalize, and uniswapV2Router access.
-// - v0.0.1: Defined IUniswapV2Pair and IUniswapV2Router02 interfaces for Uniswap V2 integration.
-// - v0.0.1: Added listingContract to BuySwapContext to fix TypeError in _executeBuyETHSwap and _executeBuyTokenSwap.
-// Compatible with SSListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.2).
+// - v0.0.6: Removed inlined ICCListing, imported from CCMainPartial.sol (v0.0.06) to avoid duplication.
+// - v0.0.5: Marked transactNative as payable in inlined ICCListing (reverted due to duplication).
+// - v0.0.4: Replaced ISSListingTemplate with ICCListing, updated transact to transactNative/transactToken.
+// - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext struct.
+// - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext struct.
+// Compatible with CCMainPartial.sol (v0.0.06), CCSettlementPartial.sol (v0.0.14), CCSettlementRouter.sol (v0.0.2), ICCLiquidity.sol.
 
 import "./CCMainPartial.sol";
 
@@ -53,7 +52,7 @@ contract CCUniPartial is CCMainPartial {
     }
 
     struct BuySwapContext {
-        ISSListingTemplate listingContract;
+        ICCListing listingContract;
         address makerAddress;
         address recipientAddress;
         uint8 status;
@@ -68,7 +67,7 @@ contract CCUniPartial is CCMainPartial {
     }
 
     struct SellSwapContext {
-        ISSListingTemplate listingContract;
+        ICCListing listingContract;
         address makerAddress;
         address recipientAddress;
         uint8 status;
@@ -77,7 +76,7 @@ contract CCUniPartial is CCMainPartial {
         uint8 decimalsIn;
         uint8 decimalsOut;
         uint256 denormAmountIn;
-        uint256 denormAmountOutMin;
+        uint256 amountOutMin;
         uint256 price;
         uint256 expectedAmountOut;
     }
@@ -114,7 +113,7 @@ contract CCUniPartial is CCMainPartial {
 
     function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
         // Computes current price from Uniswap V2 pair reserves
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
@@ -136,7 +135,7 @@ contract CCUniPartial is CCMainPartial {
         bool isBuyOrder
     ) private view returns (MaxAmountInContext memory context) {
         // Retrieves reserve data and decimals for maxAmountIn calculation
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
@@ -193,7 +192,7 @@ contract CCUniPartial is CCMainPartial {
         bool isBuyOrder
     ) private view returns (SwapImpactContext memory context) {
         // Retrieves reserves and decimals for swap impact calculation
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
@@ -215,7 +214,7 @@ contract CCUniPartial is CCMainPartial {
         // Computes swap output and price using Uniswap V2 formula
         require(context.normalizedReserveIn > 0 && context.normalizedReserveOut > 0, "Zero reserves");
         context.amountInAfterFee = (inputAmount * 997) / 1000; // 0.3% fee
-        context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) / 
+        context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) /
                            (context.normalizedReserveIn + context.amountInAfterFee);
         context.price = context.amountOut > 0 ? (inputAmount * 1e18) / context.amountOut : type(uint256).max;
         amountOut = denormalize(context.amountOut, context.decimalsOut);
@@ -238,7 +237,7 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountIn
     ) internal view returns (BuySwapContext memory context, address[] memory path) {
         // Prepares swap data for buy order, including order details and swap path
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         (context.makerAddress, context.recipientAddress, context.status) = listingContract.getBuyOrderCore(orderIdentifier);
         (uint256 maxPrice, uint256 minPrice) = listingContract.getBuyOrderPricing(orderIdentifier);
         context.listingContract = listingContract;
@@ -264,15 +263,15 @@ contract CCUniPartial is CCMainPartial {
         BuySwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes ETH-to-token swap for buy order
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         uint256 preBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        try context.listingContract.transact{value: context.denormAmountIn}(address(this), address(0), context.denormAmountIn, address(this)) {} catch {
-            return new ISSListingTemplate.UpdateType[](0);
+        try context.listingContract.transactNative{value: context.denormAmountIn}(address(this), context.denormAmountIn, address(this)) {} catch {
+            return new ICCListing.UpdateType[](0);
         }
         try router.swapExactETHForTokens{value: context.denormAmountIn}(
             context.denormAmountOutMin,
@@ -284,7 +283,7 @@ contract CCUniPartial is CCMainPartial {
             uint256 postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
             uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
             if (amountReceived == 0) {
-                return new ISSListingTemplate.UpdateType[](0);
+                return new ICCListing.UpdateType[](0);
             }
             BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
                 makerAddress: context.makerAddress,
@@ -296,7 +295,7 @@ contract CCUniPartial is CCMainPartial {
             });
             return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
         } catch {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
     }
 
@@ -304,15 +303,15 @@ contract CCUniPartial is CCMainPartial {
         BuySwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes token-to-token swap for buy order
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         uint256 preBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        try context.listingContract.transact(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            return new ISSListingTemplate.UpdateType[](0);
+        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
+            return new ICCListing.UpdateType[](0);
         }
         IERC20(context.tokenIn).safeApprove(uniswapV2Router, context.denormAmountIn);
         try router.swapExactTokensForTokens(
@@ -326,7 +325,7 @@ contract CCUniPartial is CCMainPartial {
             uint256 postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
             uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
             if (amountReceived == 0) {
-                return new ISSListingTemplate.UpdateType[](0);
+                return new ICCListing.UpdateType[](0);
             }
             BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
                 makerAddress: context.makerAddress,
@@ -338,7 +337,7 @@ contract CCUniPartial is CCMainPartial {
             });
             return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
         } catch {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
     }
 
@@ -347,13 +346,13 @@ contract CCUniPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountIn,
         uint256 pendingAmount
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes partial Uniswap V2 swap for buy order using helper functions
         BuySwapContext memory context;
         address[] memory path;
         (context, path) = _prepareSwapData(listingAddress, orderIdentifier, amountIn);
         if (context.price == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         if (context.tokenIn == address(0)) {
             return _executeBuyETHSwap(context, orderIdentifier, pendingAmount);
@@ -368,7 +367,7 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountIn
     ) private view returns (SellSwapContext memory context, address[] memory path) {
         // Prepares swap data for sell order, including order details and swap path
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
+        ICCListing listingContract = ICCListing(listingAddress);
         (context.recipientAddress, context.makerAddress, context.status) = listingContract.getSellOrderCore(orderIdentifier);
         (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
         context.listingContract = listingContract;
@@ -384,7 +383,7 @@ contract CCUniPartial is CCMainPartial {
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         (context.price, context.expectedAmountOut) = _computeSwapImpact(listingAddress, amountIn, false);
-        context.denormAmountOutMin = denormalize((amountIn * 1e18) / maxPrice, context.decimalsOut);
+        context.amountOutMin = denormalize((amountIn * 1e18) / maxPrice, context.decimalsOut);
         if (context.price < minPrice || context.price > maxPrice || context.expectedAmountOut == 0) {
             context.price = 0; // Signal invalid swap
         }
@@ -394,20 +393,20 @@ contract CCUniPartial is CCMainPartial {
         SellSwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) private returns (ISSListingTemplate.UpdateType[] memory) {
+    ) private returns (ICCListing.UpdateType[] memory) {
         // Executes token-to-ETH swap for sell order
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         uint256 preBalanceOut = context.recipientAddress.balance;
-        try context.listingContract.transact(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            return new ISSListingTemplate.UpdateType[](0);
+        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
+            return new ICCListing.UpdateType[](0);
         }
         IERC20(context.tokenIn).safeApprove(uniswapV2Router, context.denormAmountIn);
         try router.swapExactTokensForETH(
             context.denormAmountIn,
-            context.denormAmountOutMin,
+            context.amountOutMin,
             path,
             context.recipientAddress,
             block.timestamp + 300
@@ -416,7 +415,7 @@ contract CCUniPartial is CCMainPartial {
             uint256 postBalanceOut = context.recipientAddress.balance;
             uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
             if (amountReceived == 0) {
-                return new ISSListingTemplate.UpdateType[](0);
+                return new ICCListing.UpdateType[](0);
             }
             SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
                 makerAddress: context.makerAddress,
@@ -428,7 +427,7 @@ contract CCUniPartial is CCMainPartial {
             });
             return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
         } catch {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
     }
 
@@ -436,20 +435,20 @@ contract CCUniPartial is CCMainPartial {
         SellSwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) private returns (ISSListingTemplate.UpdateType[] memory) {
+    ) private returns (ICCListing.UpdateType[] memory) {
         // Executes token-to-token swap for sell order
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         uint256 preBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        try context.listingContract.transact(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            return new ISSListingTemplate.UpdateType[](0);
+        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
+            return new ICCListing.UpdateType[](0);
         }
         IERC20(context.tokenIn).safeApprove(uniswapV2Router, context.denormAmountIn);
         try router.swapExactTokensForTokens(
             context.denormAmountIn,
-            context.denormAmountOutMin,
+            context.amountOutMin,
             path,
             context.recipientAddress,
             block.timestamp + 300
@@ -458,7 +457,7 @@ contract CCUniPartial is CCMainPartial {
             uint256 postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
             uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
             if (amountReceived == 0) {
-                return new ISSListingTemplate.UpdateType[](0);
+                return new ICCListing.UpdateType[](0);
             }
             SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
                 makerAddress: context.makerAddress,
@@ -470,7 +469,7 @@ contract CCUniPartial is CCMainPartial {
             });
             return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
         } catch {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
     }
 
@@ -479,13 +478,13 @@ contract CCUniPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountIn,
         uint256 pendingAmount
-    ) internal returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes partial Uniswap V2 swap for sell order using helper functions
         SellSwapContext memory context;
         address[] memory path;
         (context, path) = _prepareSellSwapData(listingAddress, orderIdentifier, amountIn);
         if (context.price == 0) {
-            return new ISSListingTemplate.UpdateType[](0);
+            return new ICCListing.UpdateType[](0);
         }
         if (context.tokenOut == address(0)) {
             return _executeSellETHSwap(context, orderIdentifier, pendingAmount);
@@ -498,10 +497,10 @@ contract CCUniPartial is CCMainPartial {
         uint256 orderIdentifier,
         BuyOrderUpdateContext memory updateContext,
         uint256 pendingAmount
-    ) internal pure returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal pure returns (ICCListing.UpdateType[] memory) {
         // Creates update structs for buy order processing
-        ISSListingTemplate.UpdateType[] memory updates = new ISSListingTemplate.UpdateType[](2);
-        updates[0] = ISSListingTemplate.UpdateType({
+        ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](2);
+        updates[0] = ICCListing.UpdateType({
             updateType: 1,
             structId: 2,
             index: orderIdentifier,
@@ -512,7 +511,7 @@ contract CCUniPartial is CCMainPartial {
             minPrice: 0,
             amountSent: updateContext.amountSent
         });
-        updates[1] = ISSListingTemplate.UpdateType({
+        updates[1] = ICCListing.UpdateType({
             updateType: 1,
             structId: 0,
             index: orderIdentifier,
@@ -530,10 +529,10 @@ contract CCUniPartial is CCMainPartial {
         uint256 orderIdentifier,
         SellOrderUpdateContext memory updateContext,
         uint256 pendingAmount
-    ) internal pure returns (ISSListingTemplate.UpdateType[] memory) {
+    ) internal pure returns (ICCListing.UpdateType[] memory) {
         // Creates update structs for sell order processing
-        ISSListingTemplate.UpdateType[] memory updates = new ISSListingTemplate.UpdateType[](2);
-        updates[0] = ISSListingTemplate.UpdateType({
+        ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](2);
+        updates[0] = ICCListing.UpdateType({
             updateType: 2,
             structId: 2,
             index: orderIdentifier,
@@ -544,7 +543,7 @@ contract CCUniPartial is CCMainPartial {
             minPrice: 0,
             amountSent: updateContext.amountSent
         });
-        updates[1] = ISSListingTemplate.UpdateType({
+        updates[1] = ICCListing.UpdateType({
             updateType: 2,
             structId: 0,
             index: orderIdentifier,
