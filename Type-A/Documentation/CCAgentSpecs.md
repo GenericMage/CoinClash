@@ -191,6 +191,44 @@ The agent manages token listings and global data, enables the creation of unique
   - **Returns:**
     - `listingAddress` (address): Address of the new listing contract.
     - `liquidityAddress` (address): Address of the new liquidity contract.
+- **relistToken**
+  - **Parameters:**
+    - `tokenA` (address): First token in the pair.
+    - `tokenB` (address): Second token in the pair.
+    - `uniswapV2Pair` (address): Uniswap V2 pair address for the token pair.
+  - **Actions:**
+    - Checks tokens are not identical and pair is already listed.
+    - Verifies at least one router, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
+    - Calls _deployPair to create new listing and liquidity contracts.
+    - Calls _initializeListing to set up new listing contract with routers array, listing ID, liquidity address, tokens, agent, registry, and verifies tokenA/tokenB against uniswapV2Pair tokens, then sets uniswapV2Pair.
+    - Calls _initializeLiquidity to set up new liquidity contract with routers array, listing ID, listing address, tokens, and agent.
+    - Updates getListing, allListings, and queryByAddress mappings and arrays with new listing address.
+    - Emits ListingRelisted event.
+    - Increments listingCount.
+    - Restricted to owner via onlyOwner modifier.
+  - **Returns:**
+    - `newListingAddress` (address): Address of the new listing contract.
+    - `newLiquidityAddress` (address): Address of the new liquidity contract.
+- **relistNative**
+  - **Parameters:**
+    - `token` (address): Token paired with native currency.
+    - `isA` (bool): If true, native currency is tokenA; else, tokenB.
+    - `uniswapV2Pair` (address): Uniswap V2 pair address for the token pair.
+  - **Actions:**
+    - Sets nativeAddress to address(0) for native currency.
+    - Determines tokenA and tokenB based on isA.
+    - Checks tokens are not identical and pair is already listed.
+    - Verifies at least one router, listingLogicAddress, liquidityLogicAddress, and registryAddress are set.
+    - Calls _deployPair to create new listing and liquidity contracts.
+    - Calls _initializeListing to set up new listing contract with routers array, listing ID, liquidity address, tokens, agent, registry, and verifies tokenA/tokenB against uniswapV2Pair tokens (replacing address(0) with wethAddress for verification), then sets uniswapV2Pair.
+    - Calls _initializeLiquidity to set up new liquidity contract with routers array, listing ID, listing address, tokens, and agent.
+    - Updates getListing, allListings, and queryByAddress mappings and arrays with new listing address.
+    - Emits ListingRelisted event.
+    - Increments listingCount.
+    - Restricted to owner via onlyOwner modifier.
+  - **Returns:**
+    - `newListingAddress` (address): Address of the new listing contract.
+    - `newLiquidityAddress` (address): Address of the new liquidity contract.
 
 #### Liquidity Management Functions
 - **globalizeLiquidity**
@@ -425,3 +463,17 @@ The agent manages token listings and global data, enables the creation of unique
     - Retrieves length of allListedTokens array.
   - **Returns:**
     - `uint256`: Total number of listed tokens.
+
+# **Additional Details**
+
+- **Relisting Behavior**:
+- Purpose : `relistToken` and `relistNative` allow the admin/owner to replace a token pair listing with a new one to update routers or Uniswap V2 pair.
+
+- Replacement : 
+  - Deploys new `CCListingTemplate` and `SSLiquidityTemplate` contracts with a new `listingId`.
+  - Updates `getListing` mapping with the new listing address, appends to `allListings`, and adds `listingId` to `queryByAddress`.
+  - Old listing remains on-chain but is no longer referenced in `getListing`.
+- Data Impact: 
+  - Liquidity and orders tied to the old listing are not transferred; users must interact with the new listing.
+  - Historical data (`historicalLiquidityPerPair`, `historicalLiquidityPerUser`, `historicalOrderStatus`) is preserved.
+- **Event**: Emits `ListingRelisted` with old and new listing addresses, token pair, and new `listingId`.
