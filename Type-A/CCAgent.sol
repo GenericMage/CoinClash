@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.3
+// Version: 0.0.5
 // Changes:
+// - v0.0.4: Added relistToken and relistNative function to allow owner to replace existing listing for a token pair with updated routers.
 // - v0.0.3: Modified _verifyAndSetUniswapV2Pair to recognize WETH in Uniswap V2 pair for native ETH listings while storing address(0) for native ETH.
 // - v0.0.2: Added IUniswapV2Pair interface for token verification.
 // - v0.0.2: Added _verifyAndSetUniswapV2Pair helper to verify tokenA/tokenB against Uniswap V2 pair and set pair address.
 // - v0.0.2: Modified _initializeListing to call _verifyAndSetUniswapV2Pair.
-// - v0.0.1: Renamed SSAgent to CCAgent, updated license to BSL 1.1 - Peng Protocol 2025.
-// - v0.0.1: Modified listToken and listNative to accept uniswapV2Pair parameter and updated interfaces accordingly.
+// - v0.0.1: Renamed SSAgent to CCAgent, updated license to BSL 1.1 - Peng禁止
 
 import "./imports/Ownable.sol";
 import "./imports/SafeERC20.sol";
@@ -124,6 +124,7 @@ contract CCAgent is Ownable {
     event RouterAdded(address indexed router); // Emitted when a router is added
     event RouterRemoved(address indexed router); // Emitted when a router is removed
     event WETHAddressSet(address indexed weth); // Emitted when WETH address is set
+    event ListingRelisted(address indexed tokenA, address indexed tokenB, address oldListingAddress, address newListingAddress, uint256 listingId); // Emitted when a listing is relisted
 
     // Sets WETH contract address, restricted to owner
     function setWETHAddress(address _wethAddress) external onlyOwner {
@@ -290,6 +291,62 @@ contract CCAgent is Ownable {
         emit ListingCreated(tokenA, tokenB, listingAddress, liquidityAddress, listingCount);
         listingCount++;
         return (listingAddress, liquidityAddress);
+    }
+
+    // Relists an existing token pair, replacing the old listing with a new one, restricted to owner
+    function relistToken(address tokenA, address tokenB, address uniswapV2Pair) external onlyOwner returns (address newListingAddress, address newLiquidityAddress) {
+        require(tokenA != tokenB, "Identical tokens");
+        address oldListingAddress = getListing[tokenA][tokenB];
+        require(oldListingAddress != address(0), "Pair not listed");
+        require(routers.length > 0, "No routers set");
+        require(listingLogicAddress != address(0), "Listing logic not set");
+        require(liquidityLogicAddress != address(0), "Liquidity logic not set");
+        require(registryAddress != address(0), "Registry not set");
+
+        // Deploy new listing and liquidity contracts
+        (newListingAddress, newLiquidityAddress) = _deployPair(tokenA, tokenB, listingCount);
+        _initializeListing(newListingAddress, newLiquidityAddress, tokenA, tokenB, listingCount, uniswapV2Pair);
+        _initializeLiquidity(newListingAddress, newLiquidityAddress, tokenA, tokenB, listingCount);
+        
+        // Update state with new listing
+        getListing[tokenA][tokenB] = newListingAddress;
+        allListings.push(newListingAddress);
+        queryByAddress[tokenA].push(listingCount);
+        queryByAddress[tokenB].push(listingCount);
+
+        emit ListingRelisted(tokenA, tokenB, oldListingAddress, newListingAddress, listingCount);
+        listingCount++;
+        return (newListingAddress, newLiquidityAddress);
+    }
+
+    // Relists an existing native ETH pair, replacing the old listing with a new one, restricted to owner
+    function relistNative(address token, bool isA, address uniswapV2Pair) external onlyOwner returns (address newListingAddress, address newLiquidityAddress) {
+        address nativeAddress = address(0);
+        address tokenA = isA ? nativeAddress : token;
+        address tokenB = isA ? token : nativeAddress;
+
+        require(tokenA != tokenB, "Identical tokens");
+        address oldListingAddress = getListing[tokenA][tokenB];
+        require(oldListingAddress != address(0), "Pair not listed");
+        require(routers.length > 0, "No routers set");
+        require(listingLogicAddress != address(0), "Listing logic not set");
+        require(liquidityLogicAddress != address(0), "Liquidity logic not set");
+        require(registryAddress != address(0), "Registry not set");
+
+        // Deploy new listing and liquidity contracts
+        (newListingAddress, newLiquidityAddress) = _deployPair(tokenA, tokenB, listingCount);
+        _initializeListing(newListingAddress, newLiquidityAddress, tokenA, tokenB, listingCount, uniswapV2Pair);
+        _initializeLiquidity(newListingAddress, newLiquidityAddress, tokenA, tokenB, listingCount);
+
+        // Update state with new listing
+        getListing[tokenA][tokenB] = newListingAddress;
+        allListings.push(newListingAddress);
+        queryByAddress[tokenA].push(listingCount);
+        queryByAddress[tokenB].push(listingCount);
+
+        emit ListingRelisted(tokenA, tokenB, oldListingAddress, newListingAddress, listingCount);
+        listingCount++;
+        return (newListingAddress, newLiquidityAddress);
     }
 
     // Checks if a listing address is valid and returns its details
