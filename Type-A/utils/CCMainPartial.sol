@@ -1,32 +1,31 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2
+// Version: 0.0.03
 // Changes:
-// - v0.0.2: Changed uniswapV2Router visibility from private to internal to allow access in CCSettlementPartial.sol, resolving DeclarationError.
-// - v0.0.1: Renamed from SSMainPartial.sol, updated SPDX to BSL 1.1 - Peng Protocol 2025, added uniswapV2PairView to ISSListingTemplate interface, added uniswapV2Router state variable with setUniswapV2Router and uniswapV2RouterView functions.
-// Compatible with SSListingTemplate.sol (v0.0.10), SSLiquidityTemplate.sol (v0.0.6), SSOrderPartial.sol (v0.0.19), SSSettlementPartial.sol (v0.0.58), CCListingTemplate.sol (v0.0.2), CCSettlementPartial.sol (v0.0.9).
+// - v0.0.03: Fixed DeclarationError by replacing invalid 'rekord' modifier with 'view' in checkValidListing.
+// - v0.0.02: Fixed TypeError in checkValidListing by removing invalid setAgent return assignment, using agentView instead.
+// - v0.0.01: Inlined ICCListing interface from CCListing.sol v0.0.3, removed ICCListingTemplate import, renamed to ICCListing. Split transact into transactToken and transactNative to align with CCListing.sol. Updated function signatures to match CCListing.sol v0.0.3.
+// Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.6).
 
 import "../imports/ReentrancyGuard.sol";
 import "../imports/Ownable.sol";
 import "../imports/SafeERC20.sol";
 
-// Note: Globalization (orders and liquidity) is handled by CCListingTemplate and SSLiquidityTemplate, not CCSettlementRouter.
-
-interface ISSListingTemplate {
+interface ICCListing {
     struct UpdateType {
-        uint8 updateType; // 0 = balance, 1 = buy order, 2 = sell order, 3 = historical
-        uint8 structId;   // 0 = Core, 1 = Pricing, 2 = Amounts
+        uint8 updateType; // 0=balance, 1=buy order, 2=sell order, 3=historical
+        uint8 structId;   // 0=Core, 1=Pricing, 2=Amounts
         uint256 index;    // orderId or slot index
         uint256 value;    // principal or amount
         address addr;     // makerAddress
         address recipient; // recipientAddress
         uint256 maxPrice; // for Pricing struct
         uint256 minPrice; // for Pricing struct
-        uint256 amountSent; // for Amounts struct (tokenX for buy, tokenY for sell)
+        uint256 amountSent; // for Amounts struct
     }
     struct PayoutUpdate {
-        uint8 payoutType; // 0: Long, 1: Short
+        uint8 payoutType; // 0=Long, 1=Short
         address recipient;
         uint256 required;
     }
@@ -46,37 +45,47 @@ interface ISSListingTemplate {
         uint256 orderId;
         uint8 status;
     }
-    function agent() external view returns (address);
-    function registryAddress() external view returns (address);
-    function setRegistry(address newRegistry) external;
-    function update(address caller, UpdateType[] memory updates) external;
-    function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external;
-    function transact(address caller, address token, uint256 amount, address receiver) external payable;
+    function prices(uint256 _listingId) external view returns (uint256);
+    function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance);
+    function liquidityAddressView(uint256 _listingId) external view returns (address);
+    function tokenA() external view returns (address);
+    function tokenB() external view returns (address);
+    function ssUpdate(address caller, PayoutUpdate[] calldata updates) external;
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
+    function getListingId() external view returns (uint256);
+    function getNextOrderId() external view returns (uint256);
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
+    function listingPriceView() external view returns (uint256);
+    function pendingBuyOrdersView() external view returns (uint256[] memory);
+    function pendingSellOrdersView() external view returns (uint256[] memory);
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
+    function longPayoutByIndexView() external view returns (uint256[] memory);
+    function shortPayoutByIndexView() external view returns (uint256[] memory);
+    function userPayoutIDsView(address user) external view returns (uint256[] memory);
+    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory);
+    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory);
     function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
     function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
     function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
-    function getSellOrderCore(uint256 orderId) external view returns (address recipientAddress, address makerAddress, uint8 status);
+    function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
     function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
     function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
-    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory);
-    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory);
-    function pendingBuyOrdersView() external view returns (uint256[] memory);
-    function pendingSellOrdersView() external view returns (uint256[] memory);
-    function longPayoutByIndexView() external view returns (uint256[] memory);
-    function shortPayoutByIndexView() external view returns (uint256[] memory);
-    function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
-    function liquidityAddressView() external view returns (address);
-    function tokenA() external view returns (address);
-    function tokenB() external view returns (address);
-    function getListingId() external view returns (uint256);
-    function getNextOrderId() external view returns (uint256);
+    function transactToken(address caller, address token, uint256 amount, address recipient) external returns (bool);
+    function transactNative(address caller, uint256 amount, address recipient) external returns (bool);
     function uniswapV2PairView() external view returns (address);
+    function setUniswapV2Pair(address _uniswapV2Pair) external;
+    function setRouters(address[] memory _routers) external;
+    function setListingId(uint256 _listingId) external;
+    function setLiquidityAddress(address _liquidityAddress) external;
+    function setTokens(address _tokenA, address _tokenB) external;
+    function setAgent(address _agent) external;
+    function setRegistry(address _registryAddress) external;
+    function update(address caller, UpdateType[] calldata updates) external;
+    function agentView() external view returns (address);
 }
 
-interface ISSLiquidityTemplate {
+interface ICCLiquidityTemplate {
     struct UpdateType {
         uint8 updateType;
         uint256 index;
@@ -120,7 +129,7 @@ interface ISSLiquidityTemplate {
     function routers(address router) external view returns (bool);
 }
 
-interface ISSAgent {
+interface ICCAgent {
     function getListing(address tokenA, address tokenB) external view returns(address);
 }
 
@@ -128,7 +137,6 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
     address internal agent;
-    address internal uniswapV2Router;
 
     struct BuyOrderDetails {
         uint256 orderId;
@@ -174,12 +182,12 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
 
     function checkValidListing(address listing) private view {
         // Validates listing against agent registry
-        ISSListingTemplate listingTemplate = ISSListingTemplate(listing);
-        address agentAddress = listingTemplate.agent();
-        if (agentAddress == address(0)) revert("Agent not set");
+        ICCListing listingTemplate = ICCListing(listing);
+        address agentAddress = listingTemplate.agentView();
+        require(agentAddress != address(0), "Agent not set");
         address tokenAAddress = listingTemplate.tokenA();
         address tokenBAddress = listingTemplate.tokenB();
-        require(ISSAgent(agentAddress).getListing(tokenAAddress, tokenBAddress) == listing, "Invalid listing");
+        require(ICCAgent(agentAddress).getListing(tokenAAddress, tokenBAddress) == listing, "Invalid listing");
     }
 
     modifier onlyValidListing(address listing) {
@@ -193,19 +201,8 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
         agent = newAgent;
     }
 
-    function setUniswapV2Router(address newRouter) external onlyOwner {
-        // Sets Uniswap V2 router address
-        require(newRouter != address(0), "Invalid router address");
-        uniswapV2Router = newRouter;
-    }
-
     function agentView() external view returns (address) {
         // Returns current agent address
         return agent;
-    }
-
-    function uniswapV2RouterView() external view returns (address) {
-        // Returns Uniswap V2 router address
-        return uniswapV2Router;
     }
 }
