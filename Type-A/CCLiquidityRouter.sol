@@ -1,163 +1,168 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2 (Updated)
+// Version: 0.0.7 (Updated)
 // Changes:
-// - v0.0.2: Modified withdraw, claimFees, and changeDepositor to use msg.sender instead of user parameter for enhanced security and interface simplicity, aligning with SSRouter.sol v0.0.62 and OMFRouter.sol v0.0.78.
-// - v0.0.1: Created CCLiquidityRouter.sol by extracting deposit, withdraw, claimFees, changeDepositor, settleLongLiquid, settleShortLiquid, settleLongPayouts, and settleShortPayouts from SSRouter.sol v0.0.61.
-// - v0.0.1: Imported SSSettlementPartial.sol v0.0.58 to reuse settleSingleLongLiquid, settleSingleShortLiquid, executeLongPayouts, and executeShortPayouts.
-// - v0.0.1: Inherited SSSettlementPartial.sol to access payout-related functions and SSMainPartial.sol v0.0.25 for normalize, denormalize, and onlyValidListing.
-// - v0.0.1: Included SafeERC20 usage and ReentrancyGuard for security.
-// Compatible with SSListingTemplate.sol (v0.0.10), SSLiquidityTemplate.sol (v0.0.6), SSMainPartial.sol (v0.0.25), SSOrderPartial.sol (v0.0.19), SSSettlementPartial.sol (v0.0.58).
+// - v0.0.7: Fixed TypeError in depositNativeToken/depositToken by removing incorrect returns clause in try blocks.
+// - v0.0.6: Fixed ParserError in depositNativeToken by correcting try block syntax.
+// - v0.0.5: Removed inlined ICCListing/ICCLiquidity interfaces, imported from CCMainPartial.sol, aligned with ICCLiquidityTemplate.
+// - v0.0.4: Split deposit into depositNative/depositToken, used separate ETH/ERC20 helpers.
+// - v0.0.3: Used ICCListing/ICCLiquidity, replaced transact with token/native, inlined interfaces.
+// - v0.0.2: Modified withdraw, claimFees, changeDepositor to use msg.sender.
+// - v0.0.1: Initial creation from SSRouter.sol v0.0.
 
-import "./utils/SSSettlementPartial.sol";
+// Compatible with CCMainPartial.sol (v0.0.6), CCListing.sol (v0.0.3), ICCLiquidity.sol.
 
-contract CCLiquidityRouter is SSSettlementPartial {
+import "./utils/CCLiquidityPartial.sol";
+
+contract CCLiquidityRouter is CCLiquidityPartial {
     using SafeERC20 for IERC20;
 
-    function deposit(address listingAddress, bool isTokenA, uint256 inputAmount, address user) external payable onlyValidListing(listingAddress) nonReentrant {
-        // Deposits tokens or ETH to liquidity pool
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
+    function depositNativeToken(address listingAddress, uint256 inputAmount) external payable nonReentrant onlyValidListing(listingAddress) {
+        // Deposits ETH to liquidity pool for msg.sender
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(0);
+        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
-        require(user != address(0), "Invalid user address");
-        address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
-        if (tokenAddress == address(0)) {
-            require(msg.value == inputAmount, "Incorrect ETH amount");
-            try liquidityContract.deposit{value: inputAmount}(user, tokenAddress, inputAmount) {} catch {
-                revert("Deposit failed");
-            }
-        } else {
-            uint256 preBalance = IERC20(tokenAddress).balanceOf(address(this));
-            IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), inputAmount);
-            uint256 postBalance = IERC20(tokenAddress).balanceOf(address(this));
-            uint256 receivedAmount = postBalance - preBalance;
-            require(receivedAmount > 0, "No tokens received");
-            IERC20(tokenAddress).approve(liquidityAddr, receivedAmount);
-            try liquidityContract.deposit(user, tokenAddress, receivedAmount) {} catch {
-                revert("Deposit failed");
-            }
+        require(msg.value == inputAmount, "Incorrect ETH amount");
+        try liquidityContract.depositNative{value: inputAmount}(msg.sender, inputAmount) {
+            // No return value to check
+        } catch {
+            revert("Native deposit failed");
         }
     }
 
-    function withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX) external onlyValidListing(listingAddress) nonReentrant {
+    function depositToken(address listingAddress, address tokenAddress, uint256 inputAmount) external nonReentrant onlyValidListing(listingAddress) {
+        // Deposits ERC20 tokens to liquidity pool for msg.sender
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(0);
+        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
+        require(liquidityContract.routers(address(this)), "Router not registered");
+        require(tokenAddress == listingContract.tokenA() || tokenAddress == listingContract.tokenB(), "Invalid token");
+        require(tokenAddress != address(0), "Use depositNative for ETH");
+        uint256 preBalance = IERC20(tokenAddress).balanceOf(address(this));
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), inputAmount);
+        uint256 postBalance = IERC20(tokenAddress).balanceOf(address(this));
+        uint256 receivedAmount = postBalance - preBalance;
+        require(receivedAmount > 0, "No tokens received");
+        IERC20(tokenAddress).approve(liquidityAddr, receivedAmount);
+        try liquidityContract.depositToken(msg.sender, tokenAddress, receivedAmount) {
+            // No return value to check
+        } catch {
+            revert("Token deposit failed");
+        }
+    }
+
+    function withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX) external nonReentrant onlyValidListing(listingAddress) {
         // Withdraws tokens from liquidity pool for msg.sender
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(0);
+        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.sender != address(0), "Invalid caller address");
-        ISSLiquidityTemplate.PreparedWithdrawal memory withdrawal;
+        ICCLiquidityTemplate.PreparedWithdrawal memory withdrawal;
         if (isX) {
-            try liquidityContract.xPrepOut(msg.sender, inputAmount, index) returns (ISSLiquidityTemplate.PreparedWithdrawal memory w) {
-                withdrawal = w;
+            try liquidityContract.xPrepOut(msg.sender, inputAmount, index) returns (ICCLiquidityTemplate.PreparedWithdrawal memory result) {
+                withdrawal = result;
             } catch {
                 revert("Withdrawal preparation failed");
             }
-            try liquidityContract.xExecuteOut(msg.sender, index, withdrawal) {} catch {
+            try liquidityContract.xExecuteOut(msg.sender, index, withdrawal) {
+                // No return value to check
+            } catch {
                 revert("Withdrawal execution failed");
             }
         } else {
-            try liquidityContract.yPrepOut(msg.sender, inputAmount, index) returns (ISSLiquidityTemplate.PreparedWithdrawal memory w) {
-                withdrawal = w;
+            try liquidityContract.yPrepOut(msg.sender, inputAmount, index) returns (ICCLiquidityTemplate.PreparedWithdrawal memory result) {
+                withdrawal = result;
             } catch {
                 revert("Withdrawal preparation failed");
             }
-            try liquidityContract.yExecuteOut(msg.sender, index, withdrawal) {} catch {
+            try liquidityContract.yExecuteOut(msg.sender, index, withdrawal) {
+                // No return value to check
+            } catch {
                 revert("Withdrawal execution failed");
             }
         }
     }
 
-    function claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount) external onlyValidListing(listingAddress) nonReentrant {
+    function claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount) external nonReentrant onlyValidListing(listingAddress) {
         // Claims fees from liquidity pool for msg.sender
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(0);
+        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.sender != address(0), "Invalid caller address");
-        try liquidityContract.claimFees(msg.sender, listingAddress, liquidityIndex, isX, volumeAmount) {} catch {
+        try liquidityContract.claimFees(msg.sender, listingAddress, liquidityIndex, isX, volumeAmount) {
+            // No return value to check
+        } catch {
             revert("Claim fees failed");
         }
     }
 
-    function changeDepositor(
-        address listingAddress,
-        bool isX,
-        uint256 slotIndex,
-        address newDepositor
-    ) external onlyValidListing(listingAddress) nonReentrant {
+    function changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor) external nonReentrant onlyValidListing(listingAddress) {
         // Changes depositor for a liquidity slot for msg.sender
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView(0);
+        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.sender != address(0), "Invalid caller address");
         require(newDepositor != address(0), "Invalid new depositor");
-        try liquidityContract.changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor) {} catch {
+        try liquidityContract.changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor) {
+            // No return value to check
+        } catch {
             revert("Failed to change depositor");
         }
     }
 
-    function settleLongLiquid(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
+    function settleLongLiquid(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
         // Settles multiple long liquidations up to maxIterations
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
+        ICCListing listingContract = ICCListing(listingAddress);
         uint256[] memory orderIdentifiers = listingContract.longPayoutByIndexView();
         uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ISSListingTemplate.PayoutUpdate[] memory tempPayoutUpdates = new ISSListingTemplate.PayoutUpdate[](iterationCount);
+        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
         uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; i++) {
-            ISSListingTemplate.PayoutUpdate[] memory updates = settleSingleLongLiquid(listingAddress, orderIdentifiers[i]);
-            if (updates.length == 0) {
-                continue;
-            }
-            tempPayoutUpdates[updateIndex++] = updates[0];
+        for (uint256 i = 0; i < iterationCount; ++i) {
+            ICCListing.PayoutUpdate[] memory updates = settleSingleLongLiquid(listingAddress, orderIdentifiers[i]);
+            if (updates.length == 0) continue;
+            tempUpdates[updateIndex++] = updates[0];
         }
-        ISSListingTemplate.PayoutUpdate[] memory finalPayoutUpdates = new ISSListingTemplate.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; i++) {
-            finalPayoutUpdates[i] = tempPayoutUpdates[i];
+        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
+        for (uint256 i = 0; i < updateIndex; ++i) {
+            finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.ssUpdate(address(this), finalPayoutUpdates);
+            listingContract.ssUpdate(address(this), finalUpdates);
         }
     }
 
-    function settleShortLiquid(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
+    function settleShortLiquid(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
         // Settles multiple short liquidations up to maxIterations
-        ISSListingTemplate listingContract = ISSListingTemplate(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ISSLiquidityTemplate liquidityContract = ISSLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
+        ICCListing listingContract = ICCListing(listingAddress);
         uint256[] memory orderIdentifiers = listingContract.shortPayoutByIndexView();
         uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ISSListingTemplate.PayoutUpdate[] memory tempPayoutUpdates = new ISSListingTemplate.PayoutUpdate[](iterationCount);
+        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
         uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; i++) {
-            ISSListingTemplate.PayoutUpdate[] memory updates = settleSingleShortLiquid(listingAddress, orderIdentifiers[i]);
-            if (updates.length == 0) {
-                continue;
-            }
-            tempPayoutUpdates[updateIndex++] = updates[0];
+        for (uint256 i = 0; i < iterationCount; ++i) {
+            ICCListing.PayoutUpdate[] memory updates = settleSingleShortLiquid(listingAddress, orderIdentifiers[i]);
+            if (updates.length == 0) continue;
+            tempUpdates[updateIndex++] = updates[0];
         }
-        ISSListingTemplate.PayoutUpdate[] memory finalPayoutUpdates = new ISSListingTemplate.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; i++) {
-            finalPayoutUpdates[i] = tempPayoutUpdates[i];
+        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
+        for (uint256 i = 0; i < updateIndex; ++i) {
+            finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.ssUpdate(address(this), finalPayoutUpdates);
+            listingContract.ssUpdate(address(this), finalUpdates);
         }
     }
 
-    function settleLongPayouts(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
+    function settleLongPayouts(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
         // Executes long payouts
         executeLongPayouts(listingAddress, maxIterations);
     }
 
-    function settleShortPayouts(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
+    function settleShortPayouts(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
         // Executes short payouts
         executeShortPayouts(listingAddress, maxIterations);
     }
