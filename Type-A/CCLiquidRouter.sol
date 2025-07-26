@@ -6,7 +6,7 @@ pragma solidity ^0.8.2;
 // - v0.0.1: Created CCLiquidRouter.sol, extracted settleBuyLiquid and settleSellLiquid from CCSettlementRouter.sol.
 // Compatible with ICCListing.sol (v0.0.3), ICCLiquidity.sol, CCMainPartial.sol (v0.0.06), CCLiquidPartial.sol (v0.0.1).
 
-import "./CCLiquidPartial.sol";
+import "./utils/CCLiquidPartial.sol";
 
 contract CCLiquidRouter is CCLiquidPartial {
     using SafeERC20 for IERC20;
