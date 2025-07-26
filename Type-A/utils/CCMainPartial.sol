@@ -110,6 +110,7 @@ interface ICCLiquidityTemplate {
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function getPrice() external view returns (uint256);
     function getRegistryAddress() external view returns (address);
+    function routers(address router) external view returns (bool);
     function setRouters(address[] memory _routers) external;
     function setListingId(uint256 _listingId) external;
     function setListingAddress(address _listingAddress) external;
