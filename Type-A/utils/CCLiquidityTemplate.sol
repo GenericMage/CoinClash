@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.1
+// Version: 0.0.2
 // Changes:
+// - v0.0.2: Added support for initial deposits in zero-balance pool by removing liquidity checks in depositToken/depositNative (lines 247-248, 279-280). Handled zero currentPrice in xPrepOut/yPrepOut with default PreparedWithdrawal (lines 305-306, 357-358). Added DepositReceived event for debugging (line 58).
 // - v0.0.1: Fixed syntax error in setRouters function (routers[_routers[i] = true; to routers[_routers[i]] = true;). Modified xExecuteOut and yExecuteOut to use transactToken and transactNative for ERC20 and ETH transfers, replacing direct safeTransfer and low-level call. Preserved call tree (update, globalizeUpdate, updateRegistry) to avoid stack-too-deep errors. Renamed contract from SSLiquidityTemplate to CCLiquidityTemplate. Split deposit into depositToken and depositNative, and transact into transactToken and transactNative to segregate ERC20 and ETH handling. Updated ICCListing interface to ICCLiquidity. Compatible with CCListingTemplate.sol v0.0.10, SSAgent.sol v0.0.2.
 
 import "../imports/SafeERC20.sol";
@@ -91,12 +92,13 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     uint256[] public activeYLiquiditySlots;
     mapping(address => uint256[]) public userIndex;
 
-    event LiquidityUpdated(uint256 listingId, uint256 xLiquid, uint256 yLiquid);
-    event FeesUpdated(uint256 listingId, uint256 xFees, uint256 yFees);
-    event FeesClaimed(uint256 listingId, uint256 liquidityIndex, uint256 xFees, uint256 yFees);
-    event SlotDepositorChanged(bool isX, uint256 slotIndex, address indexed oldDepositor, address indexed newDepositor);
+    event LiquidityUpdated(uint256 indexed listingId, uint256 xLiquid, uint256 yLiquid);
+    event FeesUpdated(uint256 indexed listingId, uint256 xFees, uint256 yFees);
+    event FeesClaimed(uint256 indexed listingId, uint256 liquidityIndex, uint256 xFees, uint256 yFees);
+    event SlotDepositorChanged(bool isX, uint256 indexed slotIndex, address indexed oldDepositor, address indexed newDepositor);
     event GlobalizeUpdateFailed(address indexed caller, uint256 listingId, bool isX, uint256 amount);
     event UpdateRegistryFailed(address indexed caller, bool isX);
+    event DepositReceived(address indexed caller, address token, uint256 amount, uint256 normalizedAmount);
 
     // Normalizes amount to 18 decimals
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
@@ -327,6 +329,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         require(token != address(0), "Use depositNative for ETH");
         require(caller != address(0), "Invalid caller");
         uint8 decimals = IERC20(token).decimals();
+        require(decimals > 0, "Invalid token decimals");
         uint256 preBalance = IERC20(token).balanceOf(address(this));
         IERC20(token).transferFrom(msg.sender, address(this), amount);
         uint256 postBalance = IERC20(token).balanceOf(address(this));
@@ -339,6 +342,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         this.update(caller, updates);
         globalizeUpdate(caller, token == tokenA, receivedAmount, true);
         updateRegistry(caller, token == tokenA);
+        emit DepositReceived(caller, token, receivedAmount, normalizedAmount);
     }
 
     // Handles native ETH deposits
@@ -355,6 +359,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         this.update(caller, updates);
         globalizeUpdate(caller, tokenA == address(0), amount, true);
         updateRegistry(caller, tokenA == address(0));
+        emit DepositReceived(caller, address(0), amount, normalizedAmount);
     }
 
     // Prepares withdrawal for x-token slot
@@ -372,7 +377,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
 
         if (deficit > 0) {
             uint256 currentPrice = ICCLiquidity(listingAddress).getPrice();
-            require(currentPrice > 0, "Price cannot be zero");
+            if (currentPrice == 0) return PreparedWithdrawal(withdrawAmountA, 0);
             uint256 compensation = (deficit * 1e18) / currentPrice;
             withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
         }
@@ -430,7 +435,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
 
         if (deficit > 0) {
             uint256 currentPrice = ICCLiquidity(listingAddress).getPrice();
-            require(currentPrice > 0, "Price cannot be zero");
+            if (currentPrice == 0) return PreparedWithdrawal(0, withdrawAmountB);
             uint256 compensation = (deficit * currentPrice) / 1e18;
             withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
         }
