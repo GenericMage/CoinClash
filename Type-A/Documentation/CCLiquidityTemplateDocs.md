@@ -1,11 +1,11 @@
 # CCLiquidityTemplate Documentation
 
 ## Overview
-The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decentralized trading platform, managing liquidity deposits, withdrawals, and fee claims. It inherits `ReentrancyGuard` for security and uses `SafeERC20` for token operations, integrating with `ICCAgent` and `ITokenRegistry` for global updates and synchronization. State variables are private, accessed via view functions with unique names, and amounts are normalized to 1e18 for precision across token decimals. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decentralized trading platform, managing liquidity deposits, withdrawals, and fee claims. It inherits `ReentrancyGuard` for security and uses `SafeERC20` for token operations, integrating with `ICCAgent` and `ITokenRegistry` for global updates and synchronization. State variables are public, accessed via view functions with unique names, and amounts are normalized to 1e18 for precision across token decimals. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.1 (Updated 2025-07-25)
+**Version**: 0.0.2 (Updated 2025-07-26)
 
 ### State Variables
 - **`routersSet`**: `bool public` - Tracks if routers are set, prevents re-setting.
@@ -136,7 +136,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
     - `updateType=2`: Updates `xLiquiditySlots`, `activeXLiquiditySlots`, `userIndex`, sets `dFeesAcc` to `yFeesAcc`.
     - `updateType=3`: Updates `yLiquiditySlots`, `activeYLiquiditySlots`, `userIndex`, sets `dFeesAcc` to `xFeesAcc`.
   - Emits `LiquidityUpdated`.
-- **Balance Checks**: Checks `xLiquid` or `yLiquid` for balance updates.
+- **Balance Checks**: None, assumes normalized input.
 - **Mappings/Structs Used**:
   - **Mappings**: `xLiquiditySlots`, `yLiquiditySlots`, `activeXLiquiditySlots`, `activeYLiquiditySlots`, `userIndex`, `liquidityDetail`.
   - **Structs**: `UpdateType`, `LiquidityDetails`, `Slot`.
@@ -170,6 +170,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - Performs pre/post balance checks, transfers via `SafeERC20.transferFrom`.
   - Normalizes `amount`, creates `UpdateType` for slot allocation (sets `dFeesAcc`).
   - Calls `update`, `globalizeUpdate`, `updateRegistry`.
+  - Emits `DepositReceived`.
 - **Balance Checks**: Pre/post balance for tokens.
 - **Mappings/Structs Used**:
   - **Mappings**: `xLiquiditySlots`, `yLiquiditySlots`, `activeXLiquiditySlots`, `activeYLiquiditySlots`, `userIndex`, `liquidityDetail`.
@@ -186,6 +187,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - Validates `msg.value` equals `amount`.
   - Normalizes `amount`, creates `UpdateType` for slot allocation (sets `dFeesAcc`).
   - Calls `update`, `globalizeUpdate`, `updateRegistry`.
+  - Emits `DepositReceived`.
 - **Balance Checks**: Verifies `msg.value` matches `amount`.
 - **Mappings/Structs Used**:
   - **Mappings**: `xLiquiditySlots`, `yLiquiditySlots`, `activeXLiquiditySlots`, `activeYLiquiditySlots`, `userIndex`, `liquidityDetail`.
@@ -204,8 +206,8 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - Calculates `withdrawAmountA` as the minimum of requested `amount` and available `xLiquid`.
   - Computes `deficit` as any shortfall (`amount - withdrawAmountA`).
   - If `deficit` exists, fetches `ICCLiquidity.getPrice` to convert `deficit` to token B (`withdrawAmountB = (deficit * 1e18) / getPrice()`), capped by `yLiquid`.
-  - Returns `PreparedWithdrawal` with `amountA` and `amountB`.
-- **Balance Checks**: Verifies `xLiquid`, `yLiquid` sufficiency.
+  - Returns `PreparedWithdrawal` with `amountA` and `amountB`, or default if `currentPrice` is zero.
+- **Balance Checks**: Verifies slot `allocation`.
 - **Mappings/Structs Used**:
   - **Mappings**: `xLiquiditySlots`, `liquidityDetail`.
   - **Structs**: `PreparedWithdrawal`, `LiquidityDetails`, `Slot`.
@@ -237,8 +239,8 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - Calculates `withdrawAmountB` as the minimum of requested `amount` and available `yLiquid`.
   - Computes `deficit` as any shortfall (`amount - withdrawAmountB`).
   - If `deficit` exists, fetches `ICCLiquidity.getPrice` to convert `deficit` to token A (`withdrawAmountA = (deficit * getPrice()) / 1e18`), capped by `xLiquid`.
-  - Returns `PreparedWithdrawal` with `amountA` and `amountB`.
-- **Balance Checks**: Verifies `yLiquid`, `xLiquid` sufficiency.
+  - Returns `PreparedWithdrawal` with `amountA` and `amountB`, or default if `currentPrice` is zero.
+- **Balance Checks**: Verifies slot `allocation`.
 - **Mappings/Structs Used**: `yLiquiditySlots`, `liquidityDetail`, `PreparedWithdrawal`, `Slot`.
 - **Restrictions**: Same as `xPrepOut`.
 - **Gas Usage Controls**: Same as `xPrepOut`.
@@ -261,7 +263,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - `_listingAddress` - Listing contract address.
   - `liquidityIndex` - Slot index.
   - `isX` - True for token A, false for token B.
-  - `volume` - Unused (ignored for compatibility).
+  - `volume` - Ignored (for compatibility).
 - **Behavior**: Claims fees (yFees for xSlots, xFees for ySlots), resets `dFeesAcc` to current `yFeesAcc` (xSlots) or `xFeesAcc` (ySlots).
 - **Internal Call Flow**:
   - Validates listing via `ICCLiquidity.volumeBalances`.
@@ -273,7 +275,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
     - Resets `dFeesAcc` to `yFeesAcc` (xSlots) or `xFeesAcc` (ySlots).
     - Transfers fees via `transactToken`.
     - Emits `FeesClaimed` with fee amounts.
-- **Balance Checks**: Verifies `xBalance` (from `volumeBalances`), `xLiquid`/`yLiquid`, `xFees`/`yFees`.
+- **Balance Checks**: Verifies `xBalance` (from `volumeBalances`), `allocation`.
 - **Mappings/Structs Used**:
   - **Mappings**: `xLiquiditySlots`, `yLiquiditySlots`, `liquidityDetail`.
   - **Structs**: `FeeClaimContext`, `UpdateType`, `LiquidityDetails`, `Slot`.
@@ -285,7 +287,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - `caller` - User address.
   - `token` - Token A or B.
   - `amount` - Denormalized amount.
-  - `recipient` - Recipient address.
 - **Behavior**: Transfers ERC20 tokens, updates liquidity (`xLiquid` or `yLiquid`).
 - **Internal Call Flow**:
   - Normalizes `amount` using `IERC20.decimals`.
@@ -350,52 +351,36 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
 - **Restrictions**: `nonReentrant`, requires `routers[msg.sender]`.
 - **Gas Usage Controls**: Minimal, single state update.
 
-#### getListingAddress(uint256) returns (address)
+#### getListingAddress(uint256) view returns (address)
 - **Behavior**: Returns `listingAddress`.
-- **Internal Call Flow**: Direct read from state.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, single state read.
 
-#### liquidityAmounts() returns (uint256 xAmount, uint256 yAmount)
+#### liquidityAmounts() view returns (uint256 xAmount, uint256 yAmount)
 - **Behavior**: Returns `xLiquid` and `yLiquid` from `liquidityDetail`.
-- **Internal Call Flow**: Reads `liquidityDetail`.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, single struct read.
 
-#### liquidityDetailsView() returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc)
+#### liquidityDetailsView() view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc)
 - **Behavior**: Returns all fields of `liquidityDetail`.
-- **Internal Call Flow**: Reads `liquidityDetail`.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, single struct read.
 
-#### activeXLiquiditySlotsView() returns (uint256[] memory)
+#### activeXLiquiditySlotsView() view returns (uint256[] memory)
 - **Behavior**: Returns `activeXLiquiditySlots` array.
-- **Internal Call Flow**: Direct read from state.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, array read.
 
-#### activeYLiquiditySlotsView() returns (uint256[] memory)
+#### activeYLiquiditySlotsView() view returns (uint256[] memory)
 - **Behavior**: Returns `activeYLiquiditySlots` array.
-- **Internal Call Flow**: Direct read from state.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, array read.
 
-#### userIndexView(address user) returns (uint256[] memory)
+#### userIndexView(address user) view returns (uint256[] memory)
 - **Behavior**: Returns `userIndex[user]` array of slot indices.
-- **Internal Call Flow**: Direct read from `userIndex` mapping.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, mapping read.
 
-#### getXSlotView(uint256 index) returns (Slot memory)
+#### getXSlotView(uint256 index) view returns (Slot memory)
 - **Behavior**: Returns `xLiquiditySlots[index]`.
-- **Internal Call Flow**: Reads `xLiquiditySlots` mapping.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, mapping read.
 
-#### getYSlotView(uint256 index) returns (Slot memory)
+#### getYSlotView(uint256 index) view returns (Slot memory)
 - **Behavior**: Returns `yLiquiditySlots[index]`.
-- **Internal Call Flow**: Reads `yLiquiditySlots` mapping.
-- **Restrictions**: None (view function).
 - **Gas Usage Controls**: Minimal, mapping read.
 
 ### Additional Details
@@ -405,12 +390,12 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
 - **Token Usage**:
   - xSlots: Provide token A liquidity, claim yFees.
   - ySlots: Provide token B liquidity, claim xFees.
-- **Events**: `LiquidityUpdated`, `FeesUpdated`, `FeesClaimed`, `SlotDepositorChanged`, `GlobalizeUpdateFailed`, `UpdateRegistryFailed`.
+- **Events**: `LiquidityUpdated`, `FeesUpdated`, `FeesClaimed`, `SlotDepositorChanged`, `GlobalizeUpdateFailed`, `UpdateRegistryFailed`, `DepositReceived`.
 - **Safety**:
   - Explicit casting for interfaces (e.g., `ICCLiquidity`, `IERC20`, `ITokenRegistry`).
   - No inline assembly, uses high-level Solidity.
   - Try-catch for external calls (`transact*`, `globalizeUpdate`, `updateRegistry`, `ICCLiquidity.volumeBalances`, `ICCLiquidity.getPrice`) to handle failures.
-  - Hidden state variables accessed via view functions (e.g., `getXSlotView`, `liquidityDetailsView`).
+  - Public state variables accessed via view functions (e.g., `getXSlotView`, `liquidityDetailsView`).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
 - **Fee System**:
   - Cumulative fees (`xFeesAcc`, `yFeesAcc`) track total fees added, never decrease.
@@ -418,9 +403,3 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), is part of a decent
   - Fee share based on `contributedFees = feesAcc - dFeesAcc`, proportional to liquidity contribution, capped at available fees.
 - **Compatibility**: Aligned with `CCListingTemplate` (v0.0.10), `SSAgent` (v0.0.2).
 - **Caller Param**: Functionally unused in `addFees` and `updateLiquidity`, included for router validation.
-- **Changes from SSLiquidityTemplate**:
-  - Renamed to `CCLiquidityTemplate`.
-  - Split `deposit` into `depositToken` and `depositNative`.
-  - Split `transact` into `transactToken` and `transactNative`.
-  - Updated `xExecuteOut` and `yExecuteOut` to use `transactToken` and `transactNative` for transfers.
-  - Interface renamed from `ISSListing` to `ICCLiquidity`.
