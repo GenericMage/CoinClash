@@ -5,7 +5,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.7 (Updated 2025-07-26)
+**Version**: 0.0.9 (Updated 2025-07-27)
 
 ### State Variables
 - **`_routers`**: `mapping(address => bool) private` - Maps addresses to authorized routers.
@@ -203,7 +203,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`.
 - **Gas Usage Controls**: Dynamic array resizing, loop over `updates`, emits events for updates, external Uniswap V2 reserve calls.
 
-#### ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates)
+#### ssUpdate(address caller, ListingPayoutUpdate[] memory payoutUpdates)
 - **Parameters**:
   - `caller` - Router address.
   - `payoutUpdates` - Array of payout updates.
@@ -214,7 +214,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Balance Checks**: None, defers to `transactToken` or `transactNative`.
 - **Mappings/Structs Used**:
   - **Mappings**: `_longPayouts`, `_shortPayouts`, `_longPayoutsByIndex`, `_shortPayoutsByIndex`, `_userPayoutIDs`.
-  - **Structs**: `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`.
+  - **Structs**: `ListingPayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`.
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`.
 - **Gas Usage Controls**: Loop over `payoutUpdates`, dynamic arrays, minimal state writes.
 
@@ -444,5 +444,5 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - Hidden state variables accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`, etc.).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
   - Supports zero-balance pools via `volumeBalances` delegation to `liquidityAmounts`.
-- **Compatibility**: Aligned with `CCLiquidityRouter` (v0.0.9), `ICCAgent` (v0.0.2), `CCLiquidityTemplate` (v0.0.2), and Uniswap V2 for price derivation.
+- **Compatibility**: Aligned with `CCLiquidityRouter` (v0.0.9), `ICCAgent` (v0.0.2), `CCLiquidityTemplate` (v0.0.3), and Uniswap V2 for price derivation.
 - **Price vs Prices Clarification**: `_currentPrice` is a state variable updated in `update`, `transactToken`, and `transactNative`, potentially laggy. `prices` is a view function computing price on-demand from Uniswap V2 reserves, using the same formula, preferred for real-time external queries.
