@@ -1,11 +1,12 @@
 # CCListingTemplate Documentation
 
 ## Overview
-The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentralized trading platform component that manages buy/sell orders, payouts, and volume balances, integrating with Uniswap V2 for price derivation. It inherits `ReentrancyGuard` for security and uses `SafeERC20` for token operations, interfacing with `ICCAgent`, `ITokenRegistry`, `IUniswapV2Pair`, and `ICCLiquidityTemplate` for global updates, synchronization, reserve fetching, and liquidity amounts. State variables are private, accessed via view functions with unique names, and amounts are normalized to 1e18 for precision across token decimals. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentralized trading platform component that manages buy/sell orders, payouts, and volume balances, integrating with Uniswap V2 for price derivation. It inherits `ReentrancyGuard` for security and uses `IERC20` for token operations, interfacing with `ICCAgent`, `ITokenRegistry`, `IUniswapV2Pair`, and `ICCLiquidityTemplate` for global updates, synchronization, reserve fetching, and liquidity amounts. State variables are private, accessed via view functions with unique names, and amounts are normalized to 1e18 for precision across token decimals. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.9 (Updated 2025-07-27)
+**Version**: 0.0.10 (Updated 2025-07-27)
+
 
 ### State Variables
 - **`_routers`**: `mapping(address => bool) private` - Maps addresses to authorized routers.
@@ -228,7 +229,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Internal Call Flow**:
   - Normalizes `amount` using `_decimalsA` or `_decimalsB`.
   - Updates `xBalance` (tokenA) or `yBalance` (tokenB), supports zero-balance deposits.
-  - Transfers via `SafeERC20.safeTransfer`.
+  - Transfers via `IERC20.transfer`.
   - Updates `xVolume`/`yVolume`, `_lastDayFee`, `_currentPrice` from Uniswap V2 reserves.
   - Calls `_updateRegistry`, emits `BalancesUpdated`.
 - **Balance Checks**: None, supports initial deposits.
@@ -290,8 +291,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Mappings/Structs Used**: None directly, uses external `liquidityAmounts`.
 - **Gas Usage Controls**: Minimal, single external call.
 
-#### liquidityAddressView(uint256) view returns (address)
-- **Parameters**: Ignored listing ID.
+#### liquidityAddressView() view returns (address)
 - **Behavior**: Returns `_liquidityAddress`.
 - **Gas Usage Controls**: Minimal, single state read.
 
@@ -444,5 +444,5 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - Hidden state variables accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`, etc.).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
   - Supports zero-balance pools via `volumeBalances` delegation to `liquidityAmounts`.
-- **Compatibility**: Aligned with `CCLiquidityRouter` (v0.0.9), `ICCAgent` (v0.0.2), `CCLiquidityTemplate` (v0.0.3), and Uniswap V2 for price derivation.
+- **Compatibility**: Aligned with `CCLiquidityRouter` (v0.0.11), `ICCAgent` (v0.0.2), `CCLiquidityTemplate` (v0.0.5).
 - **Price vs Prices Clarification**: `_currentPrice` is a state variable updated in `update`, `transactToken`, and `transactNative`, potentially laggy. `prices` is a view function computing price on-demand from Uniswap V2 reserves, using the same formula, preferred for real-time external queries.
