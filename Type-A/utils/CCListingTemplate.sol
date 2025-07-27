@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.7 (Updated)
+// Version: 0.0.9
 // Changes:
+// - v0.0.9: Renamed PayoutUpdate in ICCListing interface to ListingPayoutUpdate to resolve DeclarationError conflict with contract's PayoutUpdate struct (line 24). Updated ssUpdate function to use ListingPayoutUpdate (line 546). Changed getTokens return parameters to (_tokenA, _tokenB) to avoid naming conflict with tokenA() and tokenB() functions (line 660). Compatible with CCLiquidityTemplate.sol v0.0.3.
+// - v0.0.8: Added getTokens() to return (tokenA, tokenB) as per ICCListingTemplate in CCAgent.sol (line 686). Updated liquidityAddressView to remove uint256 parameter to match ICCListing in CCAgent.sol (line 614). Ensured no conflicts with existing tokenA() and tokenB() functions.
 // - v0.0.7: Fixed TypeError at line 375 in globalizeUpdate by replacing order.recipientAddress with order.recipient for SellOrderCore (line 375). Updated getSellOrderCore return parameter from recipientAddress to recipient for consistency (line 686). Compatible with CCLiquidityRouter.sol v0.0.9, CCLiquidityTemplate.sol v0.0.2.
 // - v0.0.6: Fixed ParserError at line 555 in ssUpdate by removing invalid syntax 'payout.recipient Roshi, ...' (lines 553-562).
 // - v0.0.5: Renamed tokenX/Y to _tokenA/B, decimalX/Y to _decimalsA/B, price to _currentPrice, made state variables private with view functions (lines 42-61, 124-195). Added longPayoutByIndex, shortPayoutByIndex to ICCListing (lines 24-25). Fixed syntax errors: removed decimals() call (line 385), corrected uniV2Pair/uniV2 (lines 460-474), fixed callerAddress, p.recipientAddress in ssUpdate (lines 560-567), corrected lastDayFeeBalance (line 434), fixed SellOrderCores (line 717). Added decimals validation in setTokens (lines 381-384). Ensured volumeBalances delegates to liquidityAmounts (lines 672-677).
@@ -17,17 +19,17 @@ import "../imports/ReentrancyGuard.sol";
 interface ICCListing {
     function prices(uint256) external view returns (uint256);
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView(uint256) external view returns (address);
+    function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
-    function ssUpdate(address caller, PayoutUpdate[] calldata updates) external;
-    function longPayoutByIndex() external view returns (uint256[] memory);
-    function shortPayoutByIndex() external view returns (uint256[] memory);
-    struct PayoutUpdate {
+    struct ListingPayoutUpdate { // Renamed to avoid conflict with contract's PayoutUpdate
         uint8 payoutType; // 0: Long, 1: Short
         address recipient;
         uint256 required;
     }
+    function ssUpdate(address caller, ListingPayoutUpdate[] calldata updates) external;
+    function longPayoutByIndex() external view returns (uint256[] memory);
+    function shortPayoutByIndex() external view returns (uint256[] memory);
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
 }
@@ -50,6 +52,10 @@ interface ICCAgent {
         uint256 amount,
         uint8 status
     ) external;
+}
+
+interface ICCListingTemplate {
+    function getTokens() external view returns (address tokenA, address tokenB);
 }
 
 interface ICCLiquidityTemplate {
@@ -535,10 +541,10 @@ contract CCListingTemplate is ReentrancyGuard {
     }
 
     // Processes payout updates
-    function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external nonReentrant {
+    function ssUpdate(address caller, ICCListing.ListingPayoutUpdate[] memory payoutUpdates) external nonReentrant {
         require(_routers[caller], "Router only");
         for (uint256 i = 0; i < payoutUpdates.length; i++) {
-            PayoutUpdate memory p = payoutUpdates[i];
+            ICCListing.ListingPayoutUpdate memory p = payoutUpdates[i];
             uint256 orderId = _nextOrderId;
             if (p.payoutType == 0) {
                 LongPayoutStruct storage payout = _longPayouts[orderId];
@@ -657,6 +663,10 @@ contract CCListingTemplate is ReentrancyGuard {
         return _tokenB;
     }
 
+    function getTokens() external view returns (address _tokenA, address _tokenB) {
+        return (_tokenA, _tokenB); // Returns tokenA and tokenB as a tuple for ICCListingTemplate compliance
+    }
+
     function decimalsA() external view returns (uint8) {
         return _decimalsA;
     }
@@ -685,8 +695,8 @@ contract CCListingTemplate is ReentrancyGuard {
         return _registryAddress;
     }
 
-    function liquidityAddressView(uint256) external view returns (address) {
-        return _liquidityAddress;
+    function liquidityAddressView() external view returns (address) {
+        return _liquidityAddress; // Returns liquidity address without parameter for ICCListing compliance
     }
 
     function nextOrderIdView() external view returns (uint256) {

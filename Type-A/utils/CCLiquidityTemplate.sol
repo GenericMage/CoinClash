@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.2
+// Version: 0.0.3
 // Changes:
+// - v0.0.3: Updated ICCAgent interface to allow tokenA or tokenB to be address(0) for native ETH pairs (line 32). No changes to function implementations, as they are already compliant with ISSLiquidityTemplate in CCAgent.sol. Ensured compatibility with CCListingTemplate.sol v0.0.8.
 // - v0.0.2: Added support for initial deposits in zero-balance pool by removing liquidity checks in depositToken/depositNative (lines 247-248, 279-280). Handled zero currentPrice in xPrepOut/yPrepOut with default PreparedWithdrawal (lines 305-306, 357-358). Added DepositReceived event for debugging (line 58).
 // - v0.0.1: Fixed syntax error in setRouters function (routers[_routers[i] = true; to routers[_routers[i]] = true;). Modified xExecuteOut and yExecuteOut to use transactToken and transactNative for ERC20 and ETH transfers, replacing direct safeTransfer and low-level call. Preserved call tree (update, globalizeUpdate, updateRegistry) to avoid stack-too-deep errors. Renamed contract from SSLiquidityTemplate to CCLiquidityTemplate. Split deposit into depositToken and depositNative, and transact into transactToken and transactNative to segregate ERC20 and ETH handling. Updated ICCListing interface to ICCLiquidity. Compatible with CCListingTemplate.sol v0.0.10, SSAgent.sol v0.0.2.
 
@@ -22,8 +23,8 @@ interface ICCLiquidity {
 interface ICCAgent {
     function globalizeLiquidity(
         uint256 listingId,
-        address tokenActivated,
-        address tokenDeactivated,
+        address tokenA,
+        address tokenB,
         address user,
         uint256 amount,
         bool isDeposit
