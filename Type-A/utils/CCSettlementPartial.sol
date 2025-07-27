@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.17
+// Version: 0.0.18
 // Changes:
-// - v0.0.17: Removed liquid settlement functions (_prepBuyLiquidUpdates, _prepSellLiquidUpdates, executeSingleBuyLiquid, executeSingleSellLiquid, _prepareLiquidityTransaction, _checkAndTransferPrincipal, _updateLiquidity) and ICCLiquidity interface, retained Uniswap V2 settlement logic.
-// - v0.0.16: Removed duplicated _prepareSellSwapData (inherited from CCUniPartial.sol), added routers function to ICCLiquidity.
+// - v0.0.18: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, completed _computeAmountSent with pre/post balance checks, removed transfer success checks in _prepBuyOrderUpdate and _prepSellOrderUpdate, added pre/post balance checks for transactToken.
+// - v0.0.17: Removed liquid settlement functions and ICCLiquidity interface, retained Uniswap V2 settlement logic.
+// - v0.0.16: Removed duplicated _prepareSellSwapData, added routers function to ICCLiquidity.
 // - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
 // - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
-// Compatible with ICCListing.sol (v0.0.3), CCUniPartial.sol (v0.0.6), CCSettlementRouter.sol (v0.0.4).
+// Compatible with ICCListing.sol (v0.0.3), CCUniPartial.sol (v0.0.7), CCSettlementRouter.sol (v0.0.5).
 
 import "./CCUniPartial.sol";
 
 contract CCSettlementPartial is CCUniPartial {
-    using SafeERC20 for IERC20;
-
     struct PrepOrderUpdateResult {
         address tokenAddress;
         uint8 tokenDecimals;
@@ -63,8 +62,7 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 preBalance = tokenAddress == address(0)
             ? recipientAddress.balance
             : IERC20(tokenAddress).balanceOf(recipientAddress);
-        uint256 postBalance = preBalance; // Placeholder, actual logic depends on transfer
-        return postBalance > preBalance ? postBalance - preBalance : 0;
+        return preBalance; // Return preBalance for use in post-transfer calculation
     }
 
     function _prepBuyOrderUpdate(
@@ -77,21 +75,21 @@ contract CCSettlementPartial is CCUniPartial {
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
+        uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress) {} catch {
                 result.amountReceived = 0;
                 result.normalizedReceived = 0;
             }
+            uint256 postBalance = result.recipientAddress.balance;
+            result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         } else {
-            try listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress) {} catch {
-                result.amountReceived = 0;
-                result.normalizedReceived = 0;
-            }
+            listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress);
+            uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+            result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         }
-        if (result.amountReceived > 0) {
-            result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
-        }
-        result.amountSent = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
+        result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
+        result.amountSent = result.amountReceived;
     }
 
     function _prepSellOrderUpdate(
@@ -104,21 +102,21 @@ contract CCSettlementPartial is CCUniPartial {
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
         (result.recipientAddress, result.makerAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
+        uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress) {} catch {
                 result.amountReceived = 0;
                 result.normalizedReceived = 0;
             }
+            uint256 postBalance = result.recipientAddress.balance;
+            result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         } else {
-            try listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress) {} catch {
-                result.amountReceived = 0;
-                result.normalizedReceived = 0;
-            }
+            listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress);
+            uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+            result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         }
-        if (result.amountReceived > 0) {
-            result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
-        }
-        result.amountSent = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
+        result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
+        result.amountSent = result.amountReceived;
     }
 
     function _processBuyOrder(

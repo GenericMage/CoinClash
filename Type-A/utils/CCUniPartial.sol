@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.6
+// Version: 0.0.13
 // Changes:
-// - v0.0.6: Removed inlined ICCListing, imported from CCMainPartial.sol (v0.0.06) to avoid duplication.
-// - v0.0.5: Marked transactNative as payable in inlined ICCListing (reverted due to duplication).
+// - v0.0.13: Added amountInReceived to ETHSwapData struct, updated _performETHSellSwap and _finalizeETHSellSwap to use it for tax handling consistency.
+// - v0.0.12: Modified _executeTokenSwap and _performETHSellSwap to use amountInReceived after transactToken, even if less than denormAmountIn, to handle transfer taxes gracefully.
+// - v0.0.11: Refactored _executeBuyETHSwap and _executeSellETHSwapInternal into single-task helper functions (_prepareETHSwap, _performETHSwap, _finalizeETHBuySwap, _finalizeETHSellSwap) to resolve stack too deep error, using structs for data passing.
+// - v0.0.10: Renamed _executeSellETHSwap to _executeSellETHSwapInternal, updated to use SwapContext, fixed undeclared identifier error in _executePartialSellSwap.
+// - v0.0.9: Introduced generic SwapContext struct and refactored _executeTokenSwap to use it, resolving TypeError from passing SellSwapContext to BuySwapContext.
+// - v0.0.8: Refactored _executeBuyTokenSwap and _executeSellTokenSwap to use internal call tree with helper functions to resolve stack too deep error.
+// - v0.0.7: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, removed safeApprove, used direct approve, added pre/post balance checks for transactToken.
+// - v0.0.6: Removed inlined ICCListing, imported from CCMainPartial.sol to avoid duplication.
+// - v0.0.5: Marked transactNative as payable in inlined ICCListing (reverted).
 // - v0.0.4: Replaced ISSListingTemplate with ICCListing, updated transact to transactNative/transactToken.
 // - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext struct.
 // - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext struct.
-// Compatible with CCMainPartial.sol (v0.0.06), CCSettlementPartial.sol (v0.0.14), CCSettlementRouter.sol (v0.0.2), ICCLiquidity.sol.
+// Compatible with CCMainPartial.sol (v0.0.07), CCSettlementPartial.sol (v0.0.18), CCSettlementRouter.sol (v0.0.5).
 
 import "./CCMainPartial.sol";
 
@@ -42,8 +49,6 @@ interface IUniswapV2Router02 {
 }
 
 contract CCUniPartial is CCMainPartial {
-    using SafeERC20 for IERC20;
-
     struct MaxAmountInContext {
         uint256 reserveIn;
         uint8 decimalsIn;
@@ -51,7 +56,7 @@ contract CCUniPartial is CCMainPartial {
         uint256 currentPrice;
     }
 
-    struct BuySwapContext {
+    struct SwapContext {
         ICCListing listingContract;
         address makerAddress;
         address recipientAddress;
@@ -62,21 +67,6 @@ contract CCUniPartial is CCMainPartial {
         uint8 decimalsOut;
         uint256 denormAmountIn;
         uint256 denormAmountOutMin;
-        uint256 price;
-        uint256 expectedAmountOut;
-    }
-
-    struct SellSwapContext {
-        ICCListing listingContract;
-        address makerAddress;
-        address recipientAddress;
-        uint8 status;
-        address tokenIn;
-        address tokenOut;
-        uint8 decimalsIn;
-        uint8 decimalsOut;
-        uint256 denormAmountIn;
-        uint256 amountOutMin;
         uint256 price;
         uint256 expectedAmountOut;
     }
@@ -109,6 +99,26 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         uint256 amountSent;
+    }
+
+    struct TokenSwapData {
+        uint256 preBalanceIn;
+        uint256 postBalanceIn;
+        uint256 amountInReceived;
+        uint256 preBalanceOut;
+        uint256 postBalanceOut;
+        uint256 amountReceived;
+        uint256 amountOut;
+    }
+
+    struct ETHSwapData {
+        uint256 preBalanceIn; // Added for token-to-ETH swap input balance tracking
+        uint256 postBalanceIn; // Added for token-to-ETH swap input balance tracking
+        uint256 amountInReceived; // Added to store received token amount after tax
+        uint256 preBalanceOut;
+        uint256 postBalanceOut;
+        uint256 amountReceived;
+        uint256 amountOut;
     }
 
     function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
@@ -235,7 +245,7 @@ contract CCUniPartial is CCMainPartial {
         address listingAddress,
         uint256 orderIdentifier,
         uint256 amountIn
-    ) internal view returns (BuySwapContext memory context, address[] memory path) {
+    ) internal view returns (SwapContext memory context, address[] memory path) {
         // Prepares swap data for buy order, including order details and swap path
         ICCListing listingContract = ICCListing(listingAddress);
         (context.makerAddress, context.recipientAddress, context.status) = listingContract.getBuyOrderCore(orderIdentifier);
@@ -259,113 +269,11 @@ contract CCUniPartial is CCMainPartial {
         }
     }
 
-    function _executeBuyETHSwap(
-        BuySwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) internal returns (ICCListing.UpdateType[] memory) {
-        // Executes ETH-to-token swap for buy order
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        address[] memory path = new address[](2);
-        path[0] = context.tokenIn;
-        path[1] = context.tokenOut;
-        uint256 preBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        try context.listingContract.transactNative{value: context.denormAmountIn}(address(this), context.denormAmountIn, address(this)) {} catch {
-            return new ICCListing.UpdateType[](0);
-        }
-        try router.swapExactETHForTokens{value: context.denormAmountIn}(
-            context.denormAmountOutMin,
-            path,
-            context.recipientAddress,
-            block.timestamp + 300
-        ) returns (uint256[] memory amounts) {
-            uint256 amountOut = amounts[1];
-            uint256 postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-            uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
-            if (amountReceived == 0) {
-                return new ICCListing.UpdateType[](0);
-            }
-            BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
-                makerAddress: context.makerAddress,
-                recipient: context.recipientAddress,
-                status: context.status,
-                amountReceived: amountReceived,
-                normalizedReceived: normalize(amountReceived, context.decimalsOut),
-                amountSent: context.denormAmountIn
-            });
-            return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-        } catch {
-            return new ICCListing.UpdateType[](0);
-        }
-    }
-
-    function _executeBuyTokenSwap(
-        BuySwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) internal returns (ICCListing.UpdateType[] memory) {
-        // Executes token-to-token swap for buy order
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        address[] memory path = new address[](2);
-        path[0] = context.tokenIn;
-        path[1] = context.tokenOut;
-        uint256 preBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            return new ICCListing.UpdateType[](0);
-        }
-        IERC20(context.tokenIn).safeApprove(uniswapV2Router, context.denormAmountIn);
-        try router.swapExactTokensForTokens(
-            context.denormAmountIn,
-            context.denormAmountOutMin,
-            path,
-            context.recipientAddress,
-            block.timestamp + 300
-        ) returns (uint256[] memory amounts) {
-            uint256 amountOut = amounts[1];
-            uint256 postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-            uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
-            if (amountReceived == 0) {
-                return new ICCListing.UpdateType[](0);
-            }
-            BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
-                makerAddress: context.makerAddress,
-                recipient: context.recipientAddress,
-                status: context.status,
-                amountReceived: amountReceived,
-                normalizedReceived: normalize(amountReceived, context.decimalsOut),
-                amountSent: context.denormAmountIn
-            });
-            return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-        } catch {
-            return new ICCListing.UpdateType[](0);
-        }
-    }
-
-    function _executePartialBuySwap(
-        address listingAddress,
-        uint256 orderIdentifier,
-        uint256 amountIn,
-        uint256 pendingAmount
-    ) internal returns (ICCListing.UpdateType[] memory) {
-        // Executes partial Uniswap V2 swap for buy order using helper functions
-        BuySwapContext memory context;
-        address[] memory path;
-        (context, path) = _prepareSwapData(listingAddress, orderIdentifier, amountIn);
-        if (context.price == 0) {
-            return new ICCListing.UpdateType[](0);
-        }
-        if (context.tokenIn == address(0)) {
-            return _executeBuyETHSwap(context, orderIdentifier, pendingAmount);
-        } else {
-            return _executeBuyTokenSwap(context, orderIdentifier, pendingAmount);
-        }
-    }
-
     function _prepareSellSwapData(
         address listingAddress,
         uint256 orderIdentifier,
         uint256 amountIn
-    ) private view returns (SellSwapContext memory context, address[] memory path) {
+    ) private view returns (SwapContext memory context, address[] memory path) {
         // Prepares swap data for sell order, including order details and swap path
         ICCListing listingContract = ICCListing(listingAddress);
         (context.recipientAddress, context.makerAddress, context.status) = listingContract.getSellOrderCore(orderIdentifier);
@@ -383,93 +291,276 @@ contract CCUniPartial is CCMainPartial {
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         (context.price, context.expectedAmountOut) = _computeSwapImpact(listingAddress, amountIn, false);
-        context.amountOutMin = denormalize((amountIn * 1e18) / maxPrice, context.decimalsOut);
+        context.denormAmountOutMin = denormalize((amountIn * 1e18) / maxPrice, context.decimalsOut);
         if (context.price < minPrice || context.price > maxPrice || context.expectedAmountOut == 0) {
             context.price = 0; // Signal invalid swap
         }
     }
 
-    function _executeSellETHSwap(
-        SellSwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) private returns (ICCListing.UpdateType[] memory) {
-        // Executes token-to-ETH swap for sell order
+    function _prepareETHSwap(
+        address tokenOut,
+        address recipientAddress
+    ) private view returns (ETHSwapData memory data) {
+        // Prepares balance checks for ETH swap
+        data.preBalanceOut = tokenOut == address(0) ? recipientAddress.balance : IERC20(tokenOut).balanceOf(recipientAddress);
+    }
+
+    function _performETHBuySwap(
+        SwapContext memory context,
+        address[] memory path
+    ) private returns (ETHSwapData memory data) {
+        // Performs ETH-to-token swap
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        address[] memory path = new address[](2);
-        path[0] = context.tokenIn;
-        path[1] = context.tokenOut;
-        uint256 preBalanceOut = context.recipientAddress.balance;
-        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            return new ICCListing.UpdateType[](0);
+        try context.listingContract.transactNative{value: context.denormAmountIn}(address(this), context.denormAmountIn, address(this)) {} catch {
+            data.amountReceived = 0;
+            return data;
         }
-        IERC20(context.tokenIn).safeApprove(uniswapV2Router, context.denormAmountIn);
-        try router.swapExactTokensForETH(
-            context.denormAmountIn,
-            context.amountOutMin,
+        try router.swapExactETHForTokens{value: context.denormAmountIn}(
+            context.denormAmountOutMin,
             path,
             context.recipientAddress,
             block.timestamp + 300
         ) returns (uint256[] memory amounts) {
-            uint256 amountOut = amounts[1];
-            uint256 postBalanceOut = context.recipientAddress.balance;
-            uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
-            if (amountReceived == 0) {
-                return new ICCListing.UpdateType[](0);
-            }
-            SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
-                makerAddress: context.makerAddress,
-                recipient: context.recipientAddress,
-                status: context.status,
-                amountReceived: amountReceived,
-                normalizedReceived: normalize(amountReceived, context.decimalsOut),
-                amountSent: context.denormAmountIn
-            });
-            return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+            data.amountOut = amounts[1];
         } catch {
+            data.amountOut = 0;
+        }
+        data.postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
+    }
+
+    function _finalizeETHBuySwap(
+        ETHSwapData memory data,
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) private pure returns (ICCListing.UpdateType[] memory) {
+        // Finalizes ETH buy swap and creates update structs
+        if (data.amountReceived == 0) {
             return new ICCListing.UpdateType[](0);
         }
+        BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
+            makerAddress: context.makerAddress,
+            recipient: context.recipientAddress,
+            status: context.status,
+            amountReceived: data.amountReceived,
+            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
+            amountSent: context.denormAmountIn
+        });
+        return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    }
+
+    function _executeBuyETHSwap(
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Executes ETH-to-token swap for buy order using helper functions
+        address[] memory path = new address[](2);
+        path[0] = context.tokenIn;
+        path[1] = context.tokenOut;
+        ETHSwapData memory data = _prepareETHSwap(context.tokenOut, context.recipientAddress);
+        data = _performETHBuySwap(context, path);
+        return _finalizeETHBuySwap(data, context, orderIdentifier, pendingAmount);
+    }
+
+    function _performETHSellSwap(
+        SwapContext memory context,
+        address[] memory path
+    ) private returns (ETHSwapData memory data) {
+        // Performs token-to-ETH swap, using actual amount received after tax
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
+        data.preBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+        data.preBalanceOut = context.recipientAddress.balance;
+        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
+            data.amountReceived = 0;
+            return data;
+        }
+        data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+        data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
+        if (data.amountInReceived == 0) {
+            return data;
+        }
+        IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived);
+        try router.swapExactTokensForETH(
+            data.amountInReceived,
+            context.denormAmountOutMin,
+            path,
+            context.recipientAddress,
+            block.timestamp + 300
+        ) returns (uint256[] memory amounts) {
+            data.amountOut = amounts[1];
+        } catch {
+            data.amountOut = 0;
+        }
+        data.postBalanceOut = context.recipientAddress.balance;
+        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
+    }
+
+    function _finalizeETHSellSwap(
+        ETHSwapData memory data,
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) private pure returns (ICCListing.UpdateType[] memory) {
+        // Finalizes ETH sell swap and creates update structs
+        if (data.amountReceived == 0 || data.amountInReceived == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
+            makerAddress: context.makerAddress,
+            recipient: context.recipientAddress,
+            status: context.status,
+            amountReceived: data.amountReceived,
+            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
+            amountSent: data.amountInReceived
+        });
+        return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    }
+
+    function _executeSellETHSwapInternal(
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) private returns (ICCListing.UpdateType[] memory) {
+        // Executes token-to-ETH swap for sell order using helper functions
+        address[] memory path = new address[](2);
+        path[0] = context.tokenIn;
+        path[1] = context.tokenOut;
+        ETHSwapData memory data = _prepareETHSwap(context.tokenOut, context.recipientAddress);
+        data = _performETHSellSwap(context, path);
+        return _finalizeETHSellSwap(data, context, orderIdentifier, pendingAmount);
+    }
+
+    function _prepareTokenSwap(
+        address tokenIn,
+        address tokenOut,
+        address recipientAddress
+    ) private view returns (TokenSwapData memory data) {
+        // Prepares balance checks for token swap
+        data.preBalanceIn = IERC20(tokenIn).balanceOf(address(this));
+        data.preBalanceOut = IERC20(tokenOut).balanceOf(recipientAddress);
+    }
+
+    function _executeTokenSwap(
+        SwapContext memory context,
+        address[] memory path
+    ) private returns (TokenSwapData memory data) {
+        // Executes token transfer and swap, using actual amount received after tax
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
+        data.preBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
+            data.amountInReceived = 0;
+            return data;
+        }
+        data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+        data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
+        if (data.amountInReceived == 0) {
+            return data;
+        }
+        IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived);
+        try router.swapExactTokensForTokens(
+            data.amountInReceived,
+            context.denormAmountOutMin,
+            path,
+            context.recipientAddress,
+            block.timestamp + 300
+        ) returns (uint256[] memory amounts) {
+            data.amountOut = amounts[1];
+        } catch {
+            data.amountOut = 0;
+        }
+        data.postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
+    }
+
+    function _finalizeTokenSwap(
+        TokenSwapData memory data,
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) private pure returns (ICCListing.UpdateType[] memory) {
+        // Finalizes token swap and creates update structs for buy order
+        if (data.amountReceived == 0 || data.amountInReceived == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
+            makerAddress: context.makerAddress,
+            recipient: context.recipientAddress,
+            status: context.status,
+            amountReceived: data.amountReceived,
+            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
+            amountSent: data.amountInReceived
+        });
+        return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    }
+
+    function _finalizeSellTokenSwap(
+        TokenSwapData memory data,
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) private pure returns (ICCListing.UpdateType[] memory) {
+        // Finalizes token swap and creates update structs for sell order
+        if (data.amountReceived == 0 || data.amountInReceived == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
+            makerAddress: context.makerAddress,
+            recipient: context.recipientAddress,
+            status: context.status,
+            amountReceived: data.amountReceived,
+            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
+            amountSent: data.amountInReceived
+        });
+        return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    }
+
+    function _executeBuyTokenSwap(
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Executes token-to-token swap for buy order using helper functions
+        address[] memory path = new address[](2);
+        path[0] = context.tokenIn;
+        path[1] = context.tokenOut;
+        TokenSwapData memory data = _prepareTokenSwap(context.tokenIn, context.tokenOut, context.recipientAddress);
+        data = _executeTokenSwap(context, path);
+        return _finalizeTokenSwap(data, context, orderIdentifier, pendingAmount);
     }
 
     function _executeSellTokenSwap(
-        SellSwapContext memory context,
+        SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
     ) private returns (ICCListing.UpdateType[] memory) {
-        // Executes token-to-token swap for sell order
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
+        // Executes token-to-token swap for sell order using helper functions
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
-        uint256 preBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
+        TokenSwapData memory data = _prepareTokenSwap(context.tokenIn, context.tokenOut, context.recipientAddress);
+        data = _executeTokenSwap(context, path);
+        return _finalizeSellTokenSwap(data, context, orderIdentifier, pendingAmount);
+    }
+
+    function _executePartialBuySwap(
+        address listingAddress,
+        uint256 orderIdentifier,
+        uint256 amountIn,
+        uint256 pendingAmount
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Executes partial Uniswap V2 swap for buy order using helper functions
+        SwapContext memory context;
+        address[] memory path;
+        (context, path) = _prepareSwapData(listingAddress, orderIdentifier, amountIn);
+        if (context.price == 0) {
             return new ICCListing.UpdateType[](0);
         }
-        IERC20(context.tokenIn).safeApprove(uniswapV2Router, context.denormAmountIn);
-        try router.swapExactTokensForTokens(
-            context.denormAmountIn,
-            context.amountOutMin,
-            path,
-            context.recipientAddress,
-            block.timestamp + 300
-        ) returns (uint256[] memory amounts) {
-            uint256 amountOut = amounts[1];
-            uint256 postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-            uint256 amountReceived = postBalanceOut > preBalanceOut ? postBalanceOut - preBalanceOut : 0;
-            if (amountReceived == 0) {
-                return new ICCListing.UpdateType[](0);
-            }
-            SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
-                makerAddress: context.makerAddress,
-                recipient: context.recipientAddress,
-                status: context.status,
-                amountReceived: amountReceived,
-                normalizedReceived: normalize(amountReceived, context.decimalsOut),
-                amountSent: context.denormAmountIn
-            });
-            return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-        } catch {
-            return new ICCListing.UpdateType[](0);
+        if (context.tokenIn == address(0)) {
+            return _executeBuyETHSwap(context, orderIdentifier, pendingAmount);
+        } else {
+            return _executeBuyTokenSwap(context, orderIdentifier, pendingAmount);
         }
     }
 
@@ -480,14 +571,14 @@ contract CCUniPartial is CCMainPartial {
         uint256 pendingAmount
     ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes partial Uniswap V2 swap for sell order using helper functions
-        SellSwapContext memory context;
+        SwapContext memory context;
         address[] memory path;
         (context, path) = _prepareSellSwapData(listingAddress, orderIdentifier, amountIn);
         if (context.price == 0) {
             return new ICCListing.UpdateType[](0);
         }
         if (context.tokenOut == address(0)) {
-            return _executeSellETHSwap(context, orderIdentifier, pendingAmount);
+            return _executeSellETHSwapInternal(context, orderIdentifier, pendingAmount);
         } else {
             return _executeSellTokenSwap(context, orderIdentifier, pendingAmount);
         }
