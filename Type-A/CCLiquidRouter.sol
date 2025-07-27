@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.1
+// Version: 0.0.2
 // Changes:
+// - v0.0.2: Removed SafeERC20 usage, used IERC20 from CCMainPartial, removed redundant require success checks for transfers.
 // - v0.0.1: Created CCLiquidRouter.sol, extracted settleBuyLiquid and settleSellLiquid from CCSettlementRouter.sol.
-// Compatible with ICCListing.sol (v0.0.3), ICCLiquidity.sol, CCMainPartial.sol (v0.0.06), CCLiquidPartial.sol (v0.0.1).
+// Compatible with ICCListing.sol (v0.0.3), ICCLiquidity.sol, CCMainPartial.sol (v0.0.07), CCLiquidPartial.sol (v0.0.3).
 
-import "./utils/CCLiquidPartial.sol";
+import "./CCLiquidPartial.sol";
 
 contract CCLiquidRouter is CCLiquidPartial {
-    using SafeERC20 for IERC20;
-
     function settleBuyLiquid(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
         // Settles multiple buy order liquidations up to maxIterations
         ICCListing listingContract = ICCListing(listingAddress);
