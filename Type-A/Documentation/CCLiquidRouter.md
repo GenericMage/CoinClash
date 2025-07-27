@@ -5,9 +5,15 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.1 (created 2025-07-26)
+**Version:** 0.0.2 (updated 2025-07-27)
+
+**Changes:**
+- v0.0.2: Removed SafeERC20 usage, used IERC20 from CCMainPartial, removed redundant require success checks for transfers.
+- v0.0.1: Created CCLiquidRouter.sol, extracted settleBuyLiquid and settleSellLiquid from CCSettlementRouter.sol.
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
+
+**Compatibility:** ICCListing.sol (v0.0.3), ICCLiquidity.sol, CCMainPartial.sol (v0.0.07), CCLiquidPartial.sol (v0.0.3).
 
 ## Mappings
 - None defined directly in `CCLiquidRouter`. Relies on `ICCListing` view functions (e.g., `pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -65,7 +71,7 @@ The formulas below govern liquid settlement calculations in `CCLiquidPartial.sol
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Requires router registration in `liquidityContract.routers(address(this))`.
   - Reverts if pricing invalid, transfers fail, or liquidity insufficient.
-- **Gas Usage Controls**: `maxIterations` limits iteration, dynamic array resizing, try-catch for transfers.
+- **Gas Usage Controls**: `maxIterations` limits iteration, dynamic array resizing.
 
 ### settleSellLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyLiquid`.
@@ -121,18 +127,16 @@ The formulas below govern liquid settlement calculations in `CCLiquidPartial.sol
 - **Max Iterations**: `maxIterations` limits loop iterations in all settlement functions, preventing gas limit issues.
 - **Dynamic Arrays**: `tempUpdates` is oversized (`iterationCount * 3`) and resized to `finalUpdates` to minimize gas while collecting updates.
 - **Helper Functions**: Complex logic is split into helpers (e.g., `_prepareLiquidityTransaction`, `_checkAndTransferPrincipal`, `_prepBuyLiquidUpdates`) to reduce stack depth and gas usage.
-- **Try-Catch**: External calls (transfers, liquidity updates) use try-catch to handle failures gracefully, returning empty `ICCListing.UpdateType[]` arrays.
 
 ### Security Measures
 - **Reentrancy Protection**: All external functions use `nonReentrant` modifier.
 - **Listing Validation**: `onlyValidListing` ensures `listingAddress` is registered with `ICCAgent`.
-- **Safe Transfers**: `SafeERC20` (inherited from `CCMainPartial`) is used for token operations, handling non-standard ERC20 tokens.
+- **Safe Transfers**: IERC20 from `CCMainPartial` is used for token operations, handling non-standard ERC20 tokens. Pre/post balance checks eliminate need for explicit transfer success checks.
 - **Balance Checks**: Pre/post balance checks in `_checkAndTransferPrincipal` and `_prepBuy/SellOrderUpdate` ensure transfer success.
 - **Router Validation**: Requires `liquidityContract.routers(address(this))` to be true.
 - **Safety**:
   - Explicit casting for interfaces (e.g., `ICCListing`, `ICCLiquidity`).
   - No inline assembly, using high-level Solidity.
-  - Try-catch blocks for external calls (transfers, liquidity updates).
   - Hidden state variables (`agent`) accessed via `agentView`.
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
 
@@ -153,7 +157,7 @@ The formulas below govern liquid settlement calculations in `CCLiquidPartial.sol
 ## Additional Details
 - **Decimal Handling**: Uses `normalize` and `denormalize` from `CCMainPartial` for 1e18 precision, with decimals fetched via `IERC20.decimals` or set to 18 for ETH.
 - **Reentrancy Protection**: All state-changing functions use `nonReentrant`.
-- **Gas Optimization**: Uses `maxIterations`, dynamic arrays, helper functions, and try-catch for efficient execution.
+- **Gas Optimization**: Uses `maxIterations`, dynamic arrays, helper functions for efficient execution.
 - **Listing Validation**: `onlyValidListing` checks `ICCAgent.getListing` for listing integrity.
 - **Token Usage**:
   - Buy orders: Input tokenB, output tokenA, `amountSent` tracks tokenA.
@@ -162,6 +166,5 @@ The formulas below govern liquid settlement calculations in `CCLiquidPartial.sol
 - **Safety**:
   - Explicit casting for interfaces (e.g., `ICCListing`, `ICCLiquidity`).
   - No inline assembly, using high-level Solidity.
-  - Try-catch blocks for external calls (transfers, liquidity updates).
   - Hidden state variables (`agent`) accessed via `agentView`.
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
