@@ -1,11 +1,11 @@
 # CCOrderRouter Contract Documentation
 
 ## Overview
-The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a streamlined router for creating and canceling buy and sell orders on a decentralized trading platform. It inherits functionality from `CCOrderPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `SafeERC20` for secure token transfers. The contract focuses on order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`) and cancellation (`clearSingleOrder`, `clearOrders`), leveraging inherited functions for order preparation and execution. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a streamlined router for creating and canceling buy and sell orders on a decentralized trading platform. It inherits functionality from `CCOrderPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `IERC20`) for token operations and `ReentrancyGuard` for reentrancy protection. The contract focuses on order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`) and cancellation (`clearSingleOrder`, `clearOrders`), leveraging inherited functions for order preparation and execution. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, ensures graceful degradation, and avoids inline assembly.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.5 (updated 2025-07-25)
+**Version:** 0.0.6 (updated 2025-07-27)
 
 **Inheritance Tree:** `CCOrderRouter` → `CCOrderPartial` → `CCMainPartial`
 
@@ -28,7 +28,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 - **Internal Call Flow**:
   - Calls `_handleOrderPrep` (inherited) to validate inputs and create `OrderPrep` struct, normalizing `inputAmount` using `listingContract.decimalsB`.
   - Verifies `tokenB != address(0)` (ERC20 requirement).
-  - Calls `_checkTransferAmountToken` to transfer `inputAmount` in tokenB from `msg.sender` to `listingAddress` via `IERC20.safeTransferFrom`, with pre/post balance checks.
+  - Calls `_checkTransferAmountToken` to transfer `inputAmount` in tokenB from `msg.sender` to `listingAddress` via `IERC20.transferFrom`, with pre/post balance checks.
   - Calls `_executeSingleOrder` (inherited) to fetch `getNextOrderId`, create `UpdateType[]` for pending order status, pricing, and amounts (with `amountSent=0`), and invoke `listingContract.update`.
   - Transfer destination: `listingAddress`.
 - **Balance Checks**:
@@ -98,7 +98,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
     - Sets status to 0 (cancelled) via `listingContract.update` with `UpdateType[]`.
   - Transfer destination: `recipientAddress`.
 - **Balance Checks**:
-  - `_clearOrderData` uses conditional checks for refund transfers (no try-catch, returns bool), reverting if transfer fails (`"Token refund failed"`, `"Native refund failed"`).
+  - `_clearOrderData` uses conditional checks for refund transfers, relying on pre/post balance checks in `transactToken` or `transactNative`.
 - **Mappings/Structs Used**:
   - **Structs**: `UpdateType` (from `ICCListing`).
 - **Restrictions**:
@@ -114,11 +114,11 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 - **Internal Call Flow**:
   - Fetches `orderIds` via `listingContract.makerPendingOrdersView(msg.sender)`.
   - Iterates up to `maxIterations`:
-    - For each `orderId`, checks if `msg.sender` is the maker via `getBuyOrderCore` or `getSellOrderCore`.
+    - For each `orderId`, checks if `msg.sender` is the maker via `getBuyOrderCore` or `getSellOrderCore` with corrected tuple destructuring.
     - Calls `_clearOrderData` for valid orders, refunding pending amounts (tokenB for buy, tokenA for sell) and setting status to 0.
   - Transfer destination: `recipientAddress`.
 - **Balance Checks**:
-  - Same as `clearSingleOrder`, handled by `_clearOrderData` with conditional checks.
+  - Same as `clearSingleOrder`, handled by `_clearOrderData` with pre/post balance checks.
 - **Mappings/Structs Used**:
   - **Structs**: `UpdateType` (from `ICCListing`).
 - **Restrictions**:
@@ -164,7 +164,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 ### Security Measures
 - **Reentrancy Protection**: All external functions (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`, `clearSingleOrder`, `clearOrders`) are protected by `nonReentrant`, preventing reentrancy attacks.
 - **Listing Validation**: The `onlyValidListing` modifier ensures `listingAddress` is registered with the `ICCAgent` contract via `checkValidListing`, using `agentView` for validation.
-- **Safe Transfers**: `SafeERC20.safeTransferFrom` is used for ERC20 token transfers, handling edge cases like non-standard tokens.
+- **Safe Transfers**: `IERC20.transferFrom` is used for ERC20 token transfers, with pre/post balance checks to handle edge cases like non-standard tokens.
 - **Balance Checks**: Pre/post balance checks in `_checkTransferAmountToken` and `_checkTransferAmountNative` ensure transfers are successful, accounting for fee-on-transfer tokens or failed ETH transfers.
 
 ### Limitations and Assumptions
