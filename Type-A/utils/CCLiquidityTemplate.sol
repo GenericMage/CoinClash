@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.3
+// Version: 0.0.5
 // Changes:
-// - v0.0.3: Updated ICCAgent interface to allow tokenA or tokenB to be address(0) for native ETH pairs (line 32). No changes to function implementations, as they are already compliant with ISSLiquidityTemplate in CCAgent.sol. Ensured compatibility with CCListingTemplate.sol v0.0.8.
+// - v0.0.5: Replaced inline IERC20 interface with import from "../imports/IERC20.sol" to include balanceOf function, fixing TypeError in depositToken (line 338).
+// - v0.0.4: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken and safeTransferFrom with direct IERC20.transferFrom in depositToken without success checks (lines 294, 323). Compatible with CCListingTemplate.sol v0.0.10, CCLiquidityRouter.sol v0.0.11, CCMainPartial.sol v0.0.7.
+// - v0.0.3: Updated ICCAgent interface to allow tokenA or tokenB to be address(0) for native ETH pairs (line 32). No changes to function implementations, as they are already compliant with ISSLiquidityTemplate in CCAgent.sol.
 // - v0.0.2: Added support for initial deposits in zero-balance pool by removing liquidity checks in depositToken/depositNative (lines 247-248, 279-280). Handled zero currentPrice in xPrepOut/yPrepOut with default PreparedWithdrawal (lines 305-306, 357-358). Added DepositReceived event for debugging (line 58).
-// - v0.0.1: Fixed syntax error in setRouters function (routers[_routers[i] = true; to routers[_routers[i]] = true;). Modified xExecuteOut and yExecuteOut to use transactToken and transactNative for ERC20 and ETH transfers, replacing direct safeTransfer and low-level call. Preserved call tree (update, globalizeUpdate, updateRegistry) to avoid stack-too-deep errors. Renamed contract from SSLiquidityTemplate to CCLiquidityTemplate. Split deposit into depositToken and depositNative, and transact into transactToken and transactNative to segregate ERC20 and ETH handling. Updated ICCListing interface to ICCLiquidity. Compatible with CCListingTemplate.sol v0.0.10, SSAgent.sol v0.0.2.
+// - v0.0.1: Fixed syntax error in setRouters function (routers[_routers[i] = true; to routers[_routers[i]] = true;). Modified xExecuteOut and yExecuteOut to use transactToken and transactNative for ERC20 and ETH transfers, replacing direct safeTransfer and low-level call. Preserved call tree (update, globalizeUpdate, updateRegistry) to avoid stack-too-deep errors. Renamed contract from SSLiquidityTemplate to CCLiquidityTemplate. Split deposit into depositToken and depositNative, and transact into transactToken and transactNative to segregate ERC20 and ETH handling. Updated ICCListing interface to ICCLiquidity.
 
-import "../imports/SafeERC20.sol";
 import "../imports/ReentrancyGuard.sol";
+import "../imports/IERC20.sol";
 
 interface ICCLiquidity {
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
@@ -36,8 +38,6 @@ interface ITokenRegistry {
 }
 
 contract CCLiquidityTemplate is ReentrancyGuard {
-    using SafeERC20 for IERC20;
-
     mapping(address => bool) public routers;
     bool public routersSet;
     address public listingAddress;
@@ -526,11 +526,11 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         if (token == tokenA) {
             require(details.xLiquid >= normalizedAmount, "Insufficient xLiquid");
             details.xLiquid -= normalizedAmount;
-            IERC20(token).safeTransfer(recipient, amount);
+            IERC20(token).transfer(recipient, amount);
         } else {
             require(details.yLiquid >= normalizedAmount, "Insufficient yLiquid");
             details.yLiquid -= normalizedAmount;
-            IERC20(token).safeTransfer(recipient, amount);
+            IERC20(token).transfer(recipient, amount);
         }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }

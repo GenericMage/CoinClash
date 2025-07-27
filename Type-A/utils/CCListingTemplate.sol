@@ -1,20 +1,26 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.9
+// Version: 0.0.10
 // Changes:
-// - v0.0.9: Renamed PayoutUpdate in ICCListing interface to ListingPayoutUpdate to resolve DeclarationError conflict with contract's PayoutUpdate struct (line 24). Updated ssUpdate function to use ListingPayoutUpdate (line 546). Changed getTokens return parameters to (_tokenA, _tokenB) to avoid naming conflict with tokenA() and tokenB() functions (line 660). Compatible with CCLiquidityTemplate.sol v0.0.3.
-// - v0.0.8: Added getTokens() to return (tokenA, tokenB) as per ICCListingTemplate in CCAgent.sol (line 686). Updated liquidityAddressView to remove uint256 parameter to match ICCListing in CCAgent.sol (line 614). Ensured no conflicts with existing tokenA() and tokenB() functions.
-// - v0.0.7: Fixed TypeError at line 375 in globalizeUpdate by replacing order.recipientAddress with order.recipient for SellOrderCore (line 375). Updated getSellOrderCore return parameter from recipientAddress to recipient for consistency (line 686). Compatible with CCLiquidityRouter.sol v0.0.9, CCLiquidityTemplate.sol v0.0.2.
+// - v0.0.10: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken without success checks (line 551). Compatible with CCLiquidityRouter.sol v0.0.11, CCLiquidityTemplate.sol v0.0.4, CCMainPartial.sol v0.0.7.
+// - v0.0.9: Renamed PayoutUpdate in ICCListing interface to ListingPayoutUpdate to resolve DeclarationError conflict with contract's PayoutUpdate struct (line 24). Updated ssUpdate function to use ListingPayoutUpdate (line 546). Changed getTokens return parameters to (_tokenA, _tokenB) to avoid naming conflict with tokenA() and tokenB() functions (line 660).
+// - v0.0.8: Added getTokens() to return (tokenA, tokenB) as per ICCListingTemplate in CCAgent.sol (line 686). Updated liquidityAddressView to remove uint256 parameter to match ICCListing in CCAgent.sol (line 614).
+// - v0.0.7: Fixed TypeError at line 375 in globalizeUpdate by replacing order.recipientAddress with order.recipient for SellOrderCore (line 375). Updated getSellOrderCore return parameter from recipientAddress to recipient for consistency (line 686).
 // - v0.0.6: Fixed ParserError at line 555 in ssUpdate by removing invalid syntax 'payout.recipient Roshi, ...' (lines 553-562).
-// - v0.0.5: Renamed tokenX/Y to _tokenA/B, decimalX/Y to _decimalsA/B, price to _currentPrice, made state variables private with view functions (lines 42-61, 124-195). Added longPayoutByIndex, shortPayoutByIndex to ICCListing (lines 24-25). Fixed syntax errors: removed decimals() call (line 385), corrected uniV2Pair/uniV2 (lines 460-474), fixed callerAddress, p.recipientAddress in ssUpdate (lines 560-567), corrected lastDayFeeBalance (line 434), fixed SellOrderCores (line 717). Added decimals validation in setTokens (lines 381-384). Ensured volumeBalances delegates to liquidityAmounts (lines 672-677).
+// - v0.0.5: Renamed tokenX/Y to _tokenA/B, decimalX/Y to _decimalsA/B, price to _currentPrice, made state variables private with view functions (lines 42-61, 124-195). Added longPayoutByIndex, shortPayoutByIndex to ICCListing (lines 24-25). Fixed syntax errors: removed decimals() call (line 385), corrected uniV2Pair/uniV2 (lines 460-474), fixed callerAddress, p.recipientAddress in ssUpdate (lines 560-567), corrected lastDayFeeBalance (line 434), fixed SellOrderCores (line 717). Added decimals validation in setTokens (lines 381-384).
 // - v0.0.4: Updated prices to handle zero reserves (lines 670-678). Ensured transactToken/transactNative update balances (lines 565-604).
 // - v0.0.3: Split transact into transactToken/transactNative (lines 565-604).
 // - v0.0.2: Added uniswapV2PairView (lines 668-670).
 // - v0.0.1: Added BSL 1.1, uniswapV2Pair, setUniswapV2Pair, normalized prices (lines 88-89, 315-321, 665-683).
 
-import "../imports/SafeERC20.sol";
 import "../imports/ReentrancyGuard.sol";
+
+interface IERC20 {
+    function decimals() external view returns (uint8);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+}
 
 interface ICCListing {
     function prices(uint256) external view returns (uint256);
@@ -22,7 +28,7 @@ interface ICCListing {
     function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
-    struct ListingPayoutUpdate { // Renamed to avoid conflict with contract's PayoutUpdate
+    struct ListingPayoutUpdate {
         uint8 payoutType; // 0: Long, 1: Short
         address recipient;
         uint256 required;
@@ -72,8 +78,6 @@ interface ITokenRegistry {
 }
 
 contract CCListingTemplate is ReentrancyGuard {
-    using SafeERC20 for IERC20;
-
     // State variables (private to hide)
     mapping(address => bool) private _routers;
     bool private _routersSet;
@@ -597,7 +601,7 @@ contract CCListingTemplate is ReentrancyGuard {
             balances.yBalance += normalizedAmount; // Support initial deposits
             balances.yVolume += normalizedAmount;
         }
-        IERC20(token).safeTransfer(recipient, amount);
+        IERC20(token).transfer(recipient, amount);
 
         if (_uniswapV2Pair != address(0)) {
             (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
