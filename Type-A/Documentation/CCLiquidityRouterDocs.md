@@ -5,7 +5,7 @@ The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as 
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.9 (updated 2025-07-26)
+**Version:** 0.0.10 (updated 2025-07-27)
 
 **Inheritance Tree:** `CCLiquidityRouter` → `CCLiquidityPartial` → `CCMainPartial`
 
@@ -26,10 +26,10 @@ The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as 
   - `isTokenA` (bool): True if tokenA is ETH, false if tokenB is ETH.
 - **Behavior**: Deposits ETH to the liquidity pool for `msg.sender`, transferring `msg.value` to `liquidityAddr`, updating `_xLiquiditySlots` or `_yLiquiditySlots`.
 - **Internal Call Flow**:
-  - Validates `msg.value == inputAmount`, `tokenAddress == address(0)`, and pool state via `liquidityAmounts()`.
+  - Validates `msg.value == inputAmount`, `tokenAddress == address(0)`, and `listingContract.getListingId() > 0` for pool initialization.
   - Calls `liquidityContract.depositNative` with value transfer.
 - **Balance Checks**: Verifies `msg.value == inputAmount`.
-- **Restrictions**: `nonReentrant`, `onlyValidListing`, requires router registration, valid initial deposit.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`, requires router registration, valid `liquidityAddr`, non-zero listing ID.
 - **Gas Usage Controls**: Single external call, try-catch.
 - **External Dependencies**: `ISSAgent.globalizeLiquidity`, `ITokenRegistry.initializeBalances`.
 
@@ -40,10 +40,10 @@ The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as 
   - `isTokenA` (bool): True for tokenA, false for tokenB.
 - **Behavior**: Deposits ERC-20 tokens to the liquidity pool for `msg.sender`, transferring tokens to `liquidityAddr`.
 - **Internal Call Flow**:
-  - Validates `tokenAddress != address(0)`, pool state via `liquidityAmounts()`.
+  - Validates `tokenAddress != address(0)`, `listingContract.getListingId() > 0`, and `liquidityAddr != address(0)`.
   - Transfers tokens via `safeTransferFrom`, approves `liquidityAddr`, calls `depositToken`.
 - **Balance Checks**: Pre/post balance checks for `receivedAmount`.
-- **Restrictions**: `nonReentrant`, `onlyValidListing`, requires router registration, valid initial deposit.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`, requires router registration, valid `liquidityAddr`, non-zero listing ID.
 - **Gas Usage Controls**: Single transfer and call, try-catch.
 - **External Dependencies**: `ISSAgent.globalizeLiquidity`, `ITokenRegistry.initializeBalances`.
 
@@ -126,4 +126,4 @@ The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as 
 - **Decimal Handling**: Uses `normalize`/`denormalize` for precision, `decimalsA/B` or 18 for ETH.
 - **Security**: `nonReentrant`, `onlyValidListing`, safe transfers, try-catch for external calls.
 - **Events**: Relies on `listingContract` and `liquidityContract` events.
-- **Compatibility**: `CCMainPartial` (v0.0.6), `CCListing` (v0.0.3), `CCLiquidityTemplate` (v0.0.2).
+- **Compatibility**: `CCMainPartial` (v0.0.6), `CCListing` (v0.0.3), `CCLiquidityTemplate` (v0.0.3).
