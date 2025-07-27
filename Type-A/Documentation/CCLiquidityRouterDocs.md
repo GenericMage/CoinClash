@@ -1,11 +1,11 @@
 # CCLiquidityRouter Contract Documentation
 
 ## Overview
-The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as a specialized router for managing liquidity operations and payouts on a decentralized trading platform. It inherits functionality from `CCLiquidityPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `ICCLiquidityTemplate`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `SafeERC20` for secure token transfers. The contract focuses on liquidity management (`depositNativeToken`, `depositToken`, `withdraw`, `claimFees`, `changeDepositor`) and payout settlement (`settleLongLiquid`, `settleShortLiquid`, `settleLongPayouts`, `settleShortPayouts`). State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as a specialized router for managing liquidity operations and payouts on a decentralized trading platform. It inherits functionality from `CCLiquidityPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `ICCLiquidityTemplate`, `IERC20`) for token operations and `ReentrancyGuard` for reentrancy protection. The contract focuses on liquidity management (`depositNativeToken`, `depositToken`, `withdraw`, `claimFees`, `changeDepositor`) and payout settlement (`settleLongLiquid`, `settleShortLiquid`, `settleLongPayouts`, `settleShortPayouts`). State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.10 (updated 2025-07-27)
+**Version:** 0.0.11 (updated 2025-07-27)
 
 **Inheritance Tree:** `CCLiquidityRouter` → `CCLiquidityPartial` → `CCMainPartial`
 
@@ -41,8 +41,8 @@ The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as 
 - **Behavior**: Deposits ERC-20 tokens to the liquidity pool for `msg.sender`, transferring tokens to `liquidityAddr`.
 - **Internal Call Flow**:
   - Validates `tokenAddress != address(0)`, `listingContract.getListingId() > 0`, and `liquidityAddr != address(0)`.
-  - Transfers tokens via `safeTransferFrom`, approves `liquidityAddr`, calls `depositToken`.
-- **Balance Checks**: Pre/post balance checks for `receivedAmount`.
+  - Checks allowance, transfers tokens via `IERC20.transferFrom`, emits `TransferFailed` event on failure, approves `liquidityAddr`, calls `depositToken`.
+- **Balance Checks**: Pre/post balance checks for `receivedAmount`, allowance check with `InsufficientAllowance` error.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`, requires router registration, valid `liquidityAddr`, non-zero listing ID.
 - **Gas Usage Controls**: Single transfer and call, try-catch.
 - **External Dependencies**: `ISSAgent.globalizeLiquidity`, `ITokenRegistry.initializeBalances`.
@@ -124,6 +124,7 @@ The `CCLiquidityRouter` contract, implemented in Solidity (`^0.8.2`), serves as 
 
 ## Additional Details
 - **Decimal Handling**: Uses `normalize`/`denormalize` for precision, `decimalsA/B` or 18 for ETH.
-- **Security**: `nonReentrant`, `onlyValidListing`, safe transfers, try-catch for external calls.
-- **Events**: Relies on `listingContract` and `liquidityContract` events.
-- **Compatibility**: `CCMainPartial` (v0.0.6), `CCListing` (v0.0.3), `CCLiquidityTemplate` (v0.0.3).
+- **Security**: `nonReentrant`, `onlyValidListing`, try-catch for external calls, allowance checks with `InsufficientAllowance` error, and `TransferFailed` event for transfer failures.
+- **Events**: `TransferFailed` (from `CCLiquidityPartial`) for failed `transferFrom` calls; relies on `listingContract` and `liquidityContract` events for others.
+- **Errors**: `InsufficientAllowance` (from `CCLiquidityPartial`) for insufficient token allowances.
+- **Compatibility**: `CCMainPartial` (v0.0.7), `CCListing` (v0.0.3), `CCLiquidityTemplate` (v0.0.2), `CCLiquidityPartial` (v0.0.8).
