@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11 (Updated)
+// Version: 0.0.12
 // Changes:
+// - v0.0.12: Removed redundant 'require(success)' in depositToken after transferFrom, as balance checks ensure transfer success.
 // - v0.0.11: Removed duplicate TransferFailed event and InsufficientAllowance error declarations, inherited from CCLiquidityPartial.sol to fix DeclarationError.
 // - v0.0.10: Removed SafeERC20 usage in depositToken, used IERC20.transferFrom directly; added allowance check with InsufficientAllowance error; added TransferFailed event for transferFrom failures; fixed ParserError by removing invalid string 'moleculartools.com' (line 158).
 // - v0.0.9: Added support for zero-balance pool initialization in depositToken and depositNativeToken. Checks liquidityAmounts() to allow single-sided deposits if pool is uninitialized (lines 50-61, 81-92).
@@ -56,8 +57,8 @@ contract CCLiquidityRouter is CCLiquidityPartial {
             revert InsufficientAllowance(msg.sender, tokenAddress, inputAmount, allowance);
         }
         uint256 preBalance = IERC20(tokenAddress).balanceOf(address(this));
-        try IERC20(tokenAddress).transferFrom(msg.sender, address(this), inputAmount) returns (bool success) {
-            require(success, "TransferFrom failed");
+        try IERC20(tokenAddress).transferFrom(msg.sender, address(this), inputAmount) returns (bool) {
+            // Balance checks below ensure transfer success
         } catch (bytes memory reason) {
             emit TransferFailed(msg.sender, tokenAddress, inputAmount, reason);
             revert("TransferFrom failed with reason");
