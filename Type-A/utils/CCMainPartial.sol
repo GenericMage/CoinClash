@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.06
+// Version: 0.0.07
 // Changes:
+// - v0.0.07: Removed SafeERC20 import and usage, imported IERC20 from ../imports/.
 // - v0.0.06: Updated ICCListing's transactNative to payable to resolve TypeError in CCUniPartial.sol.
 // - v0.0.05: Updated ICCLiquidityTemplate, split transact/deposit, updated Slot timestamp to uint256.
 // - v0.0.04: Integrated uniswapV2Router state variable and setters.
@@ -13,7 +14,7 @@ pragma solidity ^0.8.2;
 
 import "../imports/ReentrancyGuard.sol";
 import "../imports/Ownable.sol";
-import "../imports/SafeERC20.sol";
+import "../imports/IERC20.sol";
 
 interface ICCListing {
     struct UpdateType {
@@ -143,8 +144,6 @@ interface ICCAgent {
 }
 
 contract CCMainPartial is ReentrancyGuard, Ownable {
-    using SafeERC20 for IERC20;
-
     address internal agent;
     address internal uniswapV2Router;
 

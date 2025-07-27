@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.7 (Updated)
+// Version: 0.0.8 (Updated)
 // Changes:
+// - v0.0.8: Removed SafeERC20 usage in _transferToken, used IERC20.transfer directly; added allowance check with InsufficientAllowance error; added TransferFailed event for transfer failures.
 // - v0.0.7: Fixed TypeError in _transferNative/_transferToken by removing incorrect returns clause in try blocks.
 // - v0.0.6: Fixed ParserError in _transferNative by correcting try block syntax.
-// - v0.0.5: Removed inlined ICCListing/ICCLiquidity, used CCMainPartial interfaces, aligned with ICCLiquidityTemplate, made depositNative/TransactNative payable.
+// - v0.0.5: Removed inlined ICCListing/ICCLiquidity, used CCMainPartial interfaces, made depositNative/TransactNative payable.
 // - v0.0.4: Split _transferPayoutAmount/_TransferListingPayouts into _transferNative/_transferToken, aligned with ICCLiquidity depositToken/depositNative.
 // - v0.0.3: Created from SSPayoutPartial.sol v0.0.58, extracted liquidity functions, used ICCListing/ICCLiquidity, split transact calls.
 // - v0.0.2: Modified settleSingleLongLiquid/settleSingleShortLiquid to set zero-amount payouts to completed (3).
@@ -14,7 +15,10 @@ pragma solidity ^0.8.2;
 import "./CCMainPartial.sol";
 
 contract CCLiquidityPartial is CCMainPartial {
-    using SafeERC20 for IERC20;
+    // Emitted when IERC20.transfer fails
+    event TransferFailed(address indexed sender, address indexed token, uint256 amount, bytes reason);
+    // Emitted when allowance is insufficient
+    error InsufficientAllowance(address sender, address token, uint256 required, uint256 available);
 
     struct PayoutContext {
         address listingAddress;
@@ -106,6 +110,11 @@ contract CCLiquidityPartial is CCMainPartial {
             liquidityContract = ICCLiquidityTemplate(contractAddr);
         } else {
             listing = ICCListing(contractAddr);
+        }
+        // Check allowance before transfer
+        uint256 allowance = IERC20(tokenAddress).allowance(address(this), recipientAddress);
+        if (allowance < amountOut) {
+            revert InsufficientAllowance(address(this), tokenAddress, amountOut, allowance);
         }
         uint256 preBalance = IERC20(tokenAddress).balanceOf(recipientAddress);
         bool success = true;
