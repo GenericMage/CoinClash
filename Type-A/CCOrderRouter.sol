@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.6
+// Version: 0.0.8
 // Changes:
+// - v0.0.8: Fixed TypeError in clearOrders by correcting tuple destructuring for getSellOrderCore from (,,address maker) to (address maker,,).
+// - v0.0.7: Removed SafeERC20 usage, replaced with IERC20 interface. Removed require success checks for transfers, relying on pre/post balance checks. Ensured no partial implementations.
 // - v0.0.6: Split createBuyOrder and createSellOrder into createTokenBuyOrder, createNativeBuyOrder, createTokenSellOrder, and createNativeSellOrder to handle ERC20 and native ETH separately. Removed payableAmount usage to avoid field errors.
 // - v0.0.5: Updated to use ICCListing interface from SSMainPartial.sol v0.0.26. Split _checkTransferAmount into _checkTransferAmountToken and _checkTransferAmountNative to align with CCListing.sol v0.0.3 transactToken/transactNative split.
 // - v0.0.4: Fixed ParserError in clearOrders by correcting tuple destructuring.
 // - v0.0.3: Integrated clearSingleOrder and clearOrders functions.
 // - v0.0.2: Fixed illegal character in _checkTransferAmount, used transferFrom.
 // - v0.0.1: Created CCOrderRouter.sol from SSRouter.sol v0.0.61.
-// Compatible with CCListing.sol (v0.0.3), CCOrderPartial.sol (v0.0.01), CCMainPartial.sol (v0.0.01).
+// Compatible with CCListing.sol (v0.0.3), CCOrderPartial.sol (v0.0.02), CCMainPartial.sol (v0.0.07).
 
 import "./utils/CCOrderPartial.sol";
 
 contract CCOrderRouter is CCOrderPartial {
-    using SafeERC20 for IERC20;
-
     function createTokenBuyOrder(
         address listingAddress,
         address recipientAddress,
@@ -120,7 +120,7 @@ contract CCOrderRouter is CCOrderPartial {
         ICCListing listingContract = ICCListing(to);
         uint8 tokenDecimals = IERC20(tokenAddress).decimals();
         uint256 preBalance = IERC20(tokenAddress).balanceOf(to);
-        IERC20(tokenAddress).safeTransferFrom(from, to, inputAmount);
+        IERC20(tokenAddress).transferFrom(from, to, inputAmount);
         uint256 postBalance = IERC20(tokenAddress).balanceOf(to);
         amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
@@ -157,11 +157,11 @@ contract CCOrderRouter is CCOrderPartial {
         for (uint256 i = 0; i < iterationCount; i++) {
             uint256 orderId = orderIds[i];
             bool isBuyOrder = false;
-            (address maker, , ) = listingContract.getBuyOrderCore(orderId);
+            (address maker,,) = listingContract.getBuyOrderCore(orderId);
             if (maker == msg.sender) {
                 isBuyOrder = true;
             } else {
-                (,maker,) = listingContract.getSellOrderCore(orderId);
+                (address maker,,) = listingContract.getSellOrderCore(orderId);
                 if (maker != msg.sender) {
                     continue;
                 }
