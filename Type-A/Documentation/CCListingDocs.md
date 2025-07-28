@@ -5,7 +5,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.11 (Updated 2025-07-28)
+**Version**: 0.0.4 (Updated 2025-07-28)
 
 ### State Variables
 - `_routers`: `mapping(address => bool) private` - Maps addresses to authorized routers.
@@ -28,6 +28,8 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - `_pendingSellOrders`: `uint256[] private` - Array of pending sell order IDs.
 - `_longPayoutsByIndex`: `uint256[] private` - Array of long payout order IDs.
 - `_shortPayoutsByIndex`: `uint256[] private` - Array of short payout order IDs.
+- `_makerPendingOrders`: `mapping(address => uint256[]) private` - Maps maker address to their pending order IDs.
+- `_userPayoutIDs`: `mapping(address => uint256[]) private` - Maps user address to their payout order IDs.
 - `_historicalData`: `HistoricalData[] private` - Array of historical market data.
 
 ### Mappings
@@ -35,7 +37,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - `_buyOrderCores`: `mapping(uint256 => BuyOrderCore)` - Maps order ID to buy order core data (`makerAddress`, `recipientAddress`, `status`).
 - `_buyOrderPricings`: `mapping(uint256 => BuyOrderPricing)` - Maps order ID to buy order pricing (`maxPrice`, `minPrice`).
 - `_buyOrderAmounts`: `mapping(uint256 => BuyOrderAmounts)` - Maps order ID to buy order amounts (`pending`, `filled`, `amountSent`).
-- `_sellOrderCores`: `mapping(uint256 => SellOrderCore)` - Maps order ID to sell order core data (`makerAddress`, `recipient`, `status`).
+- `_sellOrderCores`: `mapping(uint256 => SellOrderCore)` - Maps order ID to sell order core data (`makerAddress`, `recipientAddress`, `status`).
 - `_sellOrderPricings`: `mapping(uint256 => SellOrderPricing)` - Maps order ID to sell order pricing (`maxPrice`, `minPrice`).
 - `_sellOrderAmounts`: `mapping(uint256 => SellOrderAmounts)` - Maps order ID to sell order amounts (`pending`, `filled`, `amountSent`).
 - `_longPayouts`: `mapping(uint256 => LongPayoutStruct)` - Maps order ID to long payout data (`makerAddress`, `recipientAddress`, `required`, `filled`, `orderId`, `status`).
@@ -66,7 +68,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
    - `amountSent`: `uint256` - Normalized amount of tokenA sent during settlement.
 6. **SellOrderCore**:
    - `makerAddress`: `address` - Address of the order creator.
-   - `recipient`: `address` - Address to receive tokens.
+   - `recipientAddress`: `address` - Address to receive tokens.
    - `status`: `uint8` - Order status (0=cancelled, 1=pending, 2=partially filled, 3=filled).
 7. **SellOrderPricing**:
    - Same as `BuyOrderPricing` for sell orders.
@@ -121,50 +123,50 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
    - **Description**: Calculates annualized yield from `feeDifference` (`xVolume - lastDayFee.xFees` or `yVolume - lastDayFee.yFees`), using 0.05% fee rate and liquidity from `ICCLiquidityTemplate.liquidityAmounts`.
 
 ### External Functions
-#### setUniswapV2Pair(address _uniswapV2Pair)
-- **Parameters**: `_uniswapV2Pair` - Uniswap V2 pair address.
+#### setUniswapV2Pair(address uniswapV2Pair_)
+- **Parameters**: `uniswapV2Pair_` - Uniswap V2 pair address.
 - **Behavior**: Sets `_uniswapV2Pair`, callable once.
 - **Internal Call Flow**: Updates `_uniswapV2Pair` and `_uniswapV2PairSet`.
-- **Restrictions**: Reverts if `_uniswapV2PairSet` is true or `_uniswapV2Pair` is zero.
+- **Restrictions**: Reverts if `_uniswapV2PairSet` is true or `uniswapV2Pair_` is zero.
 - **Gas Usage Controls**: Minimal, two state writes.
 
-#### setRouters(address[] memory _routers)
-- **Parameters**: `_routers` - Array of router addresses.
+#### setRouters(address[] memory routers_)
+- **Parameters**: `routers_` - Array of router addresses.
 - **Behavior**: Sets authorized routers, callable once.
 - **Internal Call Flow**: Updates `_routers` mapping, sets `_routersSet` to true.
-- **Restrictions**: Reverts if `_routersSet` is true or `_routers` is empty/invalid.
+- **Restrictions**: Reverts if `_routersSet` is true or `routers_` is empty/invalid.
 - **Gas Usage Controls**: Single loop, minimal state writes.
 
-#### setListingId(uint256 _listingId)
-- **Parameters**: `_listingId` - Listing ID.
+#### setListingId(uint256 listingId_)
+- **Parameters**: `listingId_` - Listing ID.
 - **Behavior**: Sets `_listingId`, callable once.
 - **Internal Call Flow**: Direct state update.
 - **Restrictions**: Reverts if `_listingId` already set.
 - **Gas Usage Controls**: Minimal, single state write.
 
-#### setLiquidityAddress(address _liquidityAddress)
-- **Parameters**: `_liquidityAddress` - Liquidity contract address.
+#### setLiquidityAddress(address liquidityAddress_)
+- **Parameters**: `liquidityAddress_` - Liquidity contract address.
 - **Behavior**: Sets `_liquidityAddress`, callable once.
 - **Internal Call Flow**: Direct state update.
 - **Restrictions**: Reverts if `_liquidityAddress` already set or invalid.
 - **Gas Usage Controls**: Minimal, single state write.
 
-#### setTokens(address _tokenA, address _tokenB)
-- **Parameters**: `_tokenA`, `_tokenB` - Token addresses.
+#### setTokens(address tokenA_, address tokenB_)
+- **Parameters**: `tokenA_`, `tokenB_` - Token addresses.
 - **Behavior**: Sets `_tokenA`, `_tokenB`, `_decimalsA`, `_decimalsB`, callable once.
 - **Internal Call Flow**: Fetches decimals via `IERC20.decimals` (18 for ETH), validates non-zero decimals.
 - **Restrictions**: Reverts if tokens already set, same, both zero, or invalid decimals.
 - **Gas Usage Controls**: Minimal, state writes and external calls.
 
-#### setAgent(address _agent)
-- **Parameters**: `_agent` - Agent contract address.
+#### setAgent(address agent_)
+- **Parameters**: `agent_` - Agent contract address.
 - **Behavior**: Sets `_agent`, callable once.
 - **Internal Call Flow**: Direct state update.
 - **Restrictions**: Reverts if `_agent` already set or invalid.
 - **Gas Usage Controls**: Minimal, single state write.
 
-#### setRegistry(address _registryAddress)
-- **Parameters**: `_registryAddress` - Registry contract address.
+#### setRegistry(address registryAddress_)
+- **Parameters**: `registryAddress_` - Registry contract address.
 - **Behavior**: Sets `_registryAddress`, callable once.
 - **Internal Call Flow**: Direct state update.
 - **Restrictions**: Reverts if `_registryAddress` already set or invalid.
@@ -190,7 +192,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`.
 - **Gas Usage Controls**: Dynamic array resizing, loop over `updates`, emits events for updates, external Uniswap V2 reserve calls.
 
-#### ssUpdate(address caller, ListingPayoutUpdate[] memory payoutUpdates)
+#### ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates)
 - **Parameters**:
   - `caller` - Router address.
   - `payoutUpdates` - Array of payout updates.
@@ -201,7 +203,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Balance Checks**: None, defers to `transactToken` or `transactNative`.
 - **Mappings/Structs Used**:
   - **Mappings**: `_longPayouts`, `_shortPayouts`, `_longPayoutsByIndex`, `_shortPayoutsByIndex`, `_userPayoutIDs`.
-  - **Structs**: `ListingPayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`.
+  - **Structs**: `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`.
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`.
 - **Gas Usage Controls**: Loop over `payoutUpdates`, dynamic arrays, minimal state writes.
 
@@ -214,11 +216,11 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Behavior**: Transfers ERC20 tokens, updates balances and volumes, derives price from Uniswap V2 pair, updates registry.
 - **Internal Call Flow**:
   - Normalizes `amount` using `_decimalsA` or `_decimalsB`.
-  - Updates `xBalance` (tokenA) or `yBalance` (tokenB), supports zero-balance deposits.
-  - Transfers via `IERC20.transfer`.
+  - Updates `xBalance` (tokenA) or `yBalance` (tokenB), requires sufficient balance.
+  - Transfers via `IERC20.transfer`, replacing `SafeERC20`.
   - Updates `xVolume`/`yVolume`, `_lastDayFee`, `_currentPrice` from Uniswap V2 reserves.
   - Calls `_updateRegistry`, emits `BalancesUpdated`.
-- **Balance Checks**: None, supports initial deposits.
+- **Balance Checks**: Requires sufficient `xBalance` or `yBalance`.
 - **Mappings/Structs Used**:
   - **Mappings**: `_volumeBalance`.
   - **Structs**: `VolumeBalance`.
@@ -233,11 +235,11 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Behavior**: Transfers native ETH, updates balances and volumes, derives price from Uniswap V2 pair, updates registry.
 - **Internal Call Flow**:
   - Normalizes `amount` using 18 decimals.
-  - Updates `xBalance` (if tokenA is ETH) or `yBalance` (if tokenB is ETH), supports zero-balance deposits.
+  - Updates `xBalance` (if tokenA is ETH) or `yBalance` (if tokenB is ETH), requires sufficient balance.
   - Transfers ETH via low-level call with try-catch.
   - Updates `xVolume`/`yVolume`, `_lastDayFee`, `_currentPrice` from Uniswap V2 reserves.
   - Calls `_updateRegistry`, emits `BalancesUpdated`.
-- **Balance Checks**: None, supports initial deposits.
+- **Balance Checks**: Requires sufficient `xBalance` or `yBalance`.
 - **Mappings/Structs Used**:
   - **Mappings**: `_volumeBalance`.
   - **Structs**: `VolumeBalance`.
@@ -261,7 +263,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Restrictions**: Reverts if `maxIterations` is zero or no historical data/same-day timestamp.
 - **Gas Usage Controls**: Minimal, single external call, try-catch for `liquidityAmounts`.
 
-#### getTokens() view returns (address _tokenA, address _tokenB)
+#### getTokens() view returns (address tokenA, address tokenB)
 - **Behavior**: Returns `_tokenA` and `_tokenB` with non-zero checks for `ICCAgent` compatibility.
 - **Gas Usage Controls**: Minimal, two state reads with validation.
 
@@ -277,11 +279,11 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 
 #### volumeBalances(uint256) view returns (uint256 xBalance, uint256 yBalance)
 - **Parameters**: Ignored listing ID.
-- **Behavior**: Returns `xBalance`, `yBalance` from `ICCLiquidityTemplate.liquidityAmounts`, (0, 0) if `_liquidityAddress` unset.
-- **Mappings/Structs Used**: None directly, uses external `liquidityAmounts`.
-- **Gas Usage Controls**: Minimal, single external call.
+- **Behavior**: Returns `_volumeBalance.xBalance`, `_volumeBalance.yBalance`.
+- **Mappings/Structs Used**: `_volumeBalance` (`VolumeBalance`).
+- **Gas Usage Controls**: Minimal, single state read.
 
-#### liquidityAddressView() view returns (address)
+#### liquidityAddressView(uint256) view returns (address)
 - **Behavior**: Returns `_liquidityAddress`.
 - **Gas Usage Controls**: Minimal, single state read.
 
@@ -301,11 +303,11 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Behavior**: Returns `_decimalsB`.
 - **Gas Usage Controls**: Minimal, single state read.
 
-#### listingIdView() view returns (uint256)
+#### getListingId() view returns (uint256)
 - **Behavior**: Returns `_listingId`.
 - **Gas Usage Controls**: Minimal, single state read.
 
-#### nextOrderIdView() view returns (uint256)
+#### getNextOrderId() view returns (uint256)
 - **Behavior**: Returns `_nextOrderId`.
 - **Gas Usage Controls**: Minimal, single state read.
 
@@ -334,12 +336,12 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Mappings/Structs Used**: `_makerPendingOrders`.
 - **Gas Usage Controls**: Minimal, array read.
 
-#### longPayoutByIndex() view returns (uint256[] memory)
+#### longPayoutByIndexView() view returns (uint256[] memory)
 - **Behavior**: Returns `_longPayoutsByIndex`.
 - **Mappings/Structs Used**: `_longPayoutsByIndex`.
 - **Gas Usage Controls**: Minimal, array read.
 
-#### shortPayoutByIndex() view returns (uint256[] memory)
+#### shortPayoutByIndexView() view returns (uint256[] memory)
 - **Behavior**: Returns `_shortPayoutsByIndex`.
 - **Mappings/Structs Used**: `_shortPayoutsByIndex`.
 - **Gas Usage Controls**: Minimal, array read.
@@ -380,7 +382,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Mappings/Structs Used**: `_buyOrderAmounts` (`BuyOrderAmounts`).
 - **Gas Usage Controls**: Minimal, single mapping read.
 
-#### getSellOrderCore(uint256 orderId) view returns (address makerAddress, address recipient, uint8 status)
+#### getSellOrderCore(uint256 orderId) view returns (address makerAddress, address recipientAddress, uint8 status)
 - **Parameters**: `orderId` - Sell order ID.
 - **Behavior**: Returns fields from `_sellOrderCores[orderId]` with explicit destructuring.
 - **Mappings/Structs Used**: `_sellOrderCores` (`SellOrderCore`).
@@ -405,7 +407,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Restrictions**: Reverts if `index` is invalid.
 - **Gas Usage Controls**: Minimal, single array read.
 
-#### historicalDataLength() view returns (uint256)
+#### historicalDataLengthView() view returns (uint256)
 - **Behavior**: Returns length of `_historicalData`.
 - **Mappings/Structs Used**: `_historicalData`.
 - **Gas Usage Controls**: Minimal, single state read.
@@ -433,6 +435,6 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - Try-catch for external calls to handle failures gracefully.
   - Hidden state variables accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`, `getTokens`, etc.).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
-  - Supports zero-balance pools via `volumeBalances` delegation to `liquidityAmounts`.
-- **Compatibility**: Aligned with `CCLiquidityRouter` (v0.0.11), `ICCAgent` (v0.0.2), `CCLiquidityTemplate` (v0.0.5).
+  - Supports non-zero balance pools via `volumeBalances`.
+- **Compatibility**: Aligned with `SSAgent.sol` (v0.0.2), `SS-LiquidityTemplate.sol` (v0.0.3).
 - **Price vs Prices Clarification**: `_currentPrice` is a state variable updated in `update`, `transactToken`, and `transactNative`, potentially laggy. `prices` is a view function computing price on-demand from Uniswap V2 reserves, using the same formula, preferred for real-time external queries.
