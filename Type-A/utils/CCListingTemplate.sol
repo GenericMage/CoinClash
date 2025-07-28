@@ -1,42 +1,33 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11
+// Version: 0.0.4
 // Changes:
-// - v0.0.11: Refactored getTokens to fetch tokenA and tokenB individually, added non-zero checks for robustness and ICCAgent compatibility (line 660).
-// - v0.0.10: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken without success checks (line 551). Compatible with CCLiquidityRouter.sol v0.0.11, CCLiquidityTemplate.sol v0.0.4, CCMainPartial.sol v0.0.7.
-// - v0.0.9: Renamed PayoutUpdate in ICCListing interface to ListingPayoutUpdate to resolve DeclarationError conflict with contract's PayoutUpdate struct (line 24). Updated ssUpdate function to use ListingPayoutUpdate (line 546). Changed getTokens return parameters to (_tokenA, _tokenB) to avoid naming conflict with tokenA() and tokenB() functions (line 660).
-// - v0.0.8: Added getTokens() to return (tokenA, tokenB) as per ICCListingTemplate in CCAgent.sol (line 686). Updated liquidityAddressView to remove uint256 parameter to match ICCListing in CCAgent.sol (line 614).
-// - v0.0.7: Fixed TypeError at line 375 in globalizeUpdate by replacing order.recipientAddress with order.recipient for SellOrderCore (line 375). Updated getSellOrderCore return parameter from recipientAddress to recipient for consistency (line 686).
-// - v0.0.6: Fixed ParserError at line 555 in ssUpdate by removing invalid syntax 'payout.recipient Roshi, ...' (lines 553-562).
-// - v0.0.5: Renamed tokenX/Y to _tokenA/B, decimalX/Y to _decimalsA/B, price to _currentPrice, made state variables private with view functions (lines 42-61, 124-195). Added longPayoutByIndex, shortPayoutByIndex to ICCListing (lines 24-25). Fixed syntax errors: removed decimals() call (line 385), corrected uniV2Pair/uniV2 (lines 460-474), fixed callerAddress, p.recipientAddress in ssUpdate (lines 560-567), corrected lastDayFeeBalance (line 434), fixed SellOrderCores (line 717). Added decimals validation in setTokens (lines 381-384).
-// - v0.0.4: Updated prices to handle zero reserves (lines 670-678). Ensured transactToken/transactNative update balances (lines 565-604).
-// - v0.0.3: Split transact into transactToken/transactNative (lines 565-604).
-// - v0.0.2: Added uniswapV2PairView (lines 668-670).
-// - v0.0.1: Added BSL 1.1, uniswapV2Pair, setUniswapV2Pair, normalized prices (lines 88-89, 315-321, 665-683).
+// - v0.0.4: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken (line 543). Added getTokens function for ICCListingTemplate compliance (line 614). Ensured globalizeOrders compatibility with CCAgent.sol v0.0.2 by maintaining struct and parameter consistency (lines 375-400). Incremented version to third numerator.
+// - v0.0.3: Split transact function into transactToken and transactNative to separate ERC20 and ETH transfers (lines 512-560).
+// - v0.0.2: Added uniswapV2PairView function to retrieve Uniswap V2 pair address (lines 605-607).
+// - v0.0.1: Changed license to BSL 1.1 - Peng Protocol 2025. Added uniswapV2Pair state variable and setUniswapV2Pair function (lines 88-89, 315-321). Modified prices function to derive price from Uniswap V2 pair reserves, normalized to 18 decimals (lines 602-620). Updated price state variable in update and transact functions (lines 451-465, 512-526). Normalized reserve values for price and historicalData (lines 451-465, 447-449). Added IUniswapV2Pair interface (lines 25-29).
+// - Compatible with SS-LiquidityTemplate.sol (v0.0.3), SSAgent.sol (v0.0.2).
 
 import "../imports/ReentrancyGuard.sol";
 
 interface IERC20 {
     function decimals() external view returns (uint8);
     function transfer(address recipient, uint256 amount) external returns (bool);
-    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
 }
 
 interface ICCListing {
     function prices(uint256) external view returns (uint256);
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView() external view returns (address);
+    function liquidityAddressView(uint256) external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
-    struct ListingPayoutUpdate {
+    struct PayoutUpdate {
         uint8 payoutType; // 0: Long, 1: Short
         address recipient;
         uint256 required;
     }
-    function ssUpdate(address caller, ListingPayoutUpdate[] calldata updates) external;
-    function longPayoutByIndex() external view returns (uint256[] memory);
-    function shortPayoutByIndex() external view returns (uint256[] memory);
+    function ssUpdate(address caller, PayoutUpdate[] calldata updates) external;
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
 }
@@ -75,11 +66,10 @@ interface ICCLiquidityTemplate {
 }
 
 interface ITokenRegistry {
-    function initializeBalances(address tokenAddress, address[] memory users) external;
+    function initializeBalances(address token, address[] memory users) external;
 }
 
 contract CCListingTemplate is ReentrancyGuard {
-    // State variables (private to hide)
     mapping(address => bool) private _routers;
     bool private _routersSet;
     address private _tokenA;
@@ -139,7 +129,7 @@ contract CCListingTemplate is ReentrancyGuard {
     }
     struct SellOrderCore {
         address makerAddress;
-        address recipient;
+        address recipientAddress;
         uint8 status;
     }
     struct SellOrderPricing {
@@ -334,7 +324,6 @@ contract CCListingTemplate is ReentrancyGuard {
         _tokenB = tokenB_;
         _decimalsA = tokenA_ == address(0) ? 18 : IERC20(tokenA_).decimals();
         _decimalsB = tokenB_ == address(0) ? 18 : IERC20(tokenB_).decimals();
-        require(_decimalsA > 0 && _decimalsB > 0, "Invalid token decimals");
     }
 
     // Sets agent address
@@ -384,7 +373,7 @@ contract CCListingTemplate is ReentrancyGuard {
                     orderId,
                     false,
                     order.makerAddress,
-                    order.recipient,
+                    order.recipientAddress,
                     amounts.pending,
                     order.status
                 ) {} catch {}
@@ -416,7 +405,7 @@ contract CCListingTemplate is ReentrancyGuard {
             } else if (u.updateType == 1 && u.structId == 2 && u.value > 0) {
                 volumeUpdated = true;
                 break;
-            } else if (u.updateType == 2 && u.structId == 2 && u.amountSent > 0) {
+            } else if (u.updateType == 2 && u.structId == 2 && u.value > 0) {
                 volumeUpdated = true;
                 break;
             }
@@ -459,14 +448,14 @@ contract CCListingTemplate is ReentrancyGuard {
                     BuyOrderCore storage core = _buyOrderCores[u.index];
                     if (amounts.pending == 0 && core.makerAddress != address(0)) {
                         amounts.pending = u.value;
-                        amounts.amountSent = u.amountSent; // Set initial amountSent (tokenA)
+                        amounts.amountSent = u.amountSent;
                         balances.yBalance += u.value;
-                        balances.yVolume += u.amountSent;
+                        balances.yVolume += u.value;
                     } else if (core.status == 1) {
                         require(amounts.pending >= u.value, "Insufficient pending");
                         amounts.pending -= u.value;
                         amounts.filled += u.value;
-                        amounts.amountSent += u.amountSent; // Add to amountSent (tokenA)
+                        amounts.amountSent += u.amountSent;
                         balances.xBalance -= u.value;
                         core.status = amounts.pending == 0 ? 3 : 2;
                         if (amounts.pending == 0) {
@@ -481,7 +470,7 @@ contract CCListingTemplate is ReentrancyGuard {
                     SellOrderCore storage core = _sellOrderCores[u.index];
                     if (core.makerAddress == address(0)) {
                         core.makerAddress = u.addr;
-                        core.recipient = u.recipient;
+                        core.recipientAddress = u.recipient;
                         core.status = 1;
                         _pendingSellOrders.push(u.index);
                         _makerPendingOrders[u.addr].push(u.index);
@@ -502,14 +491,14 @@ contract CCListingTemplate is ReentrancyGuard {
                     SellOrderCore storage core = _sellOrderCores[u.index];
                     if (amounts.pending == 0 && core.makerAddress != address(0)) {
                         amounts.pending = u.value;
-                        amounts.amountSent = u.amountSent; // Set initial amountSent (tokenB)
+                        amounts.amountSent = u.amountSent;
                         balances.xBalance += u.value;
-                        balances.xVolume += u.amountSent;
+                        balances.xVolume += u.value;
                     } else if (core.status == 1) {
                         require(amounts.pending >= u.value, "Insufficient pending");
                         amounts.pending -= u.value;
                         amounts.filled += u.value;
-                        amounts.amountSent += u.amountSent; // Add to amountSent (tokenB)
+                        amounts.amountSent += u.amountSent;
                         balances.yBalance -= u.value;
                         core.status = amounts.pending == 0 ? 3 : 2;
                         if (amounts.pending == 0) {
@@ -546,10 +535,10 @@ contract CCListingTemplate is ReentrancyGuard {
     }
 
     // Processes payout updates
-    function ssUpdate(address caller, ICCListing.ListingPayoutUpdate[] memory payoutUpdates) external nonReentrant {
+    function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external nonReentrant {
         require(_routers[caller], "Router only");
         for (uint256 i = 0; i < payoutUpdates.length; i++) {
-            ICCListing.ListingPayoutUpdate memory p = payoutUpdates[i];
+            PayoutUpdate memory p = payoutUpdates[i];
             uint256 orderId = _nextOrderId;
             if (p.payoutType == 0) {
                 LongPayoutStruct storage payout = _longPayouts[orderId];
@@ -586,24 +575,22 @@ contract CCListingTemplate is ReentrancyGuard {
         require(token != address(0), "Use transactNative for ETH");
         require(token == _tokenA || token == _tokenB, "Invalid token");
         VolumeBalance storage balances = _volumeBalance;
-        uint8 decimals = token == _tokenA ? _decimalsA : _decimalsB;
+        uint8 decimals = IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
-
+        require(balances.xBalance >= normalizedAmount || balances.yBalance >= normalizedAmount, "Insufficient balance");
         if (_lastDayFee.timestamp == 0 || block.timestamp >= _lastDayFee.timestamp + 86400) {
             _lastDayFee.xFees = _volumeBalance.xVolume;
             _lastDayFee.yFees = _volumeBalance.yVolume;
             _lastDayFee.timestamp = _floorToMidnight(block.timestamp);
         }
-
         if (token == _tokenA) {
-            balances.xBalance += normalizedAmount; // Support initial deposits
+            balances.xBalance -= normalizedAmount;
             balances.xVolume += normalizedAmount;
         } else {
-            balances.yBalance += normalizedAmount; // Support initial deposits
+            balances.yBalance -= normalizedAmount;
             balances.yVolume += normalizedAmount;
         }
         IERC20(token).transfer(recipient, amount);
-
         if (_uniswapV2Pair != address(0)) {
             (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
             uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
@@ -617,28 +604,26 @@ contract CCListingTemplate is ReentrancyGuard {
     }
 
     // Handles native ETH transfers
-    function transactNative(address caller, uint256 amount, address recipient) external payable nonReentrant {
+    function transactNative(address caller, uint256 amount, address recipient) external nonReentrant {
         require(_routers[caller], "Router only");
         require(_tokenA == address(0) || _tokenB == address(0), "No native token in pair");
         VolumeBalance storage balances = _volumeBalance;
         uint256 normalizedAmount = normalize(amount, 18);
-
+        require(balances.xBalance >= normalizedAmount || balances.yBalance >= normalizedAmount, "Insufficient balance");
         if (_lastDayFee.timestamp == 0 || block.timestamp >= _lastDayFee.timestamp + 86400) {
             _lastDayFee.xFees = _volumeBalance.xVolume;
             _lastDayFee.yFees = _volumeBalance.yVolume;
             _lastDayFee.timestamp = _floorToMidnight(block.timestamp);
         }
-
         if (_tokenA == address(0)) {
-            balances.xBalance += normalizedAmount; // Support initial deposits
+            balances.xBalance -= normalizedAmount;
             balances.xVolume += normalizedAmount;
         } else {
-            balances.yBalance += normalizedAmount; // Support initial deposits
+            balances.yBalance -= normalizedAmount;
             balances.yVolume += normalizedAmount;
         }
         (bool success, ) = recipient.call{value: amount}("");
         require(success, "ETH transfer failed");
-
         if (_uniswapV2Pair != address(0)) {
             (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
             uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
@@ -651,24 +636,23 @@ contract CCListingTemplate is ReentrancyGuard {
         _updateRegistry();
     }
 
-    // View functions for state access
-    function routersView(address router) external view returns (bool) {
-        return _routers[router];
+    // Returns Uniswap V2 pair address
+    function uniswapV2PairView() external view returns (address) {
+        return _uniswapV2Pair;
     }
 
-    function routersSetView() external view returns (bool) {
-        return _routersSet;
+    // Returns current price from Uniswap V2 pair
+    function prices(uint256) external view returns (uint256) {
+        if (_uniswapV2Pair == address(0)) return 0;
+        (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
+        uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
+        uint256 reserveB = _tokenB == IUniswapV2Pair(_uniswapV2Pair).token1() ? reserve1 : reserve0;
+        uint256 normalizedReserveA = normalize(reserveA, _decimalsA);
+        uint256 normalizedReserveB = normalize(reserveB, _decimalsB);
+        return normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0;
     }
 
-    function tokenA() external view returns (address) {
-        return _tokenA;
-    }
-
-    function tokenB() external view returns (address) {
-        return _tokenB;
-    }
-
-    // Returns tokenA and tokenB with non-zero checks for ICCListingTemplate compliance
+    // Returns tokenA and tokenB for ICCListingTemplate compliance
     function getTokens() external view returns (address tokenA, address tokenB) {
         address fetchedTokenA = _tokenA;
         address fetchedTokenB = _tokenB;
@@ -676,130 +660,144 @@ contract CCListingTemplate is ReentrancyGuard {
         return (fetchedTokenA, fetchedTokenB);
     }
 
+    // Returns volume balances
+    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
+        return (_volumeBalance.xBalance, _volumeBalance.yBalance);
+    }
+
+    // Returns liquidity address
+    function liquidityAddressView(uint256) external view returns (address) {
+        return _liquidityAddress;
+    }
+
+    // Returns tokenA address
+    function tokenA() external view returns (address) {
+        return _tokenA;
+    }
+
+    // Returns tokenB address
+    function tokenB() external view returns (address) {
+        return _tokenB;
+    }
+
+    // Returns tokenA decimals
     function decimalsA() external view returns (uint8) {
         return _decimalsA;
     }
 
+    // Returns tokenB decimals
     function decimalsB() external view returns (uint8) {
         return _decimalsB;
     }
 
-    function uniswapV2PairView() external view returns (address) {
-        return _uniswapV2Pair;
-    }
-
-    function uniswapV2PairSetView() external view returns (bool) {
-        return _uniswapV2PairSet;
-    }
-
-    function listingIdView() external view returns (uint256) {
+    // Returns listing ID
+    function getListingId() external view returns (uint256) {
         return _listingId;
     }
 
-    function agentView() external view returns (address) {
-        return _agent;
-    }
-
-    function registryAddressView() external view returns (address) {
-        return _registryAddress;
-    }
-
-    function liquidityAddressView() external view returns (address) {
-        return _liquidityAddress; // Returns liquidity address without parameter for ICCListing compliance
-    }
-
-    function nextOrderIdView() external view returns (uint256) {
+    // Returns next order ID
+    function getNextOrderId() external view returns (uint256) {
         return _nextOrderId;
     }
 
-    function lastDayFeeView() external view returns (LastDayFee memory) {
-        return _lastDayFee;
-    }
-
-    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
-        if (_liquidityAddress == address(0)) return (0, 0);
-        (xBalance, yBalance) = ICCLiquidityTemplate(_liquidityAddress).liquidityAmounts();
-    }
-
+    // Returns volume balance details
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
         return (_volumeBalance.xBalance, _volumeBalance.yBalance, _volumeBalance.xVolume, _volumeBalance.yVolume);
     }
 
+    // Returns current price
     function listingPriceView() external view returns (uint256) {
         return _currentPrice;
     }
 
+    // Returns pending buy orders
     function pendingBuyOrdersView() external view returns (uint256[] memory) {
         return _pendingBuyOrders;
     }
 
+    // Returns pending sell orders
     function pendingSellOrdersView() external view returns (uint256[] memory) {
         return _pendingSellOrders;
     }
 
-    function makerPendingOrdersView(address makerAddress) external view returns (uint256[] memory) {
-        return _makerPendingOrders[makerAddress];
+    // Returns maker's pending orders
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory) {
+        return _makerPendingOrders[maker];
     }
 
-    function longPayoutByIndex() external view returns (uint256[] memory) {
+    // Returns long payout indices
+    function longPayoutByIndexView() external view returns (uint256[] memory) {
         return _longPayoutsByIndex;
     }
 
-    function shortPayoutByIndex() external view returns (uint256[] memory) {
+    // Returns short payout indices
+    function shortPayoutByIndexView() external view returns (uint256[] memory) {
         return _shortPayoutsByIndex;
     }
 
+    // Returns user payout IDs
     function userPayoutIDsView(address user) external view returns (uint256[] memory) {
         return _userPayoutIDs[user];
     }
 
+    // Returns long payout details
     function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory) {
         return _longPayouts[orderId];
     }
 
+    // Returns short payout details
     function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory) {
         return _shortPayouts[orderId];
     }
 
+    // Returns buy order core details
     function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
         BuyOrderCore memory core = _buyOrderCores[orderId];
         return (core.makerAddress, core.recipientAddress, core.status);
     }
 
+    // Returns buy order pricing details
     function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
         BuyOrderPricing memory pricing = _buyOrderPricings[orderId];
         return (pricing.maxPrice, pricing.minPrice);
     }
 
+    // Returns buy order amounts
     function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
         BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
         return (amounts.pending, amounts.filled, amounts.amountSent);
     }
 
-    function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipient, uint8 status) {
+    // Returns sell order core details
+    function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
         SellOrderCore memory core = _sellOrderCores[orderId];
-        return (core.makerAddress, core.recipient, core.status);
+        return (core.makerAddress, core.recipientAddress, core.status);
     }
 
+    // Returns sell order pricing details
     function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
         SellOrderPricing memory pricing = _sellOrderPricings[orderId];
         return (pricing.maxPrice, pricing.minPrice);
     }
 
+    // Returns sell order amounts
     function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
         SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
         return (amounts.pending, amounts.filled, amounts.amountSent);
     }
 
+    // Returns historical data by index
     function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory) {
         require(index < _historicalData.length, "Invalid index");
         return _historicalData[index];
     }
 
-    function historicalDataLength() external view returns (uint256) {
+    // Returns historical data length
+    function historicalDataLengthView() external view returns (uint256) {
         return _historicalData.length;
     }
 
+    // Returns historical data by nearest timestamp
     function getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) external view returns (HistoricalData memory) {
         require(_historicalData.length > 0, "No historical data");
         uint256 minDiff = type(uint256).max;
