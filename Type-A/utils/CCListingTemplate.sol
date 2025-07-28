@@ -3,7 +3,7 @@ pragma solidity ^0.8.2;
 
 // Version: 0.0.11
 // Changes:
-// - v0.0.11: Updated getTokens to use tokenA() and tokenB() view functions to ensure correct token address retrieval, fixing zero address issue in CCAgent.isValidListing (line 660).
+// - v0.0.11: Refactored getTokens to fetch tokenA and tokenB individually, added non-zero checks for robustness and ICCAgent compatibility (line 660).
 // - v0.0.10: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken without success checks (line 551). Compatible with CCLiquidityRouter.sol v0.0.11, CCLiquidityTemplate.sol v0.0.4, CCMainPartial.sol v0.0.7.
 // - v0.0.9: Renamed PayoutUpdate in ICCListing interface to ListingPayoutUpdate to resolve DeclarationError conflict with contract's PayoutUpdate struct (line 24). Updated ssUpdate function to use ListingPayoutUpdate (line 546). Changed getTokens return parameters to (_tokenA, _tokenB) to avoid naming conflict with tokenA() and tokenB() functions (line 660).
 // - v0.0.8: Added getTokens() to return (tokenA, tokenB) as per ICCListingTemplate in CCAgent.sol (line 686). Updated liquidityAddressView to remove uint256 parameter to match ICCListing in CCAgent.sol (line 614).
@@ -668,8 +668,12 @@ contract CCListingTemplate is ReentrancyGuard {
         return _tokenB;
     }
 
-    function getTokens() external view returns (address _tokenA, address _tokenB) {
-        return (tokenA(), tokenB()); // Use view functions to ensure correct token address retrieval
+    // Returns tokenA and tokenB with non-zero checks for ICCListingTemplate compliance
+    function getTokens() external view returns (address tokenA, address tokenB) {
+        address fetchedTokenA = _tokenA;
+        address fetchedTokenB = _tokenB;
+        require(fetchedTokenA != address(0) || fetchedTokenB != address(0), "No valid tokens set");
+        return (fetchedTokenA, fetchedTokenB);
     }
 
     function decimalsA() external view returns (uint8) {
