@@ -5,89 +5,79 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.10 (Updated 2025-07-27)
-
+**Version**: 0.0.11 (Updated 2025-07-28)
 
 ### State Variables
-- **`_routers`**: `mapping(address => bool) private` - Maps addresses to authorized routers.
-- **`_routersSet`**: `bool private` - Tracks if routers are set, prevents re-setting.
-- **`_tokenA`**: `address private` - Address of token A (or ETH if zero).
-- **`_tokenB`**: `address private` - Address of token B (or ETH if zero).
-- **`_decimalsA`**: `uint8 private` - Decimals of token A (18 for ETH).
-- **`_decimalsB`**: `uint8 private` - Decimals of token B (18 for ETH).
-- **`_uniswapV2Pair`**: `address private` - Address of the Uniswap V2 pair for price derivation.
-- **`_uniswapV2PairSet`**: `bool private` - Tracks if Uniswap V2 pair is set, prevents re-setting.
-- **`_listingId`**: `uint256 private` - Unique identifier for the listing.
-- **`_agent`**: `address private` - Address of the agent contract for global updates.
-- **`_registryAddress`**: `address private` - Address of the token registry contract.
-- **`_liquidityAddress`**: `address private` - Address of the liquidity contract.
-- **`_nextOrderId`**: `uint256 private` - Next available order ID for payouts/orders.
-- **`_lastDayFee`**: `LastDayFee private` - Stores `xFees`, `yFees`, and `timestamp` for daily fee tracking.
-- **`_volumeBalance`**: `VolumeBalance private` - Stores `xBalance`, `yBalance`, `xVolume`, `yVolume`.
-- **`_currentPrice`**: `uint256 private` - Current price, derived from Uniswap V2 pair reserves as `(normalizedReserveA * 1e18) / normalizedReserveB`.
-- **`_pendingBuyOrders`**: `uint256[] private` - Array of pending buy order IDs.
-- **`_pendingSellOrders`**: `uint256[] private` - Array of pending sell order IDs.
-- **`_longPayoutsByIndex`**: `uint256[] private` - Array of long payout order IDs.
-- **`_shortPayoutsByIndex`**: `uint256[] private` - Array of short payout order IDs.
-- **`_historicalData`**: `HistoricalData[] private` - Array of historical market data.
+- `_routers`: `mapping(address => bool) private` - Maps addresses to authorized routers.
+- `_routersSet`: `bool private` - Tracks if routers are set, prevents re-setting.
+- `_tokenA`: `address private` - Address of token A (or ETH if zero).
+- `_tokenB`: `address private` - Address of token B (or ETH if zero).
+- `_decimalsA`: `uint8 private` - Decimals of token A (18 for ETH).
+- `_decimalsB`: `uint8 private` - Decimals of token B (18 for ETH).
+- `_uniswapV2Pair`: `address private` - Address of the Uniswap V2 pair for price derivation.
+- `_uniswapV2PairSet`: `bool private` - Tracks if Uniswap V2 pair is set, prevents re-setting.
+- `_listingId`: `uint256 private` - Unique identifier for the listing.
+- `_agent`: `address private` - Address of the agent contract for global updates.
+- `_registryAddress`: `address private` - Address of the token registry contract.
+- `_liquidityAddress`: `address private` - Address of the liquidity contract.
+- `_nextOrderId`: `uint256 private` - Next available order ID for payouts/orders.
+- `_lastDayFee`: `LastDayFee private` - Stores `xFees`, `yFees`, and `timestamp` for daily fee tracking.
+- `_volumeBalance`: `VolumeBalance private` - Stores `xBalance`, `yBalance`, `xVolume`, `yVolume`.
+- `_currentPrice`: `uint256 private` - Current price, derived from Uniswap V2 pair reserves as `(normalizedReserveA * 1e18) / normalizedReserveB`.
+- `_pendingBuyOrders`: `uint256[] private` - Array of pending buy order IDs.
+- `_pendingSellOrders`: `uint256[] private` - Array of pending sell order IDs.
+- `_longPayoutsByIndex`: `uint256[] private` - Array of long payout order IDs.
+- `_shortPayoutsByIndex`: `uint256[] private` - Array of short payout order IDs.
+- `_historicalData`: `HistoricalData[] private` - Array of historical market data.
 
 ### Mappings
-- **`_routers`**: `mapping(address => bool)` - Maps addresses to authorized routers.
-- **`_buyOrderCores`**: `mapping(uint256 => BuyOrderCore)` - Maps order ID to buy order core data (`makerAddress`, `recipientAddress`, `status`).
-- **`_buyOrderPricings`**: `mapping(uint256 => BuyOrderPricing)` - Maps order ID to buy order pricing (`maxPrice`, `minPrice`).
-- **`_buyOrderAmounts`**: `mapping(uint256 => BuyOrderAmounts)` - Maps order ID to buy order amounts (`pending`, `filled`, `amountSent`).
-- **`_sellOrderCores`**: `mapping(uint256 => SellOrderCore)` - Maps order ID to sell order core data (`makerAddress`, `recipient`, `status`).
-- **`_sellOrderPricings`**: `mapping(uint256 => SellOrderPricing)` - Maps order ID to sell order pricing (`maxPrice`, `minPrice`).
-- **`_sellOrderAmounts`**: `mapping(uint256 => SellOrderAmounts)` - Maps order ID to sell order amounts (`pending`, `filled`, `amountSent`).
-- **`_longPayouts`**: `mapping(uint256 => LongPayoutStruct)` - Maps order ID to long payout data (`makerAddress`, `recipientAddress`, `required`, `filled`, `orderId`, `status`).
-- **`_shortPayouts`**: `mapping(uint256 => ShortPayoutStruct)` - Maps order ID to short payout data (`makerAddress`, `recipientAddress`, `amount`, `filled`, `orderId`, `status`).
-- **`_makerPendingOrders`**: `mapping(address => uint256[])` - Maps maker address to their pending order IDs.
-- **`_userPayoutIDs`**: `mapping(address => uint256[])` - Maps user address to their payout order IDs.
+- `_routers`: `mapping(address => bool)` - Maps addresses to authorized routers.
+- `_buyOrderCores`: `mapping(uint256 => BuyOrderCore)` - Maps order ID to buy order core data (`makerAddress`, `recipientAddress`, `status`).
+- `_buyOrderPricings`: `mapping(uint256 => BuyOrderPricing)` - Maps order ID to buy order pricing (`maxPrice`, `minPrice`).
+- `_buyOrderAmounts`: `mapping(uint256 => BuyOrderAmounts)` - Maps order ID to buy order amounts (`pending`, `filled`, `amountSent`).
+- `_sellOrderCores`: `mapping(uint256 => SellOrderCore)` - Maps order ID to sell order core data (`makerAddress`, `recipient`, `status`).
+- `_sellOrderPricings`: `mapping(uint256 => SellOrderPricing)` - Maps order ID to sell order pricing (`maxPrice`, `minPrice`).
+- `_sellOrderAmounts`: `mapping(uint256 => SellOrderAmounts)` - Maps order ID to sell order amounts (`pending`, `filled`, `amountSent`).
+- `_longPayouts`: `mapping(uint256 => LongPayoutStruct)` - Maps order ID to long payout data (`makerAddress`, `recipientAddress`, `required`, `filled`, `orderId`, `status`).
+- `_shortPayouts`: `mapping(uint256 => ShortPayoutStruct)` - Maps order ID to short payout data (`makerAddress`, `recipientAddress`, `amount`, `filled`, `orderId`, `status`).
+- `_makerPendingOrders`: `mapping(address => uint256[])` - Maps maker address to their pending order IDs.
+- `_userPayoutIDs`: `mapping(address => uint256[])` - Maps user address to their payout order IDs.
 
 ### Structs
 1. **LastDayFee**:
    - `xFees`: `uint256` - Token A fees at start of day.
    - `yFees`: `uint256` - Token B fees at start of day.
    - `timestamp`: `uint256` - Timestamp of last fee update.
-
 2. **VolumeBalance**:
    - `xBalance`: `uint256` - Normalized balance of token A.
    - `yBalance`: `uint256` - Normalized balance of token B.
    - `xVolume`: `uint256` - Normalized trading volume of token A.
    - `yVolume`: `uint256` - Normalized trading volume of token B.
-
 3. **BuyOrderCore**:
    - `makerAddress`: `address` - Address of the order creator.
    - `recipientAddress`: `address` - Address to receive tokens.
    - `status`: `uint8` - Order status (0=cancelled, 1=pending, 2=partially filled, 3=filled).
-
 4. **BuyOrderPricing**:
    - `maxPrice`: `uint256` - Maximum acceptable price (normalized).
    - `minPrice`: `uint256` - Minimum acceptable price (normalized).
-
 5. **BuyOrderAmounts**:
    - `pending`: `uint256` - Normalized pending amount (tokenB).
    - `filled`: `uint256` - Normalized filled amount (tokenB).
    - `amountSent`: `uint256` - Normalized amount of tokenA sent during settlement.
-
 6. **SellOrderCore**:
    - `makerAddress`: `address` - Address of the order creator.
    - `recipient`: `address` - Address to receive tokens.
    - `status`: `uint8` - Order status (0=cancelled, 1=pending, 2=partially filled, 3=filled).
-
 7. **SellOrderPricing**:
    - Same as `BuyOrderPricing` for sell orders.
-
 8. **SellOrderAmounts**:
    - `pending`: `uint256` - Normalized pending amount (tokenA).
    - `filled`: `uint256` - Normalized filled amount (tokenA).
    - `amountSent`: `uint256` - Normalized amount of tokenB sent during settlement.
-
 9. **PayoutUpdate**:
    - `payoutType`: `uint8` - Type of payout (0=long, 1=short).
    - `recipient`: `address` - Address to receive payout.
    - `required`: `uint256` - Normalized amount required.
-
 10. **LongPayoutStruct**:
     - `makerAddress`: `address` - Address of the payout creator.
     - `recipientAddress`: `address` - Address to receive payout.
@@ -95,7 +85,6 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
     - `filled`: `uint256` - Normalized amount filled (tokenB).
     - `orderId`: `uint256` - Unique payout order ID.
     - `status`: `uint8` - Payout status (0=pending, others undefined).
-
 11. **ShortPayoutStruct**:
     - `makerAddress`: `address` - Address of the payout creator.
     - `recipientAddress`: `address` - Address to receive payout.
@@ -103,7 +92,6 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
     - `filled`: `uint256` - Normalized amount filled (tokenA).
     - `orderId`: `uint256` - Unique payout order ID.
     - `status`: `uint8` - Payout status (0=pending, others undefined).
-
 12. **HistoricalData**:
     - `price`: `uint256` - Market price at timestamp (normalized, from Uniswap V2 reserves).
     - `xBalance`: `uint256` - Token A balance (normalized).
@@ -111,7 +99,6 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
     - `xVolume`: `uint256` - Token A volume (normalized).
     - `yVolume`: `uint256` - Token B volume (normalized).
     - `timestamp`: `uint256` - Time of data snapshot.
-
 13. **UpdateType**:
     - `updateType`: `uint8` - Update type (0=balance, 1=buy order, 2=sell order, 3=historical).
     - `structId`: `uint8` - Struct to update (0=core, 1=pricing, 2=amounts).
@@ -128,7 +115,6 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
    - **Formula**: `price = (normalizedReserveA * 1e18) / normalizedReserveB`
    - **Used in**: `update`, `transactToken`, `transactNative`, `prices`
    - **Description**: Computes current price from Uniswap V2 pair reserves (`reserve0`, `reserve1`), normalized to 1e18 using `decimalsA` and `decimalsB`, used for order pricing and historical data. Returns 0 if reserves are zero.
-
 2. **Daily Yield**:
    - **Formula**: `dailyYield = ((feeDifference * 0.0005) * 1e18) / liquidity * 365`
    - **Used in**: `queryYield`
@@ -274,6 +260,10 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - **Structs**: `LastDayFee`, `VolumeBalance`.
 - **Restrictions**: Reverts if `maxIterations` is zero or no historical data/same-day timestamp.
 - **Gas Usage Controls**: Minimal, single external call, try-catch for `liquidityAmounts`.
+
+#### getTokens() view returns (address _tokenA, address _tokenB)
+- **Behavior**: Returns `_tokenA` and `_tokenB` using `tokenA()` and `tokenB()` view functions.
+- **Gas Usage Controls**: Minimal, calls `tokenA()` and `tokenB()` for state reads.
 
 #### uniswapV2PairView() view returns (address)
 - **Behavior**: Returns `_uniswapV2Pair` address.
@@ -441,7 +431,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
   - Explicit casting for interfaces (e.g., `ICCLiquidityTemplate`, `IERC20`, `IUniswapV2Pair`).
   - No inline assembly, uses high-level Solidity.
   - Try-catch for external calls to handle failures gracefully.
-  - Hidden state variables accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`, etc.).
+  - Hidden state variables accessed via view functions (`tokenA`, `tokenB`, `decimalsA`, `decimalsB`, `uniswapV2PairView`, `getTokens`, etc.).
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
   - Supports zero-balance pools via `volumeBalances` delegation to `liquidityAmounts`.
 - **Compatibility**: Aligned with `CCLiquidityRouter` (v0.0.11), `ICCAgent` (v0.0.2), `CCLiquidityTemplate` (v0.0.5).
