@@ -262,8 +262,8 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), is a decentr
 - **Gas Usage Controls**: Minimal, single external call, try-catch for `liquidityAmounts`.
 
 #### getTokens() view returns (address _tokenA, address _tokenB)
-- **Behavior**: Returns `_tokenA` and `_tokenB` using `tokenA()` and `tokenB()` view functions.
-- **Gas Usage Controls**: Minimal, calls `tokenA()` and `tokenB()` for state reads.
+- **Behavior**: Returns `_tokenA` and `_tokenB` with non-zero checks for `ICCAgent` compatibility.
+- **Gas Usage Controls**: Minimal, two state reads with validation.
 
 #### uniswapV2PairView() view returns (address)
 - **Behavior**: Returns `_uniswapV2Pair` address.
