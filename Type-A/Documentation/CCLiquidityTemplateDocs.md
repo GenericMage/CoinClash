@@ -1,11 +1,11 @@
 # CCLiquidityTemplate Documentation
 
 ## Overview
-The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity deposits, withdrawals, and fee claims in a decentralized trading platform. It inherits `ReentrancyGuard` for security, integrates with `ICCAgent` and `ITokenRegistry` for global updates, and uses `IERC20` import for token operations. State variables are public, accessed via unique view functions, and amounts are normalized to 1e18 for precision. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation.
+The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity deposits, withdrawals, and fee claims in a decentralized trading platform. It inherits `ReentrancyGuard` for security, integrates with `ICCAgent` and `ITokenRegistry` for global updates, and uses `IERC20` import for token operations. State variables are public, accessed via unique view functions, and amounts are normalized to 1e18 for precision. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation with try-catch for external calls.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.5 (Updated 2025-07-27)
+**Version**: 0.0.11 (Updated 2025-07-29)
 
 ### State Variables
 - **`routersSet`**: `bool public` - Tracks if routers are set.
@@ -35,7 +35,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 
 2. **Slot**:
    - `depositor`: `address` - Slot owner.
-   - `recipient`: `address` - Unused.
+   - `recipient`: `address` - Unused (reserved for future use).
    - `allocation`: `uint256` - Normalized liquidity allocation.
    - `dFeesAcc`: `uint256` - Cumulative fees at deposit/claim (`yFeesAcc` for xSlots, `xFeesAcc` for ySlots).
    - `timestamp`: `uint256` - Slot creation timestamp.
@@ -45,7 +45,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
    - `index`: `uint256` - Index (0=xFees/xLiquid, 1=yFees/yLiquid, or slot index).
    - `value`: `uint256` - Normalized amount/allocation.
    - `addr`: `address` - Depositor.
-   - `recipient`: `address` - Unused.
+   - `recipient`: `address` - Unused (reserved for future use).
 
 4. **PreparedWithdrawal**:
    - `amountA`: `uint256` - Normalized token A withdrawal.
@@ -77,16 +77,16 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
      ```
      withdrawAmountA = min(amount, xLiquid)
      deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0
-     withdrawAmountB = deficit > 0 ? min((deficit * 1e18) / getPrice(), yLiquid) : 0
+     withdrawAmountB = deficit > 0 ? min((deficit * 1e18) / prices(0), yLiquid) : 0
      ```
    - **Formula for yPrepOut**:
      ```
      withdrawAmountB = min(amount, yLiquid)
      deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0
-     withdrawAmountA = deficit > 0 ? min((deficit * getPrice()) / 1e18, xLiquid) : 0
+     withdrawAmountA = deficit > 0 ? min((deficit * prices(0)) / 1e18, xLiquid) : 0
      ```
    - **Used in**: `xPrepOut`, `yPrepOut`
-   - **Description**: Calculates withdrawal amounts, compensating shortfalls using `ICCLiquidity.getPrice`, capped by available liquidity.
+   - **Description**: Calculates withdrawal amounts, compensating shortfalls using `ICCListing.prices(0)`, capped by available liquidity.
 
 ### External Functions
 #### setRouters(address[] memory _routers)
@@ -120,6 +120,18 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 - **Restrictions**: `nonReentrant`, router-only.
 - **Gas**: Loop over `updates`, dynamic array resizing.
 
+#### globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit)
+- **Behavior**: Updates `ICCAgent` with liquidity changes, emits `GlobalizeUpdateFailed` on failure.
+- **Internal**: Normalizes amount, calls `ICCAgent.globalizeLiquidity`.
+- **Restrictions**: Reverts if `agent` not set.
+- **Gas**: Single external call with try-catch.
+
+#### updateRegistry(address caller, bool isX)
+- **Behavior**: Updates `ITokenRegistry` for token balances, emits `UpdateRegistryFailed` on failure.
+- **Internal**: Fetches registry from `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances`.
+- **Restrictions**: Reverts if `agent` or registry not set.
+- **Gas**: Two external calls with try-catch.
+
 #### changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor)
 - **Behavior**: Transfers slot ownership, emits `SlotDepositorChanged`.
 - **Internal**: Updates `xLiquiditySlots`/`yLiquiditySlots`, `userIndex`.
@@ -127,46 +139,47 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 - **Gas**: Single slot update, array adjustments.
 
 #### depositToken(address caller, address token, uint256 amount)
-- **Behavior**: Deposits ERC20 tokens, creates slot, emits `DepositReceived`.
+- **Behavior**: Deposits ERC20 tokens, creates slot, emits `DepositReceived` or `DepositFailed`.
 - **Internal**: Pre/post balance checks, `IERC20.transferFrom`, calls `update`, `globalizeUpdate`, `updateRegistry`.
 - **Restrictions**: `nonReentrant`, router-only, valid token.
 - **Gas**: Single transfer, try-catch for external calls.
 
 #### depositNative(address caller, uint256 amount)
-- **Behavior**: Deposits ETH, creates slot, emits `DepositReceived`.
+- **Behavior**: Deposits ETH, creates slot, emits `DepositReceived` or `DepositFailed`.
 - **Internal**: Validates `msg.value`, calls `update`, `globalizeUpdate`, `updateRegistry`.
 - **Restrictions**: `nonReentrant`, router-only, one token must be ETH.
 - **Gas**: Minimal, try-catch for external calls.
 
 #### xPrepOut(address caller, uint256 amount, uint256 index) returns (PreparedWithdrawal memory)
 - **Behavior**: Prepares token A withdrawal, compensates with token B if shortfall.
-- **Internal**: Checks `xLiquid`, `allocation`, uses `ICCLiquidity.getPrice`.
+- **Internal**: Checks `xLiquid`, `allocation`, uses `ICCListing.prices(0)`.
 - **Restrictions**: `nonReentrant`, router-only, valid slot.
-- **Gas**: Minimal, single `getPrice` call.
+- **Gas**: Minimal, single `prices` call.
 
 #### xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal)
-- **Behavior**: Executes token A withdrawal, transfers tokens/ETH.
+- **Behavior**: Executes token A withdrawal, transfers tokens/ETH, emits `DepositFailed` on failure.
 - **Internal**: Updates `xLiquiditySlots`, calls `transactToken`/`transactNative`, `globalizeUpdate`, `updateRegistry`.
 - **Restrictions**: `nonReentrant`, router-only, valid slot.
 - **Gas**: Two transfers, try-catch in `transact*`.
 
 #### yPrepOut(address caller, uint256 amount, uint256 index) returns (PreparedWithdrawal memory)
 - **Behavior**: Prepares token B withdrawal, compensates with token A if shortfall.
-- **Internal**: Checks `yLiquid`, `allocation`, uses `ICCLiquidity.getPrice`.
+- **Internal**: Checks `yLiquid`, `allocation`, uses `ICCListing.prices(0)`.
 - **Restrictions**: `nonReentrant`, router-only, valid slot.
-- **Gas**: Minimal, single `getPrice` call.
+- **Gas**: Minimal, single `prices` call.
 
 #### yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal)
-- **Behavior**: Executes token B withdrawal, transfers tokens/ETH.
+- **Behavior**: Executes token B withdrawal, transfers tokens/ETH, emits `DepositFailed` on failure.
 - **Internal**: Updates `yLiquiditySlots`, calls `transactToken`/`transactNative`, `globalizeUpdate`, `updateRegistry`.
 - **Restrictions**: `nonReentrant`, router-only, valid slot.
 - **Gas**: Two transfers, try-catch in `transact*`.
 
-#### claimFees(address caller, address _listingAddress, uint256 liquidityIndex, bool isX, uint256 volume)
+#### claimFees(address caller, address _listingAddress, uint256 liquidityIndex, bool isX, uint256 /* volume */)
 - **Behavior**: Claims fees, resets `dFeesAcc`, emits `FeesClaimed`.
 - **Internal**: Validates listing, uses `_processFeeClaim` with `FeeClaimContext`, updates fees/slots, transfers via `transactToken`.
 - **Restrictions**: `nonReentrant`, router-only, valid depositor/listing.
 - **Gas**: Single transfer, stack-optimized via struct.
+- **Note**: `volume` parameter is unused, reserved for future use.
 
 #### addFees(address caller, bool isX, uint256 fee)
 - **Behavior**: Adds fees to `xFees`/`yFees`, increments `xFeesAcc`/`yFeesAcc`.
@@ -175,16 +188,22 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 - **Gas**: Minimal, single update.
 
 #### transactToken(address caller, address token, uint256 amount, address recipient)
-- **Behavior**: Transfers ERC20 tokens, updates `xLiquid`/`yLiquid`.
+- **Behavior**: Transfers ERC20 tokens, updates `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Internal**: Normalizes amount, checks liquidity, uses `IERC20.transfer`.
 - **Restrictions**: `nonReentrant`, router-only, valid token.
 - **Gas**: Single transfer, minimal updates.
 
 #### transactNative(address caller, uint256 amount, address recipient)
-- **Behavior**: Transfers ETH, updates `xLiquid`/`yLiquid`.
+- **Behavior**: Transfers ETH, updates `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Internal**: Normalizes amount, checks liquidity, uses low-level `call`.
 - **Restrictions**: `nonReentrant`, router-only, one token must be ETH.
 - **Gas**: Single transfer, try-catch.
+
+#### updateLiquidity(address caller, bool isX, uint256 amount)
+- **Behavior**: Deducts liquidity from `xLiquid` or `yLiquid`, emits `LiquidityUpdated`.
+- **Internal**: Checks liquidity balance.
+- **Restrictions**: `nonReentrant`, router-only.
+- **Gas**: Minimal, single update.
 
 #### getListingAddress(uint256) view returns (address)
 - **Behavior**: Returns `listingAddress`.
@@ -211,16 +230,16 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 - **Behavior**: Returns `yLiquiditySlots[index]`.
 
 ### Additional Details
-- **Decimal Handling**: Normalizes to 1e18 using `IERC20.decimals`.
+- **Decimal Handling**: Normalizes to 1e18 using `IERC20.decimals`, denormalizes for transfers.
 - **Reentrancy Protection**: `nonReentrant` on state-changing functions.
 - **Gas Optimization**: Dynamic arrays, minimal external calls, stack-optimized `claimFees`.
 - **Token Usage**: xSlots provide token A, claim yFees; ySlots provide token B, claim xFees.
-- **Events**: `LiquidityUpdated`, `FeesUpdated`, `FeesClaimed`, `SlotDepositorChanged`, `GlobalizeUpdateFailed`, `UpdateRegistryFailed`, `DepositReceived`.
+- **Events**: `LiquidityUpdated`, `FeesUpdated`, `FeesClaimed`, `SlotDepositorChanged`, `GlobalizeUpdateFailed`, `UpdateRegistryFailed`, `DepositReceived`, `DepositFailed`, `TransactFailed`.
 - **Safety**:
-  - Explicit casting for `ICCLiquidity`, `IERC20`, `ITokenRegistry`, `ICCAgent`.
+  - Explicit casting for `ICCListing`, `IERC20`, `ITokenRegistry`, `ICCAgent`.
   - No inline assembly, high-level Solidity.
-  - Try-catch for external calls.
-  - Public state variables accessed via view functions.
+  - Try-catch for external calls with detailed revert strings.
+  - Public state variables accessed via unique view functions.
   - Avoids reserved keywords, unnecessary virtual/overrides.
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at deposit/claim.
 - **Compatibility**: Aligned with `CCListingTemplate` (v0.0.10), `CCLiquidityRouter` (v0.0.11), `CCMainPartial` (v0.0.7).
