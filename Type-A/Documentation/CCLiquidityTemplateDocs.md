@@ -5,7 +5,12 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.11 (Updated 2025-07-29)
+**Version**: 0.0.12 (Updated 2025-07-29)
+
+**Changes**:
+- **v0.0.12**: Added explicit gas limit of 1,000,000 to `globalizeLiquidity` and `registryAddress` calls in `globalizeUpdate` and `updateRegistry` functions.
+- **v0.0.11**: Fixed typo in `yPrepOut`, corrected `withrawAmountA` to `withdrawAmountA`.
+- **v0.0.10**: Made `updateRegistry` and `globalizeUpdate` external to resolve TypeError.
 
 ### State Variables
 - **`routersSet`**: `bool public` - Tracks if routers are set.
@@ -122,13 +127,13 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity d
 
 #### globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit)
 - **Behavior**: Updates `ICCAgent` with liquidity changes, emits `GlobalizeUpdateFailed` on failure.
-- **Internal**: Normalizes amount, calls `ICCAgent.globalizeLiquidity`.
+- **Internal**: Normalizes amount, calls `ICCAgent.globalizeLiquidity` with 1,000,000 gas limit.
 - **Restrictions**: Reverts if `agent` not set.
 - **Gas**: Single external call with try-catch.
 
 #### updateRegistry(address caller, bool isX)
 - **Behavior**: Updates `ITokenRegistry` for token balances, emits `UpdateRegistryFailed` on failure.
-- **Internal**: Fetches registry from `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances`.
+- **Internal**: Fetches registry from `ICCAgent.registryAddress` with 1,000,000 gas limit, calls `ITokenRegistry.initializeBalances` with 1,000,000 gas limit.
 - **Restrictions**: Reverts if `agent` or registry not set.
 - **Gas**: Two external calls with try-catch.
 

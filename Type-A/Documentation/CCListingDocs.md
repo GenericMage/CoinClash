@@ -5,13 +5,19 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), manages buy/
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.0.5 (Updated 2025-07-29)
+**Version**: 0.0.8 (Updated 2025-07-29)
 
 **Compatibility**: 
 - CCAgent.sol (v0.0.5)
 - CCLiquidityTemplate.sol (v0.0.5)
 - CCLiquidityRouter.sol (v0.0.12)
 - CCMainPartial.sol (v0.0.8)
+
+**Version History**:
+- v0.0.8: Added explicit gas limit (500000) to `ITokenRegistry.initializeBalances` call in `_updateRegistry` to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 308-330).
+- v0.0.7: Added explicit gas limit (1000000) to `ICCAgent.globalizeOrders` calls in `globalizeUpdate` to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 375-400).
+- v0.0.6: Updated `ICCListing` interface and `liquidityAddressView` to remove uint256 parameter (lines 40, 669).
+- v0.0.5: Added `agentView` function to return `_agent` (line 622).
 
 ## State Variables
 - `_routers`: `mapping(address => bool) private` - Authorized routers.
@@ -210,7 +216,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), manages buy/
 - **Balance Checks**: Ensures sufficient balances for orders.
 - **Mappings/Structs Used**: `_buyOrderCores`, `_buyOrderPricings`, `_buyOrderAmounts`, `_sellOrderCores`, `_sellOrderPricings`, `_sellOrderAmounts`, `_pendingBuyOrders`, `_pendingSellOrders`, `_makerPendingOrders`, `_historicalData`, `UpdateType`, `VolumeBalance`.
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`.
-- **Gas Usage Controls**: Dynamic array resizing, loop over updates, external reserve calls.
+- **Gas Usage Controls**: Dynamic array resizing, loop over updates, external reserve calls, `globalizeUpdate` with gas limit (1000000).
 
 ### ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates)
 - **Parameters**:
@@ -236,10 +242,11 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), manages buy/
   - Normalizes amount, checks balance.
   - Transfers via `IERC20.transfer`.
   - Updates `_lastDayFee`, `_currentPrice`, emits `BalancesUpdated`.
+  - Calls `_updateRegistry` with gas limit (500000).
 - **Balance Checks**: Requires sufficient balance.
 - **Mappings/Structs Used**: `_volumeBalance`, `VolumeBalance`.
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`, valid token.
-- **Gas Usage Controls**: Single transfer, minimal updates, reserve call.
+- **Gas Usage Controls**: Single transfer, minimal updates, reserve call, registry call with gas limit.
 
 ### transactNative(address caller, uint256 amount, address recipient)
 - **Parameters**:
@@ -251,10 +258,11 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), manages buy/
   - Normalizes amount, checks balance.
   - Transfers ETH via low-level call with try-catch.
   - Updates `_lastDayFee`, `_currentPrice`, emits `BalancesUpdated`.
+  - Calls `_updateRegistry` with gas limit (500000).
 - **Balance Checks**: Requires sufficient balance.
 - **Mappings/Structs Used**: `_volumeBalance`, `VolumeBalance`.
 - **Restrictions**: `nonReentrant`, requires `_routers[caller]`, one token must be ETH.
-- **Gas Usage Controls**: Single transfer, try-catch, reserve call.
+- **Gas Usage Controls**: Single transfer, try-catch, reserve call, registry call with gas limit.
 
 ### View Functions
 - **uniswapV2PairView()**: Returns `_uniswapV2Pair`.
@@ -295,7 +303,7 @@ The `CCListingTemplate` contract, implemented in Solidity (^0.8.2), manages buy/
   - Try-catch for external calls (`globalizeOrders`, `initializeBalances`, `liquidityAmounts`, `getReserves`).
   - Explicit casting for interfaces.
   - No inline assembly.
-- **Gas Optimization**: Dynamic array resizing, minimal external calls.
+- **Gas Optimization**: Dynamic array resizing, minimal external calls, explicit gas limits (1000000 in `globalizeUpdate`, 500000 in `_updateRegistry`).
 - **Token Usage**:
   - Buy orders: Input tokenB, output tokenA, `amountSent` tracks tokenA.
   - Sell orders: Input tokenA, output tokenB, `amountSent` tracks tokenB.
