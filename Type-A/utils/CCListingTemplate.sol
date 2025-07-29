@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.6
+// Version: 0.0.7
 // Changes:
-// - v0.0.6: Updated ICCListing interface and liquidityAddressView function to remove uint256 parameter (lines 40, 669) for compatibility with CCAgent.sol v0.0.5, which calls liquidityAddressView without parameters.
+// - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 375-400).
+// - v0.0.6: Updated ICCListing interface and liquidityAddressView function to remove uint256 parameter (lines 40, 669) for compatibility with CCAgent.sol v0.0.5.
 // - v0.0.5: Added agentView function to return _agent for ICCListing compliance (line 622).
 // - v0.0.4: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken (line 543). Added getTokens function for ICCListingTemplate compliance (line 614). Ensured globalizeOrders compatibility with CCAgent.sol v0.0.2 (lines 375-400). Incremented version to third numerator.
 // - v0.0.3: Split transact function into transactToken and transactNative to separate ERC20 and ETH transfers (lines 512-560).
@@ -21,7 +22,7 @@ interface IERC20 {
 interface ICCListing {
     function prices(uint256) external view returns (uint256);
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView() external view returns (address); // Removed uint256 param for CCAgent compatibility
+    function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
     struct PayoutUpdate {
@@ -347,15 +348,16 @@ contract CCListingTemplate is ReentrancyGuard {
         return _agent;
     }
 
-    // Updates global orders via agent
+    // Updates global orders via agent with explicit gas limit
     function globalizeUpdate() internal {
         if (_agent == address(0)) return;
+        uint256 gasLimit = 1000000; // Explicit gas limit for globalizeOrders calls
         for (uint256 i = 0; i < _pendingBuyOrders.length; i++) {
             uint256 orderId = _pendingBuyOrders[i];
             BuyOrderCore memory order = _buyOrderCores[orderId];
             BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
             if (order.status == 1 || order.status == 2) {
-                try ICCAgent(_agent).globalizeOrders(
+                try ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
                     _listingId,
                     _tokenA,
                     _tokenB,
@@ -373,7 +375,7 @@ contract CCListingTemplate is ReentrancyGuard {
             SellOrderCore memory order = _sellOrderCores[orderId];
             SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
             if (order.status == 1 || order.status == 2) {
-                try ICCAgent(_agent).globalizeOrders(
+                try ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
                     _listingId,
                     _tokenA,
                     _tokenB,
