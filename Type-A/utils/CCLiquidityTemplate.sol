@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11
+// Version: 0.0.12
 // Changes:
+// - v0.0.12: Added explicit gas limit of 1_000_000 to globalizeLiquidity and registryAddress calls in globalizeUpdate and updateRegistry functions.
 // - v0.0.11: Fixed typo in yPrepOut (line 520), changed 'withrawAmountA' to 'withdrawAmountA' to resolve DeclarationError.
 // - v0.0.10: Changed updateRegistry from internal to external to fix TypeError in depositToken, depositNative, xExecuteOut, and yExecuteOut.
 // - v0.0.9: Changed globalizeUpdate from internal to external to fix TypeError in depositToken, depositNative, xExecuteOut, and yExecuteOut.
@@ -269,12 +270,12 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit) external {
-        // Updates agent with liquidity changes
+        // Updates agent with liquidity changes with explicit gas limit
         if (agent == address(0)) revert("Agent not set");
         address token = isX ? tokenA : tokenB;
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
-        try ICCAgent(agent).globalizeLiquidity(
+        try ICCAgent(agent).globalizeLiquidity{gas: 1_000_000}(
             listingId,
             tokenA,
             tokenB,
@@ -288,10 +289,10 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function updateRegistry(address caller, bool isX) external {
-        // Updates token registry using agent
+        // Updates token registry using agent with explicit gas limit
         if (agent == address(0)) revert("Agent not set");
         address registry;
-        try ICCAgent(agent).registryAddress() returns (address reg) {
+        try ICCAgent(agent).registryAddress{gas: 1_000_000}() returns (address reg) {
             registry = reg;
         } catch (bytes memory reason) {
             emit UpdateRegistryFailed(caller, isX, reason);
@@ -301,7 +302,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         address token = isX ? tokenA : tokenB;
         address[] memory users = new address[](1);
         users[0] = caller;
-        try ITokenRegistry(registry).initializeBalances(token, users) {} catch (bytes memory reason) {
+        try ITokenRegistry(registry).initializeBalances{gas: 1_000_000}(token, users) {} catch (bytes memory reason) {
             emit UpdateRegistryFailed(caller, isX, reason);
             revert(string(abi.encodePacked("Registry update failed: ", reason)));
         }

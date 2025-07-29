@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.7
+// Version: 0.0.8
 // Changes:
+// - v0.0.8: Added explicit gas limit (500000) to ITokenRegistry.initializeBalances call in _updateRegistry to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 308-330).
 // - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 375-400).
 // - v0.0.6: Updated ICCListing interface and liquidityAddressView function to remove uint256 parameter (lines 40, 669) for compatibility with CCAgent.sol v0.0.5.
 // - v0.0.5: Added agentView function to return _agent for ICCListing compliance (line 622).
@@ -291,7 +292,7 @@ contract CCListingTemplate is ReentrancyGuard {
         for (uint256 i = 0; i < makerCount; i++) {
             makers[i] = tempMakers[i];
         }
-        try ITokenRegistry(_registryAddress).initializeBalances(tokenAddress, makers) {} catch {}
+        try ITokenRegistry(_registryAddress).initializeBalances{gas: 500000}(tokenAddress, makers) {} catch {}
     }
 
     // Sets router addresses
