@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.12
+// Version: 0.0.14
 // Changes:
+// - v0.0.14: Removed duplicated ICCListing and ICCLiquidityTemplate interfaces, relying on CCMainPartial.sol (v0.0.9) definitions to resolve interface duplication per linearization.
+// - v0.0.13: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView (line 19) for compatibility with CCListingTemplate.sol v0.0.6. Replaced liquidityAddressView(0) with liquidityAddressView() in depositNativeToken, depositToken, withdraw, claimFees, changeDepositor, settleLongLiquid, and settleShortLiquid (lines 43, 60, 77, 94, 111, 128, 147).
 // - v0.0.12: Removed redundant 'require(success)' in depositToken after transferFrom, as balance checks ensure transfer success.
 // - v0.0.11: Removed duplicate TransferFailed event and InsufficientAllowance error declarations, inherited from CCLiquidityPartial.sol to fix DeclarationError.
 // - v0.0.10: Removed SafeERC20 usage in depositToken, used IERC20.transferFrom directly; added allowance check with InsufficientAllowance error; added TransferFailed event for transferFrom failures; fixed ParserError by removing invalid string 'moleculartools.com' (line 158).
@@ -15,8 +17,7 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Used ICCListing/ICCLiquidity, replaced transact with token/native, inlined interfaces.
 // - v0.0.2: Modified withdraw, claimFees, changeDepositor to use msg.sender.
 // - v0.0.1: Initial creation from SSRouter.sol v0.0.
-
-// Compatible with CCMainPartial.sol (v0.0.7), CCListing.sol (v0.0.3), ICCLiquidity.sol, CCLiquidityTemplate.sol (v0.0.2).
+// Compatible with CCListingTemplate.sol (v0.0.6), CCMainPartial.sol (v0.0.9), CCListing.sol (v0.0.3), ICCLiquidity.sol, CCLiquidityTemplate.sol (v0.0.2).
 
 import "./utils/CCLiquidityPartial.sol";
 
@@ -24,7 +25,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     function depositNativeToken(address listingAddress, uint256 inputAmount, bool isTokenA) external payable nonReentrant onlyValidListing(listingAddress) {
         // Deposits ETH to liquidity pool for msg.sender, supports zero-balance initialization
         ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView(0);
+        address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.value == inputAmount, "Incorrect ETH amount");
@@ -43,7 +44,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     function depositToken(address listingAddress, uint256 inputAmount, bool isTokenA) external nonReentrant onlyValidListing(listingAddress) {
         // Deposits ERC20 tokens to liquidity pool for msg.sender, supports zero-balance initialization
         ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView(0);
+        address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
@@ -77,7 +78,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     function withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX) external nonReentrant onlyValidListing(listingAddress) {
         // Withdraws tokens from liquidity pool for msg.sender
         ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView(0);
+        address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.sender != address(0), "Invalid caller address");
@@ -110,7 +111,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     function claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount) external nonReentrant onlyValidListing(listingAddress) {
         // Claims fees from liquidity pool for msg.sender
         ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView(0);
+        address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.sender != address(0), "Invalid caller address");
@@ -124,7 +125,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     function changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor) external nonReentrant onlyValidListing(listingAddress) {
         // Changes depositor for a liquidity slot for msg.sender
         ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView(0);
+        address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
         require(liquidityContract.routers(address(this)), "Router not registered");
         require(msg.sender != address(0), "Invalid caller address");
