@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.8 (Updated)
+// Version: 0.0.10
 // Changes:
+// - v0.0.10: Updated liquidityAddressView(0) to liquidityAddressView() in _prepPayoutContext (line 43) to comply with ICCListing interface in CCMainPartial.sol (v0.0.9), fixing TypeError.
+// - v0.0.9: Removed duplicated ICCListing and ICCLiquidity interfaces, relying on CCMainPartial.sol (v0.0.9) definitions.
 // - v0.0.8: Removed SafeERC20 usage in _transferToken, used IERC20.transfer directly; added allowance check with InsufficientAllowance error; added TransferFailed event for transfer failures.
 // - v0.0.7: Fixed TypeError in _transferNative/_transferToken by removing incorrect returns clause in try blocks.
 // - v0.0.6: Fixed ParserError in _transferNative by correcting try block syntax.
@@ -11,6 +13,7 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Created from SSPayoutPartial.sol v0.0.58, extracted liquidity functions, used ICCListing/ICCLiquidity, split transact calls.
 // - v0.0.2: Modified settleSingleLongLiquid/settleSingleShortLiquid to set zero-amount payouts to completed (3).
 // - v0.0.1: Initial extraction from SSPayoutPartial.sol.
+// Compatible with CCListingTemplate.sol (v0.0.6), CCMainPartial.sol (v0.0.9), CCLiquidityRouter.sol (v0.0.14), ICCLiquidity.sol.
 
 import "./CCMainPartial.sol";
 
@@ -40,7 +43,7 @@ contract CCLiquidityPartial is CCMainPartial {
         ICCListing listing = ICCListing(listingAddress);
         context = PayoutContext({
             listingAddress: listingAddress,
-            liquidityAddr: listing.liquidityAddressView(0),
+            liquidityAddr: listing.liquidityAddressView(),
             tokenOut: isLong ? listing.tokenB() : listing.tokenA(),
             tokenDecimals: isLong ? listing.decimalsB() : listing.decimalsA(),
             amountOut: 0,

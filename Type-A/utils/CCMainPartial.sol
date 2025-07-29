@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.07
+// Version: 0.0.9
 // Changes:
+// - v0.0.9: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView for compatibility with CCListingTemplate.sol v0.0.6.
+// - v0.0.08: Modified checkValidListing to use contract's own agent state variable instead of listing's agentView, removed agentView call and require check for agent non-zero (line 273).
 // - v0.0.07: Removed SafeERC20 import and usage, imported IERC20 from ../imports/.
 // - v0.0.06: Updated ICCListing's transactNative to payable to resolve TypeError in CCUniPartial.sol.
 // - v0.0.05: Updated ICCLiquidityTemplate, split transact/deposit, updated Slot timestamp to uint256.
@@ -10,7 +12,7 @@ pragma solidity ^0.8.2;
 // - v0.0.03: Fixed DeclarationError in checkValidListing.
 // - v0.0.02: Fixed TypeError in checkValidListing.
 // - v0.0.01: Inlined ICCListing, split transact into token/native.
-// Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.6), CCUniPartial.sol (v0.0.6), ICCLiquidity.sol.
+// Compatible with CCListingTemplate.sol (v0.0.6), CCOrderRouter.sol (v0.0.8), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol, CCLiquidityRouter.sol (v0.0.14).
 
 import "../imports/ReentrancyGuard.sol";
 import "../imports/Ownable.sol";
@@ -51,7 +53,7 @@ interface ICCListing {
     }
     function prices(uint256 _listingId) external view returns (uint256);
     function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView(uint256 _listingId) external view returns (address);
+    function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
     function ssUpdate(address caller, PayoutUpdate[] calldata updates) external;
@@ -140,7 +142,7 @@ interface ICCLiquidityTemplate {
 }
 
 interface ICCAgent {
-    function getListing(address tokenA, address tokenB) external view returns(address);
+    function getListing(address tokenA, address tokenB) external view returns (address);
 }
 
 contract CCMainPartial is ReentrancyGuard, Ownable {
@@ -190,13 +192,12 @@ contract CCMainPartial is ReentrancyGuard, Ownable {
     }
 
     function checkValidListing(address listing) private view {
-        // Validates listing against agent registry
+        // Validates listing against agent registry using contract's own agent
         ICCListing listingTemplate = ICCListing(listing);
-        address agentAddress = listingTemplate.agentView();
-        require(agentAddress != address(0), "Agent not set");
         address tokenAAddress = listingTemplate.tokenA();
         address tokenBAddress = listingTemplate.tokenB();
-        require(ICCAgent(agentAddress).getListing(tokenAAddress, tokenBAddress) == listing, "Invalid listing");
+        require(agent != address(0), "Contract agent not set");
+        require(ICCAgent(agent).getListing(tokenAAddress, tokenBAddress) == listing, "Invalid listing");
     }
 
     modifier onlyValidListing(address listing) {

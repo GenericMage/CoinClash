@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.4
+// Version: 0.0.6
 // Changes:
-// - v0.0.4: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken (line 543). Added getTokens function for ICCListingTemplate compliance (line 614). Ensured globalizeOrders compatibility with CCAgent.sol v0.0.2 by maintaining struct and parameter consistency (lines 375-400). Incremented version to third numerator.
+// - v0.0.6: Updated ICCListing interface and liquidityAddressView function to remove uint256 parameter (lines 40, 669) for compatibility with CCAgent.sol v0.0.5, which calls liquidityAddressView without parameters.
+// - v0.0.5: Added agentView function to return _agent for ICCListing compliance (line 622).
+// - v0.0.4: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken (line 543). Added getTokens function for ICCListingTemplate compliance (line 614). Ensured globalizeOrders compatibility with CCAgent.sol v0.0.2 (lines 375-400). Incremented version to third numerator.
 // - v0.0.3: Split transact function into transactToken and transactNative to separate ERC20 and ETH transfers (lines 512-560).
 // - v0.0.2: Added uniswapV2PairView function to retrieve Uniswap V2 pair address (lines 605-607).
 // - v0.0.1: Changed license to BSL 1.1 - Peng Protocol 2025. Added uniswapV2Pair state variable and setUniswapV2Pair function (lines 88-89, 315-321). Modified prices function to derive price from Uniswap V2 pair reserves, normalized to 18 decimals (lines 602-620). Updated price state variable in update and transact functions (lines 451-465, 512-526). Normalized reserve values for price and historicalData (lines 451-465, 447-449). Added IUniswapV2Pair interface (lines 25-29).
-// - Compatible with SS-LiquidityTemplate.sol (v0.0.3), SSAgent.sol (v0.0.2).
+// Compatible with CCLiquidityTemplate.sol (v0.0.5), CCAgent.sol (v0.0.5), CCLiquidityRouter.sol (v0.0.12), CCMainPartial.sol (v0.0.8).
 
 import "../imports/ReentrancyGuard.sol";
 
@@ -19,7 +21,7 @@ interface IERC20 {
 interface ICCListing {
     function prices(uint256) external view returns (uint256);
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView(uint256) external view returns (address);
+    function liquidityAddressView() external view returns (address); // Removed uint256 param for CCAgent compatibility
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
     struct PayoutUpdate {
@@ -338,6 +340,11 @@ contract CCListingTemplate is ReentrancyGuard {
         require(_registryAddress == address(0), "Registry already set");
         require(registryAddress_ != address(0), "Invalid registry address");
         _registryAddress = registryAddress_;
+    }
+
+    // Returns agent address
+    function agentView() external view returns (address) {
+        return _agent;
     }
 
     // Updates global orders via agent
@@ -666,7 +673,7 @@ contract CCListingTemplate is ReentrancyGuard {
     }
 
     // Returns liquidity address
-    function liquidityAddressView(uint256) external view returns (address) {
+    function liquidityAddressView() external view returns (address) {
         return _liquidityAddress;
     }
 
