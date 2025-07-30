@@ -14,9 +14,9 @@ pragma solidity ^0.8.2;
 // - v0.0.01: Inlined ICCListing, split transact into token/native.
 // Compatible with CCListingTemplate.sol (v0.0.6), CCOrderRouter.sol (v0.0.8), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol, CCLiquidityRouter.sol (v0.0.14).
 
-import "../imports/ReentrancyGuard.sol";
 import "../imports/Ownable.sol";
 import "../imports/IERC20.sol";
+import "../imports/ReentrancyGuard.sol";
 
 interface ICCListing {
     struct UpdateType {
