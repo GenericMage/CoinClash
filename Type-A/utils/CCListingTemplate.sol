@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.8
+// Version: 0.0.9
 // Changes:
-// - v0.0.8: Added explicit gas limit (500000) to ITokenRegistry.initializeBalances call in _updateRegistry to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 308-330).
-// - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate to prevent out-of-gas errors, preserving try-catch for graceful degradation (lines 375-400).
-// - v0.0.6: Updated ICCListing interface and liquidityAddressView function to remove uint256 parameter (lines 40, 669) for compatibility with CCAgent.sol v0.0.5.
-// - v0.0.5: Added agentView function to return _agent for ICCListing compliance (line 622).
-// - v0.0.4: Removed SafeERC20 import and usage, replaced safeTransfer with direct IERC20.transfer in transactToken (line 543). Added getTokens function for ICCListingTemplate compliance (line 614). Ensured globalizeOrders compatibility with CCAgent.sol v0.0.2 (lines 375-400). Incremented version to third numerator.
-// - v0.0.3: Split transact function into transactToken and transactNative to separate ERC20 and ETH transfers (lines 512-560).
-// - v0.0.2: Added uniswapV2PairView function to retrieve Uniswap V2 pair address (lines 605-607).
-// - v0.0.1: Changed license to BSL 1.1 - Peng Protocol 2025. Added uniswapV2Pair state variable and setUniswapV2Pair function (lines 88-89, 315-321). Modified prices function to derive price from Uniswap V2 pair reserves, normalized to 18 decimals (lines 602-620). Updated price state variable in update and transact functions (lines 451-465, 512-526). Normalized reserve values for price and historicalData (lines 451-465, 447-449). Added IUniswapV2Pair interface (lines 25-29).
-// Compatible with CCLiquidityTemplate.sol (v0.0.5), CCAgent.sol (v0.0.5), CCLiquidityRouter.sol (v0.0.12), CCMainPartial.sol (v0.0.8).
-
-import "../imports/ReentrancyGuard.sol";
+// - v0.0.9: Removed ReentrancyGuard inheritance and nonReentrant modifiers from update, ssUpdate, transactToken, transactNative, as router-level security handles reentrancy protection.
+// - v0.0.8: Added explicit gas limit (500000) to ITokenRegistry.initializeBalances call in _updateRegistry.
+// - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate.
+// - v0.0.6: Updated ICCListing interface and liquidityAddressView function for CCAgent.sol v0.0.5 compatibility.
+// - v0.0.5: Added agentView function for ICCListing compliance.
+// - v0.0.4: Removed SafeERC20, used direct IERC20.transfer, added getTokens function.
+// - v0.0.3: Split transact into transactToken and transactNative.
+// - v0.0.2: Added uniswapV2PairView function.
+// - v0.0.1: Changed to BSL 1.1, added Uniswap V2 pair support.
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -73,7 +71,7 @@ interface ITokenRegistry {
     function initializeBalances(address token, address[] memory users) external;
 }
 
-contract CCListingTemplate is ReentrancyGuard {
+contract CCListingTemplate {
     mapping(address => bool) private _routers;
     bool private _routersSet;
     address private _tokenA;
@@ -191,33 +189,28 @@ contract CCListingTemplate is ReentrancyGuard {
     event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
 
-    // Normalizes amount to 18 decimals
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
         else return amount / 10 ** (uint256(decimals) - uint256(18));
     }
 
-    // Denormalizes amount from 18 decimals to token decimals
     function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount / 10 ** (uint256(18) - uint256(decimals));
         else return amount * 10 ** (uint256(decimals) - uint256(18));
     }
 
-    // Checks if two timestamps are on the same day
     function _isSameDay(uint256 time1, uint256 time2) internal pure returns (bool) {
         uint256 midnight1 = time1 - (time1 % 86400);
         uint256 midnight2 = time2 - (time2 % 86400);
         return midnight1 == midnight2;
     }
 
-    // Floors timestamp to midnight
     function _floorToMidnight(uint256 timestamp) internal pure returns (uint256) {
         return timestamp - (timestamp % 86400);
     }
 
-    // Finds volume change for tokenA or tokenB since startTime
     function _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) internal view returns (uint256) {
         uint256 currentVolume = isA ? _volumeBalance.xVolume : _volumeBalance.yVolume;
         uint256 iterationsLeft = maxIterations;
@@ -236,7 +229,6 @@ contract CCListingTemplate is ReentrancyGuard {
         return 0;
     }
 
-    // Sets Uniswap V2 pair address
     function setUniswapV2Pair(address uniswapV2Pair_) external {
         require(!_uniswapV2PairSet, "Uniswap V2 pair already set");
         require(uniswapV2Pair_ != address(0), "Invalid pair address");
@@ -244,7 +236,6 @@ contract CCListingTemplate is ReentrancyGuard {
         _uniswapV2PairSet = true;
     }
 
-    // Queries annualized yield for tokenA or tokenB
     function queryYield(bool isA, uint256 maxIterations) external view returns (uint256) {
         require(maxIterations > 0, "Invalid maxIterations");
         if (_lastDayFee.timestamp == 0 || _historicalData.length == 0 || !_isSameDay(block.timestamp, _lastDayFee.timestamp)) {
@@ -261,10 +252,9 @@ contract CCListingTemplate is ReentrancyGuard {
         if (liquidity == 0) return 0;
         uint256 dailyFees = (feeDifference * 5) / 10000; // 0.05% fee
         uint256 dailyYield = (dailyFees * 1e18) / liquidity;
-        return dailyYield * 365; // Annualized yield
+        return dailyYield * 365;
     }
 
-    // Updates token registry with maker addresses
     function _updateRegistry() internal {
         if (_registryAddress == address(0)) return;
         bool isBuy = block.timestamp % 2 == 0;
@@ -295,7 +285,6 @@ contract CCListingTemplate is ReentrancyGuard {
         try ITokenRegistry(_registryAddress).initializeBalances{gas: 500000}(tokenAddress, makers) {} catch {}
     }
 
-    // Sets router addresses
     function setRouters(address[] memory routers_) external {
         require(!_routersSet, "Routers already set");
         require(routers_.length > 0, "No routers provided");
@@ -306,20 +295,17 @@ contract CCListingTemplate is ReentrancyGuard {
         _routersSet = true;
     }
 
-    // Sets listing ID
     function setListingId(uint256 listingId_) external {
         require(_listingId == 0, "Listing ID already set");
         _listingId = listingId_;
     }
 
-    // Sets liquidity address
     function setLiquidityAddress(address liquidityAddress_) external {
         require(_liquidityAddress == address(0), "Liquidity already set");
         require(liquidityAddress_ != address(0), "Invalid liquidity address");
         _liquidityAddress = liquidityAddress_;
     }
 
-    // Sets token addresses and decimals
     function setTokens(address tokenA_, address tokenB_) external {
         require(_tokenA == address(0) && _tokenB == address(0), "Tokens already set");
         require(tokenA_ != tokenB_, "Tokens must be different");
@@ -330,29 +316,25 @@ contract CCListingTemplate is ReentrancyGuard {
         _decimalsB = tokenB_ == address(0) ? 18 : IERC20(tokenB_).decimals();
     }
 
-    // Sets agent address
     function setAgent(address agent_) external {
         require(_agent == address(0), "Agent already set");
         require(agent_ != address(0), "Invalid agent address");
         _agent = agent_;
     }
 
-    // Sets registry address
     function setRegistry(address registryAddress_) external {
         require(_registryAddress == address(0), "Registry already set");
         require(registryAddress_ != address(0), "Invalid registry address");
         _registryAddress = registryAddress_;
     }
 
-    // Returns agent address
     function agentView() external view returns (address) {
         return _agent;
     }
 
-    // Updates global orders via agent with explicit gas limit
     function globalizeUpdate() internal {
         if (_agent == address(0)) return;
-        uint256 gasLimit = 1000000; // Explicit gas limit for globalizeOrders calls
+        uint256 gasLimit = 1000000;
         for (uint256 i = 0; i < _pendingBuyOrders.length; i++) {
             uint256 orderId = _pendingBuyOrders[i];
             BuyOrderCore memory order = _buyOrderCores[orderId];
@@ -391,7 +373,6 @@ contract CCListingTemplate is ReentrancyGuard {
         }
     }
 
-    // Removes order from pending array
     function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
         for (uint256 i = 0; i < orders.length; i++) {
             if (orders[i] == orderId) {
@@ -402,8 +383,7 @@ contract CCListingTemplate is ReentrancyGuard {
         }
     }
 
-    // Updates balances, orders, or historical data
-    function update(address caller, UpdateType[] memory updates) external nonReentrant {
+    function update(address caller, UpdateType[] memory updates) external {
         require(_routers[caller], "Router only");
         VolumeBalance storage balances = _volumeBalance;
         bool volumeUpdated = false;
@@ -544,8 +524,7 @@ contract CCListingTemplate is ReentrancyGuard {
         globalizeUpdate();
     }
 
-    // Processes payout updates
-    function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external nonReentrant {
+    function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external {
         require(_routers[caller], "Router only");
         for (uint256 i = 0; i < payoutUpdates.length; i++) {
             PayoutUpdate memory p = payoutUpdates[i];
@@ -579,8 +558,7 @@ contract CCListingTemplate is ReentrancyGuard {
         }
     }
 
-    // Handles ERC20 token transfers
-    function transactToken(address caller, address token, uint256 amount, address recipient) external nonReentrant {
+    function transactToken(address caller, address token, uint256 amount, address recipient) external {
         require(_routers[caller], "Router only");
         require(token != address(0), "Use transactNative for ETH");
         require(token == _tokenA || token == _tokenB, "Invalid token");
@@ -613,8 +591,7 @@ contract CCListingTemplate is ReentrancyGuard {
         _updateRegistry();
     }
 
-    // Handles native ETH transfers
-    function transactNative(address caller, uint256 amount, address recipient) external nonReentrant {
+    function transactNative(address caller, uint256 amount, address recipient) external {
         require(_routers[caller], "Router only");
         require(_tokenA == address(0) || _tokenB == address(0), "No native token in pair");
         VolumeBalance storage balances = _volumeBalance;
@@ -646,12 +623,10 @@ contract CCListingTemplate is ReentrancyGuard {
         _updateRegistry();
     }
 
-    // Returns Uniswap V2 pair address
     function uniswapV2PairView() external view returns (address) {
         return _uniswapV2Pair;
     }
 
-    // Returns current price from Uniswap V2 pair
     function prices(uint256) external view returns (uint256) {
         if (_uniswapV2Pair == address(0)) return 0;
         (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
@@ -662,7 +637,6 @@ contract CCListingTemplate is ReentrancyGuard {
         return normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0;
     }
 
-    // Returns tokenA and tokenB for ICCListingTemplate compliance
     function getTokens() external view returns (address tokenA, address tokenB) {
         address fetchedTokenA = _tokenA;
         address fetchedTokenB = _tokenB;
@@ -670,144 +644,117 @@ contract CCListingTemplate is ReentrancyGuard {
         return (fetchedTokenA, fetchedTokenB);
     }
 
-    // Returns volume balances
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
         return (_volumeBalance.xBalance, _volumeBalance.yBalance);
     }
 
-    // Returns liquidity address
     function liquidityAddressView() external view returns (address) {
         return _liquidityAddress;
     }
 
-    // Returns tokenA address
     function tokenA() external view returns (address) {
         return _tokenA;
     }
 
-    // Returns tokenB address
     function tokenB() external view returns (address) {
         return _tokenB;
     }
 
-    // Returns tokenA decimals
     function decimalsA() external view returns (uint8) {
         return _decimalsA;
     }
 
-    // Returns tokenB decimals
     function decimalsB() external view returns (uint8) {
         return _decimalsB;
     }
 
-    // Returns listing ID
     function getListingId() external view returns (uint256) {
         return _listingId;
     }
 
-    // Returns next order ID
     function getNextOrderId() external view returns (uint256) {
         return _nextOrderId;
     }
 
-    // Returns volume balance details
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
         return (_volumeBalance.xBalance, _volumeBalance.yBalance, _volumeBalance.xVolume, _volumeBalance.yVolume);
     }
 
-    // Returns current price
     function listingPriceView() external view returns (uint256) {
         return _currentPrice;
     }
 
-    // Returns pending buy orders
     function pendingBuyOrdersView() external view returns (uint256[] memory) {
         return _pendingBuyOrders;
     }
 
-    // Returns pending sell orders
     function pendingSellOrdersView() external view returns (uint256[] memory) {
         return _pendingSellOrders;
     }
 
-    // Returns maker's pending orders
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory) {
         return _makerPendingOrders[maker];
     }
 
-    // Returns long payout indices
     function longPayoutByIndexView() external view returns (uint256[] memory) {
         return _longPayoutsByIndex;
     }
 
-    // Returns short payout indices
     function shortPayoutByIndexView() external view returns (uint256[] memory) {
         return _shortPayoutsByIndex;
     }
 
-    // Returns user payout IDs
     function userPayoutIDsView(address user) external view returns (uint256[] memory) {
         return _userPayoutIDs[user];
     }
 
-    // Returns long payout details
     function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory) {
         return _longPayouts[orderId];
     }
 
-    // Returns short payout details
     function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory) {
         return _shortPayouts[orderId];
     }
 
-    // Returns buy order core details
     function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
         BuyOrderCore memory core = _buyOrderCores[orderId];
         return (core.makerAddress, core.recipientAddress, core.status);
     }
 
-    // Returns buy order pricing details
     function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
         BuyOrderPricing memory pricing = _buyOrderPricings[orderId];
         return (pricing.maxPrice, pricing.minPrice);
     }
 
-    // Returns buy order amounts
     function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
         BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
         return (amounts.pending, amounts.filled, amounts.amountSent);
     }
 
-    // Returns sell order core details
     function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
         SellOrderCore memory core = _sellOrderCores[orderId];
         return (core.makerAddress, core.recipientAddress, core.status);
     }
 
-    // Returns sell order pricing details
     function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
         SellOrderPricing memory pricing = _sellOrderPricings[orderId];
         return (pricing.maxPrice, pricing.minPrice);
     }
 
-    // Returns sell order amounts
     function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
         SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
         return (amounts.pending, amounts.filled, amounts.amountSent);
     }
 
-    // Returns historical data by index
     function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory) {
         require(index < _historicalData.length, "Invalid index");
         return _historicalData[index];
     }
 
-    // Returns historical data length
     function historicalDataLengthView() external view returns (uint256) {
         return _historicalData.length;
     }
 
-    // Returns historical data by nearest timestamp
     function getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) external view returns (HistoricalData memory) {
         require(_historicalData.length > 0, "No historical data");
         uint256 minDiff = type(uint256).max;

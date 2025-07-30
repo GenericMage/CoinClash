@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.12
+// Version: 0.0.13
 // Changes:
-// - v0.0.12: Added explicit gas limit of 1_000_000 to globalizeLiquidity and registryAddress calls in globalizeUpdate and updateRegistry functions.
-// - v0.0.11: Fixed typo in yPrepOut (line 520), changed 'withrawAmountA' to 'withdrawAmountA' to resolve DeclarationError.
-// - v0.0.10: Changed updateRegistry from internal to external to fix TypeError in depositToken, depositNative, xExecuteOut, and yExecuteOut.
-// - v0.0.9: Changed globalizeUpdate from internal to external to fix TypeError in depositToken, depositNative, xExecuteOut, and yExecuteOut.
-// - v0.0.8: Replaced ICCLiquidity interface with inline ICCListing interface, correcting getPrice and volumeBalances calls to match CCListingTemplate.sol v0.0.6.
-// - v0.0.7: Updated updateRegistry to fetch registry address from ICCAgent.registryAddress.
-// - v0.0.6: Added detailed revert strings in depositToken, depositNative, transactToken, transactNative, update, xExecuteOut, yExecuteOut, claimFees, addFees. Added DepositFailed and TransactFailed events.
-// - v0.0.5: Replaced inline IERC20 interface with import from "../imports/IERC20.sol".
-// - v0.0.4: Removed SafeERC20, used direct IERC20.transfer/transferFrom.
-// - v0.0.3: Updated ICCAgent for native ETH pairs.
-// - v0.0.2: Added support for zero-balance pool deposits.
-// - v0.0.1: Fixed syntax errors, renamed to CCLiquidityTemplate.
+// - v0.0.13: Removed ReentrancyGuard inheritance and nonReentrant modifiers from update, depositToken, depositNative, xPrepOut, xExecuteOut, yPrepOut, yExecuteOut, claimFees, addFees, updateLiquidity, changeSlotDepositor, as router-level security handles reentrancy protection.
+// - v0.0.12: Added explicit gas limit of 1_000_000 to globalizeLiquidity and registryAddress calls.
+// - v0.0.11: Fixed typo in yPrepOut, changed 'withrawAmountA' to 'withdrawAmountA'.
+// - v0.0.10: Changed updateRegistry from internal to external.
+// - v0.0.9: Changed globalizeUpdate from internal to external.
+// - v0.0.8: Replaced ICCLiquidity with ICCListing interface.
+// - v0.0.7: Updated updateRegistry to fetch registry from ICCAgent.
+// - v0.0.6: Added detailed revert strings and events.
+// - v0.0.5: Used imported IERC20 interface.
+// - v0.0.4: Removed SafeERC20, used direct IERC20 calls.
+// - v0.0.3: Updated ICCAgent for ETH pairs.
+// - v0.0.2: Added zero-balance pool deposit support.
+// - v0.0.1: Fixed syntax, renamed to CCLiquidityTemplate.
 
-import "../imports/ReentrancyGuard.sol";
 import "../imports/IERC20.sol";
 
 interface ICCListing {
@@ -40,7 +40,7 @@ interface ITokenRegistry {
     function initializeBalances(address token, address[] memory users) external;
 }
 
-contract CCLiquidityTemplate is ReentrancyGuard {
+contract CCLiquidityTemplate {
     mapping(address => bool) public routers;
     bool public routersSet;
     address public listingAddress;
@@ -107,14 +107,12 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     event TransactFailed(address indexed caller, address token, uint256 amount, string reason);
 
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        // Normalizes amount to 18 decimals
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
         else return amount / 10 ** (uint256(decimals) - uint256(18));
     }
 
     function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        // Denormalizes amount from 18 decimals
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount / 10 ** (uint256(18) - uint256(decimals));
         else return amount * 10 ** (uint256(decimals) - uint256(18));
@@ -126,7 +124,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         uint256 liquid,
         uint256 allocation
     ) private pure returns (uint256 feeShare, UpdateType[] memory updates) {
-        // Calculates fee share for a slot
         updates = new UpdateType[](2);
         uint256 contributedFees = fees > dFeesAcc ? fees - dFeesAcc : 0;
         uint256 liquidityContribution = liquid > 0 ? (allocation * 1e18) / liquid : 0;
@@ -136,7 +133,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function _processFeeClaim(FeeClaimContext memory context) internal {
-        // Processes fee claim for a slot
         (uint256 feeShare, UpdateType[] memory updates) = _claimFeeShare(
             context.fees,
             context.dFeesAcc,
@@ -150,12 +146,10 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         Slot storage slot = context.isX ? xLiquiditySlots[context.liquidityIndex] : yLiquiditySlots[context.liquidityIndex];
         slot.dFeesAcc = context.isX ? liquidityDetail.yFeesAcc : liquidityDetail.xFeesAcc;
         try this.update(context.caller, updates) {
-            // Successful update
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Fee claim update failed: ", reason)));
         }
         try this.transactToken(context.caller, transferToken, feeShare, context.caller) {
-            // Successful transfer
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
         }
@@ -163,7 +157,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function setRouters(address[] memory _routers) external {
-        // Sets router addresses
         require(!routersSet, "Routers already set");
         require(_routers.length > 0, "No routers provided");
         for (uint256 i = 0; i < _routers.length; i++) {
@@ -174,20 +167,17 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function setListingId(uint256 _listingId) external {
-        // Sets listing ID
         require(listingId == 0, "Listing ID already set");
         listingId = _listingId;
     }
 
     function setListingAddress(address _listingAddress) external {
-        // Sets listing address
         require(listingAddress == address(0), "Listing already set");
         require(_listingAddress != address(0), "Invalid listing address");
         listingAddress = _listingAddress;
     }
 
     function setTokens(address _tokenA, address _tokenB) external {
-        // Sets token addresses
         require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
         require(_tokenA != _tokenB, "Tokens must be different");
         require(_tokenA != address(0) || _tokenB != address(0), "Both tokens cannot be zero");
@@ -196,14 +186,12 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function setAgent(address _agent) external {
-        // Sets agent address
         require(agent == address(0), "Agent already set");
         require(_agent != address(0), "Invalid agent address");
         agent = _agent;
     }
 
-    function update(address caller, UpdateType[] memory updates) external nonReentrant {
-        // Updates balances, fees, or slots
+    function update(address caller, UpdateType[] memory updates) external {
         require(routers[msg.sender], "Router only");
         LiquidityDetails storage details = liquidityDetail;
         for (uint256 i = 0; i < updates.length; i++) {
@@ -270,7 +258,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function globalizeUpdate(address caller, bool isX, uint256 amount, bool isDeposit) external {
-        // Updates agent with liquidity changes with explicit gas limit
         if (agent == address(0)) revert("Agent not set");
         address token = isX ? tokenA : tokenB;
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
@@ -289,7 +276,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function updateRegistry(address caller, bool isX) external {
-        // Updates token registry using agent with explicit gas limit
         if (agent == address(0)) revert("Agent not set");
         address registry;
         try ICCAgent(agent).registryAddress{gas: 1_000_000}() returns (address reg) {
@@ -308,8 +294,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         }
     }
 
-    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external nonReentrant {
-        // Changes slot depositor
+    function changeSlotDepositor(address caller, bool isX, uint256 slotIndex, address newDepositor) external {
         require(routers[msg.sender], "Router only");
         require(newDepositor != address(0), "Invalid new depositor");
         require(caller != address(0), "Invalid caller");
@@ -329,8 +314,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         emit SlotDepositorChanged(isX, slotIndex, oldDepositor, newDepositor);
     }
 
-    function depositToken(address caller, address token, uint256 amount) external nonReentrant {
-        // Handles ERC20 token deposits
+    function depositToken(address caller, address token, uint256 amount) external {
         require(routers[msg.sender], "Router only");
         require(token == tokenA || token == tokenB, "Invalid token");
         require(token != address(0), "Use depositNative for ETH");
@@ -339,7 +323,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         if (decimals == 0) revert("Invalid token decimals");
         uint256 preBalance = IERC20(token).balanceOf(address(this));
         try IERC20(token).transferFrom(msg.sender, address(this), amount) returns (bool) {
-            // Balance checks ensure success
         } catch (bytes memory reason) {
             emit DepositFailed(caller, token, amount, "TransferFrom failed");
             revert("Token transferFrom failed");
@@ -352,19 +335,16 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         uint256 index = token == tokenA ? activeXLiquiditySlots.length : activeYLiquiditySlots.length;
         updates[0] = UpdateType(token == tokenA ? 2 : 3, index, normalizedAmount, caller, address(0));
         try this.update(caller, updates) {
-            // Successful update
         } catch (bytes memory reason) {
             emit DepositFailed(caller, token, receivedAmount, "Update failed");
             revert(string(abi.encodePacked("Deposit update failed: ", reason)));
         }
         try this.globalizeUpdate(caller, token == tokenA, receivedAmount, true) {
-            // Successful globalize
         } catch (bytes memory reason) {
             emit DepositFailed(caller, token, receivedAmount, "Globalize update failed");
             revert(string(abi.encodePacked("Globalize update failed: ", reason)));
         }
         try this.updateRegistry(caller, token == tokenA) {
-            // Successful registry update
         } catch (bytes memory reason) {
             emit DepositFailed(caller, token, receivedAmount, "Registry update failed");
             revert(string(abi.encodePacked("Registry update failed: ", reason)));
@@ -372,8 +352,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         emit DepositReceived(caller, token, receivedAmount, normalizedAmount);
     }
 
-    function depositNative(address caller, uint256 amount) external payable nonReentrant {
-        // Handles ETH deposits
+    function depositNative(address caller, uint256 amount) external payable {
         require(routers[msg.sender], "Router only");
         require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
         require(caller != address(0), "Invalid caller");
@@ -383,19 +362,16 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         uint256 index = tokenA == address(0) ? activeXLiquiditySlots.length : activeYLiquiditySlots.length;
         updates[0] = UpdateType(tokenA == address(0) ? 2 : 3, index, normalizedAmount, caller, address(0));
         try this.update(caller, updates) {
-            // Successful update
         } catch (bytes memory reason) {
             emit DepositFailed(caller, address(0), amount, "Update failed");
             revert(string(abi.encodePacked("Deposit update failed: ", reason)));
         }
         try this.globalizeUpdate(caller, tokenA == address(0), amount, true) {
-            // Successful globalize
         } catch (bytes memory reason) {
             emit DepositFailed(caller, address(0), amount, "Globalize update failed");
             revert(string(abi.encodePacked("Globalize update failed: ", reason)));
         }
         try this.updateRegistry(caller, tokenA == address(0)) {
-            // Successful registry update
         } catch (bytes memory reason) {
             emit DepositFailed(caller, address(0), amount, "Registry update failed");
             revert(string(abi.encodePacked("Registry update failed: ", reason)));
@@ -403,8 +379,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         emit DepositReceived(caller, address(0), amount, normalizedAmount);
     }
 
-    function xPrepOut(address caller, uint256 amount, uint256 index) external nonReentrant returns (PreparedWithdrawal memory) {
-        // Prepares x-token withdrawal
+    function xPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory) {
         require(routers[msg.sender], "Router only");
         require(caller != address(0), "Invalid caller");
         LiquidityDetails storage details = liquidityDetail;
@@ -428,8 +403,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
-    function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external nonReentrant {
-        // Executes x-token withdrawal
+    function xExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external {
         require(routers[msg.sender], "Router only");
         require(caller != address(0), "Invalid caller");
         Slot storage slot = xLiquiditySlots[index];
@@ -437,7 +411,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(2, index, slot.allocation - withdrawal.amountA, slot.depositor, address(0));
         try this.update(caller, updates) {
-            // Successful update
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Withdrawal update failed: ", reason)));
         }
@@ -446,24 +419,20 @@ contract CCLiquidityTemplate is ReentrancyGuard {
             uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
             if (tokenA == address(0)) {
                 try this.transactNative(caller, amountA, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
                 }
             } else {
                 try this.transactToken(caller, tokenA, amountA, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
                 }
             }
             try this.globalizeUpdate(caller, true, withdrawal.amountA, false) {
-                // Successful globalize
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Globalize update failed: ", reason)));
             }
             try this.updateRegistry(caller, true) {
-                // Successful registry update
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Registry update failed: ", reason)));
             }
@@ -473,32 +442,27 @@ contract CCLiquidityTemplate is ReentrancyGuard {
             uint256 amountB = denormalize(withdrawal.amountB, decimalsB);
             if (tokenB == address(0)) {
                 try this.transactNative(caller, amountB, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
                 }
             } else {
                 try this.transactToken(caller, tokenB, amountB, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
                 }
             }
             try this.globalizeUpdate(caller, false, withdrawal.amountB, false) {
-                // Successful globalize
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Globalize update failed: ", reason)));
             }
             try this.updateRegistry(caller, false) {
-                // Successful registry update
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Registry update failed: ", reason)));
             }
         }
     }
 
-    function yPrepOut(address caller, uint256 amount, uint256 index) external nonReentrant returns (PreparedWithdrawal memory) {
-        // Prepares y-token withdrawal
+    function yPrepOut(address caller, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory) {
         require(routers[msg.sender], "Router only");
         require(caller != address(0), "Invalid caller");
         LiquidityDetails storage details = liquidityDetail;
@@ -522,8 +486,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
-    function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external nonReentrant {
-        // Executes y-token withdrawal
+    function yExecuteOut(address caller, uint256 index, PreparedWithdrawal memory withdrawal) external {
         require(routers[msg.sender], "Router only");
         require(caller != address(0), "Invalid caller");
         Slot storage slot = yLiquiditySlots[index];
@@ -531,7 +494,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         UpdateType[] memory updates = new UpdateType[](1);
         updates[0] = UpdateType(3, index, slot.allocation - withdrawal.amountB, slot.depositor, address(0));
         try this.update(caller, updates) {
-            // Successful update
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Withdrawal update failed: ", reason)));
         }
@@ -540,24 +502,20 @@ contract CCLiquidityTemplate is ReentrancyGuard {
             uint256 amountB = denormalize(withdrawal.amountB, decimalsB);
             if (tokenB == address(0)) {
                 try this.transactNative(caller, amountB, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
                 }
             } else {
                 try this.transactToken(caller, tokenB, amountB, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
                 }
             }
             try this.globalizeUpdate(caller, false, withdrawal.amountB, false) {
-                // Successful globalize
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Globalize update failed: ", reason)));
             }
             try this.updateRegistry(caller, false) {
-                // Successful registry update
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Registry update failed: ", reason)));
             }
@@ -567,32 +525,27 @@ contract CCLiquidityTemplate is ReentrancyGuard {
             uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
             if (tokenA == address(0)) {
                 try this.transactNative(caller, amountA, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
                 }
             } else {
                 try this.transactToken(caller, tokenA, amountA, caller) {
-                    // Successful transfer
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
                 }
             }
             try this.globalizeUpdate(caller, true, withdrawal.amountA, false) {
-                // Successful globalize
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Globalize update failed: ", reason)));
             }
             try this.updateRegistry(caller, true) {
-                // Successful registry update
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Registry update failed: ", reason)));
             }
         }
     }
 
-    function claimFees(address caller, address _listingAddress, uint256 liquidityIndex, bool isX, uint256 /* volume */) external nonReentrant {
-        // Claims fees for a slot
+    function claimFees(address caller, address _listingAddress, uint256 liquidityIndex, bool isX, uint256 /* volume */) external {
         require(routers[msg.sender], "Router only");
         require(_listingAddress == listingAddress, "Invalid listing address");
         require(caller != address(0), "Invalid caller");
@@ -619,8 +572,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         _processFeeClaim(context);
     }
 
-    function addFees(address caller, bool isX, uint256 fee) external nonReentrant {
-        // Adds fees to pool
+    function addFees(address caller, bool isX, uint256 fee) external {
         require(routers[msg.sender], "Router only");
         if (fee == 0) revert("Zero fee amount");
         LiquidityDetails storage details = liquidityDetail;
@@ -632,15 +584,13 @@ contract CCLiquidityTemplate is ReentrancyGuard {
             details.yFeesAcc += fee;
         }
         try this.update(caller, feeUpdates) {
-            // Successful update
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Fee update failed: ", reason)));
         }
         emit FeesUpdated(listingId, details.xFees, details.yFees);
     }
 
-    function transactToken(address caller, address token, uint256 amount, address recipient) external nonReentrant {
-        // Handles ERC20 transfers
+    function transactToken(address caller, address token, uint256 amount, address recipient) external {
         require(routers[msg.sender], "Router only");
         require(token == tokenA || token == tokenB, "Invalid token");
         require(token != address(0), "Use transactNative for ETH");
@@ -658,7 +608,6 @@ contract CCLiquidityTemplate is ReentrancyGuard {
             details.yLiquid -= normalizedAmount;
         }
         try IERC20(token).transfer(recipient, amount) returns (bool) {
-            // Successful transfer
         } catch (bytes memory reason) {
             emit TransactFailed(caller, token, amount, "Token transfer failed");
             revert("Token transfer failed");
@@ -666,8 +615,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
-    function transactNative(address caller, uint256 amount, address recipient) external nonReentrant {
-        // Handles ETH transfers
+    function transactNative(address caller, uint256 amount, address recipient) external {
         require(routers[msg.sender], "Router only");
         require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
         require(amount > 0, "Zero amount");
@@ -689,8 +637,7 @@ contract CCLiquidityTemplate is ReentrancyGuard {
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
-    function updateLiquidity(address caller, bool isX, uint256 amount) external nonReentrant {
-        // Updates liquidity balances
+    function updateLiquidity(address caller, bool isX, uint256 amount) external {
         require(routers[msg.sender], "Router only");
         LiquidityDetails storage details = liquidityDetail;
         if (isX) {
@@ -704,44 +651,36 @@ contract CCLiquidityTemplate is ReentrancyGuard {
     }
 
     function getListingAddress(uint256) external view returns (address) {
-        // Returns listing address
         return listingAddress;
     }
 
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount) {
-        // Returns liquidity amounts
         LiquidityDetails memory details = liquidityDetail;
         return (details.xLiquid, details.yLiquid);
     }
 
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) {
-        // Returns liquidity details
         LiquidityDetails memory details = liquidityDetail;
         return (details.xLiquid, details.yLiquid, details.xFees, details.yFees, details.xFeesAcc, details.yFeesAcc);
     }
 
     function activeXLiquiditySlotsView() external view returns (uint256[] memory) {
-        // Returns active x-token slots
         return activeXLiquiditySlots;
     }
 
     function activeYLiquiditySlotsView() external view returns (uint256[] memory) {
-        // Returns active y-token slots
         return activeYLiquiditySlots;
     }
 
     function userIndexView(address user) external view returns (uint256[] memory) {
-        // Returns user's slot indices
         return userIndex[user];
     }
 
     function getXSlotView(uint256 index) external view returns (Slot memory) {
-        // Returns x-token slot details
         return xLiquiditySlots[index];
     }
 
     function getYSlotView(uint256 index) external view returns (Slot memory) {
-        // Returns y-token slot details
         return yLiquiditySlots[index];
     }
 }
