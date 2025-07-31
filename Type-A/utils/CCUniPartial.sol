@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.13
+// Version: 0.0.14
 // Changes:
+// - v0.0.14: Fixed TypeError in _performETHBuySwap, _performETHSellSwap, and _executeTokenSwap by correcting argument counts for transactToken and transactNative to align with ICCListing.sol v0.0.7 (removed 'depositor' parameter). Ensured try-catch returns decoded error reasons. Compatible with CCMainPartial.sol v0.0.12.
 // - v0.0.13: Added amountInReceived to ETHSwapData struct, updated _performETHSellSwap and _finalizeETHSellSwap to use it for tax handling consistency.
 // - v0.0.12: Modified _executeTokenSwap and _performETHSellSwap to use amountInReceived after transactToken, even if less than denormAmountIn, to handle transfer taxes gracefully.
-// - v0.0.11: Refactored _executeBuyETHSwap and _executeSellETHSwapInternal into single-task helper functions (_prepareETHSwap, _performETHSwap, _finalizeETHBuySwap, _finalizeETHSellSwap) to resolve stack too deep error, using structs for data passing.
+// - v0.0.11: Refactored _executeBuyETHSwap and _executeSellETHSwapInternal into single-task helper functions to resolve stack too deep error, using structs for data passing.
 // - v0.0.10: Renamed _executeSellETHSwap to _executeSellETHSwapInternal, updated to use SwapContext, fixed undeclared identifier error in _executePartialSellSwap.
 // - v0.0.9: Introduced generic SwapContext struct and refactored _executeTokenSwap to use it, resolving TypeError from passing SellSwapContext to BuySwapContext.
 // - v0.0.8: Refactored _executeBuyTokenSwap and _executeSellTokenSwap to use internal call tree with helper functions to resolve stack too deep error.
@@ -15,7 +16,7 @@ pragma solidity ^0.8.2;
 // - v0.0.4: Replaced ISSListingTemplate with ICCListing, updated transact to transactNative/transactToken.
 // - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext struct.
 // - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext struct.
-// Compatible with CCMainPartial.sol (v0.0.07), CCSettlementPartial.sol (v0.0.18), CCSettlementRouter.sol (v0.0.5).
+// Compatible with CCMainPartial.sol (v0.0.12), CCSettlementPartial.sol (v0.0.19), CCSettlementRouter.sol (v0.0.6).
 
 import "./CCMainPartial.sol";
 
@@ -112,9 +113,9 @@ contract CCUniPartial is CCMainPartial {
     }
 
     struct ETHSwapData {
-        uint256 preBalanceIn; // Added for token-to-ETH swap input balance tracking
-        uint256 postBalanceIn; // Added for token-to-ETH swap input balance tracking
-        uint256 amountInReceived; // Added to store received token amount after tax
+        uint256 preBalanceIn;
+        uint256 postBalanceIn;
+        uint256 amountInReceived;
         uint256 preBalanceOut;
         uint256 postBalanceOut;
         uint256 amountReceived;
@@ -276,7 +277,7 @@ contract CCUniPartial is CCMainPartial {
     ) private view returns (SwapContext memory context, address[] memory path) {
         // Prepares swap data for sell order, including order details and swap path
         ICCListing listingContract = ICCListing(listingAddress);
-        (context.recipientAddress, context.makerAddress, context.status) = listingContract.getSellOrderCore(orderIdentifier);
+        (context.makerAddress, context.recipientAddress, context.status) = listingContract.getSellOrderCore(orderIdentifier);
         (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
         context.listingContract = listingContract;
         context.tokenIn = listingContract.tokenA();
@@ -311,9 +312,9 @@ contract CCUniPartial is CCMainPartial {
     ) private returns (ETHSwapData memory data) {
         // Performs ETH-to-token swap
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        try context.listingContract.transactNative{value: context.denormAmountIn}(address(this), context.denormAmountIn, address(this)) {} catch {
-            data.amountReceived = 0;
-            return data;
+        try context.listingContract.transactNative{value: context.denormAmountIn}(context.denormAmountIn, address(this)) {
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
         }
         try router.swapExactETHForTokens{value: context.denormAmountIn}(
             context.denormAmountOutMin,
@@ -322,8 +323,8 @@ contract CCUniPartial is CCMainPartial {
             block.timestamp + 300
         ) returns (uint256[] memory amounts) {
             data.amountOut = amounts[1];
-        } catch {
-            data.amountOut = 0;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
         }
         data.postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
         data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
@@ -372,9 +373,9 @@ contract CCUniPartial is CCMainPartial {
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         data.preBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
         data.preBalanceOut = context.recipientAddress.balance;
-        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            data.amountReceived = 0;
-            return data;
+        try context.listingContract.transactToken(context.tokenIn, context.denormAmountIn, address(this)) {
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
         }
         data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
         data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
@@ -390,8 +391,8 @@ contract CCUniPartial is CCMainPartial {
             block.timestamp + 300
         ) returns (uint256[] memory amounts) {
             data.amountOut = amounts[1];
-        } catch {
-            data.amountOut = 0;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
         }
         data.postBalanceOut = context.recipientAddress.balance;
         data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
@@ -449,9 +450,9 @@ contract CCUniPartial is CCMainPartial {
         // Executes token transfer and swap, using actual amount received after tax
         IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         data.preBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
-        try context.listingContract.transactToken(address(this), context.tokenIn, context.denormAmountIn, address(this)) {} catch {
-            data.amountInReceived = 0;
-            return data;
+        try context.listingContract.transactToken(context.tokenIn, context.denormAmountIn, address(this)) {
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
         }
         data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
         data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
@@ -467,8 +468,8 @@ contract CCUniPartial is CCMainPartial {
             block.timestamp + 300
         ) returns (uint256[] memory amounts) {
             data.amountOut = amounts[1];
-        } catch {
-            data.amountOut = 0;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
         }
         data.postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
         data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;

@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.7
+// Version: 0.0.8
 // Changes:
-// - v0.0.7: Added _prepBuyLiquidUpdates and _prepSellLiquidUpdates to prepare buy/sell order liquidation updates, fixing DeclarationError in executeSingleBuyLiquid (line 324) and executeSingleSellLiquid (line 343).
-// - v0.0.6: Replaced ICCLiquidity with ICCLiquidityTemplate in _prepareLiquidityTransaction (line 88) to fix DeclarationError, aligning with CCMainPartial.sol (v0.0.9).
+// - v0.0.8: Updated to use depositor in ICCLiquidity function calls (update, updateLiquidity, transactToken, transactNative) in _updateLiquidity, _prepBuyOrderUpdate, _prepSellOrderUpdate to align with ICCLiquidity.sol v0.0.4. Ensured consistency with CCMainPartial.sol v0.0.11 and ICCListing.sol v0.0.7.
+// - v0.0.7: Added _prepBuyLiquidUpdates and _prepSellLiquidUpdates to prepare buy/sell order liquidation updates, fixing DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid.
+// - v0.0.6: Replaced ICCLiquidity with ICCLiquidityTemplate in _prepareLiquidityTransaction to fix DeclarationError, aligning with CCMainPartial.sol (v0.0.9).
 // - v0.0.5: Removed duplicated ICCListing and ICCLiquidity interfaces, relying on CCMainPartial.sol (v0.0.9) definitions to resolve interface duplication per linearization.
-// - v0.0.4: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView for compatibility with CCListingTemplate.sol v0.0.6. Replaced liquidityAddressView(listingContract.getListingId()) with liquidityAddressView() in _prepareLiquidityTransaction (line 81) and _prepPayoutContext (line 133).
+// - v0.0.4: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView for compatibility with CCListingTemplate.sol v0.0.6. Replaced liquidityAddressView(listingContract.getListingId()) with liquidityAddressView() in _prepareLiquidityTransaction and _prepPayoutContext.
 // - v0.0.3: Updated ICCLiquidity to return bool for transactToken and transactNative, removed redundant SafeERC20 import.
 // - v0.0.2: Added ICCLiquidity interface to resolve DeclarationError, copied from CCSettlementPartial.sol.
 // - v0.0.1: Created CCLiquidPartial.sol, extracted liquid settlement functions from CCSettlementPartial.sol, integrated normalize/denormalize from CCMainPartial.sol, removed CCUniPartial.sol dependency.
-// Compatible with CCListingTemplate.sol (v0.0.6), CCMainPartial.sol (v0.0.9), CCLiquidRouter.sol (v0.0.5), CCLiquidityRouter.sol (v0.0.14).
+// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.11), CCLiquidRouter.sol (v0.0.6), CCLiquidityRouter.sol (v0.0.16).
 
 import "./CCMainPartial.sol";
 
@@ -87,8 +88,8 @@ contract CCLiquidPartial is CCMainPartial {
         // Prepares liquidity transaction, calculating output amount
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
         amountOut = inputAmount; // Simplified, assumes external swap logic
         if (isBuyOrder) {
@@ -118,11 +119,9 @@ contract CCLiquidPartial is CCMainPartial {
             ? liquidityAddr.balance
             : IERC20(tokenIn).balanceOf(liquidityAddr);
         if (tokenIn == address(0)) {
-            bool success = listingContract.transactNative{value: inputAmount}(address(this), inputAmount, liquidityAddr);
-            require(success, "Native transfer failed");
+            listingContract.transactNative{value: inputAmount}(inputAmount, liquidityAddr);
         } else {
-            bool success = listingContract.transactToken(address(this), tokenIn, inputAmount, liquidityAddr);
-            require(success, "Token transfer failed");
+            listingContract.transactToken(tokenIn, inputAmount, liquidityAddr);
         }
         uint256 listingPostBalance = tokenIn == address(0)
             ? listingAddress.balance
@@ -150,7 +149,7 @@ contract CCLiquidPartial is CCMainPartial {
         // Updates liquidity pool with transferred tokens
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         uint256 actualAmount;
         uint8 tokenDecimals;
         (actualAmount, tokenDecimals) = _checkAndTransferPrincipal(
@@ -189,11 +188,11 @@ contract CCLiquidPartial is CCMainPartial {
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
         if (result.tokenAddress == address(0)) {
-            bool success = listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress);
-            result.amountReceived = success ? denormalizedAmount : 0;
+            listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress);
+            result.amountReceived = denormalizedAmount;
         } else {
-            bool success = listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress);
-            result.amountReceived = success ? denormalizedAmount : 0;
+            listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress);
+            result.amountReceived = denormalizedAmount;
         }
         result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
         result.amountSent = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
@@ -207,14 +206,14 @@ contract CCLiquidPartial is CCMainPartial {
         // Prepares sell order update data, including token transfer
         ICCListing listingContract = ICCListing(listingAddress);
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
-        (result.recipientAddress, result.makerAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
+        (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
         if (result.tokenAddress == address(0)) {
-            bool success = listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress);
-            result.amountReceived = success ? denormalizedAmount : 0;
+            listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress);
+            result.amountReceived = denormalizedAmount;
         } else {
-            bool success = listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress);
-            result.amountReceived = success ? denormalizedAmount : 0;
+            listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress);
+            result.amountReceived = denormalizedAmount;
         }
         result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
         result.amountSent = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
@@ -358,7 +357,7 @@ contract CCLiquidPartial is CCMainPartial {
     ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes a single buy order liquidation
         ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getBuyOrderAmounts(orderIdentifier);
+        (uint256 pendingAmount, , ) = listingContract.getBuyOrderAmounts(orderIdentifier);
         if (pendingAmount == 0) {
             return new ICCListing.UpdateType[](0);
         }
@@ -377,7 +376,7 @@ contract CCLiquidPartial is CCMainPartial {
     ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes a single sell order liquidation
         ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getSellOrderAmounts(orderIdentifier);
+        (uint256 pendingAmount, , ) = listingContract.getSellOrderAmounts(orderIdentifier);
         if (pendingAmount == 0) {
             return new ICCListing.UpdateType[](0);
         }

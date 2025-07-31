@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.10
+// Version: 0.0.11
 // Changes:
-// - v0.0.10: Updated liquidityAddressView(0) to liquidityAddressView() in _prepPayoutContext (line 43) to comply with ICCListing interface in CCMainPartial.sol (v0.0.9), fixing TypeError.
-// - v0.0.9: Removed duplicated ICCListing and ICCLiquidity interfaces, relying on CCMainPartial.sol (v0.0.9) definitions.
-// - v0.0.8: Removed SafeERC20 usage in _transferToken, used IERC20.transfer directly; added allowance check with InsufficientAllowance error; added TransferFailed event for transfer failures.
+// - v0.0.11: Updated to align with ICCLiquidity.sol v0.0.4 and ICCListing.sol v0.0.7. Replaced 'caller' with 'depositor' in function calls to liquidityContract. Ensured unused 'depositor' in addFees is retained for consistency. Updated ssUpdate call in settleSingleLongLiquid and settleSingleShortLiquid to remove 'caller' parameter.
+// - v0.0.10: Updated liquidityAddressView(0) to liquidityAddressView() in _prepPayoutContext to comply with ICCListing interface in CCMainPartial.sol (v0.0.9).
+// - v0.0.9: Removed duplicated ICCListing and ICCLiquidity interfaces, used CCMainPartial.sol definitions.
+// - v0.0.8: Removed SafeERC20, used IERC20.transfer directly, added allowance check with InsufficientAllowance error, added TransferFailed event.
 // - v0.0.7: Fixed TypeError in _transferNative/_transferToken by removing incorrect returns clause in try blocks.
 // - v0.0.6: Fixed ParserError in _transferNative by correcting try block syntax.
 // - v0.0.5: Removed inlined ICCListing/ICCLiquidity, used CCMainPartial interfaces, made depositNative/TransactNative payable.
@@ -13,7 +14,7 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Created from SSPayoutPartial.sol v0.0.58, extracted liquidity functions, used ICCListing/ICCLiquidity, split transact calls.
 // - v0.0.2: Modified settleSingleLongLiquid/settleSingleShortLiquid to set zero-amount payouts to completed (3).
 // - v0.0.1: Initial extraction from SSPayoutPartial.sol.
-// Compatible with CCListingTemplate.sol (v0.0.6), CCMainPartial.sol (v0.0.9), CCLiquidityRouter.sol (v0.0.14), ICCLiquidity.sol.
+// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.16), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7).
 
 import "./CCMainPartial.sol";
 
@@ -57,7 +58,7 @@ contract CCLiquidityPartial is CCMainPartial {
         bool isLong
     ) internal view returns (bool sufficient) {
         // Checks if liquidity pool has sufficient tokens
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(context.liquidityAddr);
+        ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
         sufficient = isLong ? yAmount >= requiredAmount : xAmount >= requiredAmount;
     }
@@ -69,27 +70,29 @@ contract CCLiquidityPartial is CCMainPartial {
         bool isLiquidityContract
     ) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
         // Transfers ETH, tracks received amount
-        ICCLiquidityTemplate liquidityContract;
+        ICCLiquidity liquidityContract;
         ICCListing listing;
         if (isLiquidityContract) {
-            liquidityContract = ICCLiquidityTemplate(contractAddr);
+            liquidityContract = ICCLiquidity(contractAddr);
         } else {
             listing = ICCListing(contractAddr);
         }
         uint256 preBalance = recipientAddress.balance;
         bool success = true;
         if (isLiquidityContract) {
-            try liquidityContract.transactNative(address(this), amountOut, recipientAddress) {
+            try liquidityContract.transactNative(msg.sender, amountOut, recipientAddress) {
                 // No return value expected
-            } catch {
+            } catch (bytes memory reason) {
                 success = false;
+                emit TransferFailed(msg.sender, address(0), amountOut, reason);
             }
             require(success, "Native transfer failed");
         } else {
-            try listing.transactNative(address(this), amountOut, recipientAddress) {
+            try listing.transactNative(amountOut, recipientAddress) {
                 // No return value expected
-            } catch {
+            } catch (bytes memory reason) {
                 success = false;
+                emit TransferFailed(msg.sender, address(0), amountOut, reason);
             }
             require(success, "Native transfer failed");
         }
@@ -107,32 +110,29 @@ contract CCLiquidityPartial is CCMainPartial {
         bool isLiquidityContract
     ) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
         // Transfers ERC20 tokens, tracks received amount
-        ICCLiquidityTemplate liquidityContract;
+        ICCLiquidity liquidityContract;
         ICCListing listing;
         if (isLiquidityContract) {
-            liquidityContract = ICCLiquidityTemplate(contractAddr);
+            liquidityContract = ICCLiquidity(contractAddr);
         } else {
             listing = ICCListing(contractAddr);
-        }
-        // Check allowance before transfer
-        uint256 allowance = IERC20(tokenAddress).allowance(address(this), recipientAddress);
-        if (allowance < amountOut) {
-            revert InsufficientAllowance(address(this), tokenAddress, amountOut, allowance);
         }
         uint256 preBalance = IERC20(tokenAddress).balanceOf(recipientAddress);
         bool success = true;
         if (isLiquidityContract) {
-            try liquidityContract.transactToken(address(this), tokenAddress, amountOut, recipientAddress) {
+            try liquidityContract.transactToken(msg.sender, tokenAddress, amountOut, recipientAddress) {
                 // No return value expected
-            } catch {
+            } catch (bytes memory reason) {
                 success = false;
+                emit TransferFailed(msg.sender, tokenAddress, amountOut, reason);
             }
             require(success, "ERC20 transfer failed");
         } else {
-            try listing.transactToken(address(this), tokenAddress, amountOut, recipientAddress) {
+            try listing.transactToken(tokenAddress, amountOut, recipientAddress) {
                 // No return value expected
-            } catch {
+            } catch (bytes memory reason) {
                 success = false;
+                emit TransferFailed(msg.sender, tokenAddress, amountOut, reason);
             }
             require(success, "ERC20 transfer failed");
         }
@@ -181,7 +181,7 @@ contract CCLiquidityPartial is CCMainPartial {
                 minPrice: 0,
                 amountSent: 0
             });
-            listing.update(address(this), statusUpdate);
+            listing.update(statusUpdate);
             return updates;
         }
         PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
@@ -242,7 +242,7 @@ contract CCLiquidityPartial is CCMainPartial {
                 minPrice: 0,
                 amountSent: 0
             });
-            listing.update(address(this), statusUpdate);
+            listing.update(statusUpdate);
             return updates;
         }
         PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
@@ -294,7 +294,7 @@ contract CCLiquidityPartial is CCMainPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listing.ssUpdate(address(this), finalUpdates);
+            listing.ssUpdate(finalUpdates);
         }
     }
 
@@ -315,7 +315,7 @@ contract CCLiquidityPartial is CCMainPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listing.ssUpdate(address(this), finalUpdates);
+            listing.ssUpdate(finalUpdates);
         }
     }
 

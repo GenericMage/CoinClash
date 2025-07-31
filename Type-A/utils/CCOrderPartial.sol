@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.02
+// Version: 0.0.03
 // Changes:
+// - v0.0.03: Removed caller parameter from listingContract.update and transact calls to align with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.10. Updated _executeSingleOrder to pass msg.sender as depositor.
 // - v0.0.02: Replaced invalid try-catch in _clearOrderData with conditional for native/ERC20 transfer.
-// - v0.0.01: Updated to use ICCListing interface from CCMainPartial.sol v0.0.26. Split _clearOrderData's transact call into transactToken and transactNative to align with CCListing.sol v0.0.3.
-// Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.6).
+// - v0.0.01: Updated to use ICCListing interface from CCMainPartial.sol v0.0.26.
+// Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.9).
 
 import "./CCMainPartial.sol";
 
@@ -81,7 +82,7 @@ contract CCOrderPartial is CCMainPartial {
             minPrice: 0,
             amountSent: 0
         });
-        listingContract.update(address(this), updates);
+        listingContract.update(updates);
     }
 
     function _clearOrderData(
@@ -103,11 +104,9 @@ contract CCOrderPartial is CCMainPartial {
             uint8 tokenDecimals = isBuy ? listingContract.decimalsB() : listingContract.decimalsA();
             uint256 refundAmount = denormalize(pending, tokenDecimals);
             if (tokenAddress == address(0)) {
-                bool success = listingContract.transactNative(address(this), refundAmount, recipient);
-                require(success, "Native refund failed");
+                listingContract.transactNative(refundAmount, recipient);
             } else {
-                bool success = listingContract.transactToken(address(this), tokenAddress, refundAmount, recipient);
-                require(success, "Token refund failed");
+                listingContract.transactToken(tokenAddress, refundAmount, recipient);
             }
         }
         ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](1);
@@ -122,6 +121,6 @@ contract CCOrderPartial is CCMainPartial {
             minPrice: 0,
             amountSent: 0
         });
-        listingContract.update(address(this), updates);
+        listingContract.update(updates);
     }
 }

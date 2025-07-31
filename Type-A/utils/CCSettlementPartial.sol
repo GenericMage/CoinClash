@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.18
+// Version: 0.0.19
 // Changes:
+// - v0.0.19: Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to use 'depositor' instead of 'caller' in transactToken and transactNative calls to align with ICCListing.sol v0.0.7 and ICCLiquidity.sol v0.0.4. Ensured pre/post balance checks in _computeAmountSent and transfer functions.
 // - v0.0.18: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, completed _computeAmountSent with pre/post balance checks, removed transfer success checks in _prepBuyOrderUpdate and _prepSellOrderUpdate, added pre/post balance checks for transactToken.
 // - v0.0.17: Removed liquid settlement functions and ICCLiquidity interface, retained Uniswap V2 settlement logic.
 // - v0.0.16: Removed duplicated _prepareSellSwapData, added routers function to ICCLiquidity.
 // - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
 // - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
-// Compatible with ICCListing.sol (v0.0.3), CCUniPartial.sol (v0.0.7), CCSettlementRouter.sol (v0.0.5).
+// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.7), CCSettlementRouter.sol (v0.0.6).
 
 import "./CCUniPartial.sol";
+import "./CCMainPartial.sol";
 
 contract CCSettlementPartial is CCUniPartial {
     struct PrepOrderUpdateResult {
@@ -77,14 +79,14 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
         uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
         if (result.tokenAddress == address(0)) {
-            try listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress) {} catch {
-                result.amountReceived = 0;
-                result.normalizedReceived = 0;
+            try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
+                uint256 postBalance = result.recipientAddress.balance;
+                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+            } catch Error(string memory reason) {
+                revert(string(abi.encodePacked("Native transfer failed: ", reason)));
             }
-            uint256 postBalance = result.recipientAddress.balance;
-            result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         } else {
-            listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress);
+            listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress);
             uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
             result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         }
@@ -100,18 +102,18 @@ contract CCSettlementPartial is CCUniPartial {
         // Prepares sell order update data, including token transfer
         ICCListing listingContract = ICCListing(listingAddress);
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
-        (result.recipientAddress, result.makerAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
+        (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountOut, result.tokenDecimals);
         uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
         if (result.tokenAddress == address(0)) {
-            try listingContract.transactNative{value: denormalizedAmount}(address(this), denormalizedAmount, result.recipientAddress) {} catch {
-                result.amountReceived = 0;
-                result.normalizedReceived = 0;
+            try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
+                uint256 postBalance = result.recipientAddress.balance;
+                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+            } catch Error(string memory reason) {
+                revert(string(abi.encodePacked("Native transfer failed: ", reason)));
             }
-            uint256 postBalance = result.recipientAddress.balance;
-            result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         } else {
-            listingContract.transactToken(address(this), result.tokenAddress, denormalizedAmount, result.recipientAddress);
+            listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress);
             uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
             result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         }
