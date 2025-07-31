@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.9
+// Version: 0.0.10
 // Changes:
+// - v0.0.10: Removed caller parameter from update, ssUpdate, transactToken, transactNative; used msg.sender for router validation to prevent unauthorized senders.
 // - v0.0.9: Removed ReentrancyGuard inheritance and nonReentrant modifiers from update, ssUpdate, transactToken, transactNative, as router-level security handles reentrancy protection.
 // - v0.0.8: Added explicit gas limit (500000) to ITokenRegistry.initializeBalances call in _updateRegistry.
 // - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate.
@@ -29,7 +30,7 @@ interface ICCListing {
         address recipient;
         uint256 required;
     }
-    function ssUpdate(address caller, PayoutUpdate[] calldata updates) external;
+    function ssUpdate(PayoutUpdate[] calldata updates) external;
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
 }
@@ -383,8 +384,8 @@ contract CCListingTemplate {
         }
     }
 
-    function update(address caller, UpdateType[] memory updates) external {
-        require(_routers[caller], "Router only");
+    function update(UpdateType[] memory updates) external {
+        require(_routers[msg.sender], "Router only");
         VolumeBalance storage balances = _volumeBalance;
         bool volumeUpdated = false;
         for (uint256 i = 0; i < updates.length; i++) {
@@ -524,14 +525,14 @@ contract CCListingTemplate {
         globalizeUpdate();
     }
 
-    function ssUpdate(address caller, PayoutUpdate[] memory payoutUpdates) external {
-        require(_routers[caller], "Router only");
+    function ssUpdate(PayoutUpdate[] memory payoutUpdates) external {
+        require(_routers[msg.sender], "Router only");
         for (uint256 i = 0; i < payoutUpdates.length; i++) {
             PayoutUpdate memory p = payoutUpdates[i];
             uint256 orderId = _nextOrderId;
             if (p.payoutType == 0) {
                 LongPayoutStruct storage payout = _longPayouts[orderId];
-                payout.makerAddress = caller;
+                payout.makerAddress = msg.sender;
                 payout.recipientAddress = p.recipient;
                 payout.required = p.required;
                 payout.filled = 0;
@@ -542,7 +543,7 @@ contract CCListingTemplate {
                 emit PayoutOrderCreated(orderId, true, 0);
             } else if (p.payoutType == 1) {
                 ShortPayoutStruct storage payout = _shortPayouts[orderId];
-                payout.makerAddress = caller;
+                payout.makerAddress = msg.sender;
                 payout.recipientAddress = p.recipient;
                 payout.amount = p.required;
                 payout.filled = 0;
@@ -558,8 +559,8 @@ contract CCListingTemplate {
         }
     }
 
-    function transactToken(address caller, address token, uint256 amount, address recipient) external {
-        require(_routers[caller], "Router only");
+    function transactToken(address token, uint256 amount, address recipient) external {
+        require(_routers[msg.sender], "Router only");
         require(token != address(0), "Use transactNative for ETH");
         require(token == _tokenA || token == _tokenB, "Invalid token");
         VolumeBalance storage balances = _volumeBalance;
@@ -591,8 +592,8 @@ contract CCListingTemplate {
         _updateRegistry();
     }
 
-    function transactNative(address caller, uint256 amount, address recipient) external {
-        require(_routers[caller], "Router only");
+    function transactNative(uint256 amount, address recipient) external {
+        require(_routers[msg.sender], "Router only");
         require(_tokenA == address(0) || _tokenB == address(0), "No native token in pair");
         VolumeBalance storage balances = _volumeBalance;
         uint256 normalizedAmount = normalize(amount, 18);
