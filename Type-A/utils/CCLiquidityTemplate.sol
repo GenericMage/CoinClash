@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.17
+// Version: 0.0.18
 // Changes:
+// - v0.0.18: Refactored checkRouterInvolved to only check routers mapping, aligning with CCListingTemplate.sol router validation.
 // - v0.0.17: Modified checkRouterInvolved to check both routers mapping and routerAddresses array. Ensured globalizeLiquidity and registryAddress calls in globalizeUpdate and updateRegistry succeed, reverting with explicit error messages.
 // - v0.0.16: Removed view modifier from checkRouterInvolved due to event emission. Renamed local isRouter to isValidRouter to avoid naming conflict with isRouter function.
 // - v0.0.15: Renamed 'caller' to 'depositor' in functions to avoid confusion. Updated checkRouterInvolved to only check msg.sender. Added isRouter view function.
@@ -112,18 +113,9 @@ contract CCLiquidityTemplate {
     event TransactFailed(address indexed depositor, address token, uint256 amount, string reason);
     event RouterCheckFailed(address indexed msgSender, string reason);
 
-    // Checks if msg.sender is a registered router in both routers mapping and routerAddresses array
+    // Checks if msg.sender is a registered router in the routers mapping
     function checkRouterInvolved() internal {
-        bool isValidRouter = routers[msg.sender];
-        if (!isValidRouter) {
-            for (uint256 i = 0; i < routerAddresses.length; i++) {
-                if (routerAddresses[i] == msg.sender) {
-                    isValidRouter = true;
-                    break;
-                }
-            }
-        }
-        if (!isValidRouter) {
+        if (!routers[msg.sender]) {
             emit RouterCheckFailed(msg.sender, "msg.sender is not a registered router");
             revert("Router check failed: unauthorized caller");
         }
