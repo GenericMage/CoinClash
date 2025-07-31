@@ -1,15 +1,15 @@
 # CCLiquidRouter Contract Documentation
 
 ## Overview
-The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidityTemplate` for liquid settlement. It inherits functionality from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `ICCLiquidityTemplate`, `IERC20`, `IUniswapV2Pair`) for token operations, reserve data, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles liquid settlement (`settleBuyLiquid`, `settleSellLiquid`) via `ICCLiquidityTemplate`, with price impact restrictions ensuring hypothetical price changes stay within order bounds. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation. All transfers to/from the listing call `listingContract.update` after successful liquidity transfers.
+The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidity` for liquid settlement. It inherits functionality from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `ICCLiquidity`, `IERC20`, `IUniswapV2Pair`) for token operations, reserve data, `ReentrancyGuard` for reentrancy protection, and `Ownable` (via `ReentrancyGuard`) for administrative control. The contract handles liquid settlement (`settleBuyLiquid`, `settleSellLiquid`) via `ICCLiquidity`, with price impact restrictions ensuring hypothetical price changes stay within order bounds. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation with revert reasons. All transfers to/from the listing call `listingContract.update` after successful liquidity transfers.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.4 (updated 2025-07-29)
+**Version:** 0.0.5 (updated 2025-07-31)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
 
-**Compatibility:** CCListingTemplate.sol (v0.0.6), CCMainPartial.sol (v0.0.9), CCLiquidPartial.sol (v0.0.4), CCLiquidityRouter.sol (v0.0.14).
+**Compatibility:** CCListingTemplate.sol (v0.0.10), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.11), CCLiquidPartial.sol (v0.0.8), CCLiquidityRouter.sol (v0.0.16).
 
 ## Mappings
 - None defined directly in `CCLiquidRouter`. Relies on `ICCListing` view functions (e.g., `pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -31,7 +31,7 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
    - **Usage**: Ensures trades meet order price constraints before liquidity transfers.
 
 2. **Buy Order Output**:
-   - **Formula**: `amountOut = inputAmount` (simplified, assumes external swap logic).
+   - **Formula**: `amountOut = inputAmount` (simplified, assumes external swap logic in `ICCLiquidity`).
    - **Used in**: `_prepareLiquidityTransaction`, `_prepBuyLiquidUpdates`.
    - **Description**: Computes tokenA output for buy orders, using input amount directly.
 
@@ -50,9 +50,9 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
 
 ### settleBuyLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**:
-  - `listingAddress` (address): Listing contract address.
-  - `maxIterations` (uint256): Maximum orders to process.
-- **Behavior**: Settles pending buy orders up to `maxIterations` using `ICCLiquidityTemplate`, transferring tokenA to recipients, updating liquidity (tokenB), tracking `amountSent` (tokenA), and calling `listingContract.update` after successful transfers. Ensures hypothetical price impact (`_computeSwapImpact`) stays within order bounds (`minPrice <= price <= maxPrice`).
+  - `listingAddress` (address): Address of the `ICCListing` contract managing the order book.
+  - `maxIterations` (uint256): Maximum number of buy orders to process, controlling gas usage.
+- **Behavior**: Settles up to `maxIterations` pending buy orders by transferring tokenA to recipients, updating liquidity with tokenB, tracking `amountSent` (tokenA), and calling `listingContract.update`. Ensures price impact (`_computeSwapImpact`) stays within `minPrice` and `maxPrice`. Uses `ICCLiquidity` for liquidity updates with `depositor` set to `address(this)`.
 - **Internal Call Flow**:
   - Fetches `orderIdentifiers` via `pendingBuyOrdersView`.
   - Iterates up to `maxIterations`:
@@ -64,23 +64,28 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
       - Computes `amountOut`, `tokenIn`, `tokenOut` via `_prepareLiquidityTransaction`.
       - Transfers principal (tokenB) via `_checkAndTransferPrincipal`.
       - Transfers tokenA via `listingContract.transactNative` or `transactToken`.
-      - Updates liquidity (tokenB) via `_updateLiquidity`.
+      - Updates liquidity (tokenB) via `_updateLiquidity`, calling `ICCLiquidity.updateLiquidity(address(this), true, normalizedAmount)`.
       - Creates `ICCListing.UpdateType[]` via `_prepBuyLiquidUpdates`, `_createBuyOrderUpdates`.
-  - Collects updates in `tempUpdates`, resizes to `finalUpdates`, applies via `listingContract.update`.
+  - Collects updates in `tempUpdates`, resizes to `finalUpdates`, applies via `listingContract.update(address(this), finalUpdates)`.
 - **Balance Checks**:
-  - `_checkAndTransferPrincipal`: Ensures `amountSent > 0`, `amountReceived > 0` for principal.
+  - `_checkAndTransferPrincipal`: Ensures `amountSent > 0`, `amountReceived > 0` for principal (tokenB).
   - `_prepBuyOrderUpdate`, `_prepBuyLiquidUpdates`: Pre/post balance checks for tokenA transfer.
 - **Mappings/Structs Used**:
   - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `BuyOrderUpdateContext`, `ICCListing.UpdateType`, `SwapImpactContext`.
+- **Interactions**:
+  - **ICCListing**: Calls `pendingBuyOrdersView`, `getBuyOrderAmounts`, `getBuyOrderPricing`, `transactNative`, `transactToken`, `update`.
+  - **ICCLiquidity**: Calls `isRouter`, `liquidityAmounts`, `updateLiquidity` (with `depositor = address(this)`).
+  - **IERC20**: Checks balances for token transfers.
+  - **IUniswapV2Pair**: Fetches reserves via `getReserves`.
 - **Restrictions**:
   - Protected by `nonReentrant`, `onlyValidListing`.
-  - Requires `liquidityContract.routers(address(this))`.
-  - Reverts if pricing invalid, transfers fail, liquidity insufficient, or price impact exceeds bounds.
-- **Gas Usage Controls**: `maxIterations`, dynamic array resizing.
+  - Requires `liquidityContract.isRouter(address(this))`.
+  - Reverts if pricing invalid, transfers fail, liquidity insufficient, or price impact exceeds bounds (`"Invalid pricing"`, `"No amount sent from listing"`, `"No amount received by liquidity"`, `"Zero reserves"`).
+- **Gas Usage Controls**: Uses `maxIterations`, resizes `tempUpdates` to `finalUpdates` dynamically.
 
 ### settleSellLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyLiquid`.
-- **Behavior**: Settles pending sell orders up to `maxIterations` using `ICCLiquidityTemplate`, transferring tokenB to recipients, updating liquidity (tokenA), tracking `amountSent` (tokenB), and calling `listingContract.update`. Ensures hypothetical price impact stays within order bounds.
+- **Behavior**: Settles up to `maxIterations` pending sell orders by transferring tokenB to recipients, updating liquidity with tokenA, tracking `amountSent` (tokenB), and calling `listingContract.update`. Ensures price impact stays within `minPrice` and `maxPrice`. Uses `ICCLiquidity` for liquidity updates with `depositor` set to `address(this)`.
 - **Internal Call Flow**:
   - Fetches `orderIdentifiers` via `pendingSellOrdersView`.
   - Iterates up to `maxIterations`:
@@ -92,22 +97,31 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
       - Computes `amountOut`, `tokenIn`, `tokenOut` via `_prepareLiquidityTransaction`.
       - Transfers principal (tokenA) via `_checkAndTransferPrincipal`.
       - Transfers tokenB via `listingContract.transactNative` or `transactToken`.
-      - Updates liquidity (tokenA) via `_updateLiquidity`.
+      - Updates liquidity (tokenA) via `_updateLiquidity`, calling `ICCLiquidity.updateLiquidity(address(this), false, normalizedAmount)`.
       - Creates `ICCListing.UpdateType[]` via `_prepSellLiquidUpdates`, `_createSellOrderUpdates`.
-  - Collects updates in `tempUpdates`, resizes to `finalUpdates`, applies via `listingContract.update`.
-- **Balance Checks**: Same as `settleBuyLiquid`.
+  - Collects updates in `tempUpdates`, resizes to `finalUpdates`, applies via `listingContract.update(address(this), finalUpdates)`.
+- **Balance Checks**:
+  - `_checkAndTransferPrincipal`: Ensures `amountSent > 0`, `amountReceived > 0` for principal (tokenA).
+  - `_prepSellOrderUpdate`, `_prepSellLiquidUpdates`: Pre/post balance checks for tokenB transfer.
 - **Mappings/Structs Used**:
   - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `SellOrderUpdateContext`, `ICCListing.UpdateType`, `SwapImpactContext`.
+- **Interactions**:
+  - **ICCListing**: Calls `pendingSellOrdersView`, `getSellOrderAmounts`, `getSellOrderPricing`, `transactNative`, `transactToken`, `update`.
+  - **ICCLiquidity**: Calls `isRouter`, `liquidityAmounts`, `updateLiquidity` (with `depositor = address(this)`).
+  - **IERC20**: Checks balances for token transfers.
+  - **IUniswapV2Pair**: Fetches reserves via `getReserves`.
 - **Restrictions**: Same as `settleBuyLiquid`.
 - **Gas Usage Controls**: Same as `settleBuyLiquid`.
 
 ### setAgent(address newAgent)
 - **Parameters**:
-  - `newAgent` (address): New ICCAgent address.
-- **Behavior**: Updates `agent` state variable for listing validation, inherited from `CCMainPartial`.
+  - `newAgent` (address): New `ICCAgent` address for listing validation.
+- **Behavior**: Updates the `agent` state variable (inherited from `CCMainPartial`) used in `onlyValidListing` modifier to validate listings via `ICCAgent.getListing`.
 - **Internal Call Flow**: Direct state update, validates `newAgent` is non-zero.
 - **Mappings/Structs Used**:
-  - **agent** (state variable): Stores ICCAgent address.
+  - **agent** (state variable): Stores `ICCAgent` address.
+- **Interactions**:
+  - **ICCAgent**: Used in `checkValidListing` to verify listing validity.
 - **Restrictions**:
   - Restricted to `onlyOwner`.
   - Reverts if `newAgent` is zero (`"Invalid agent address"`).
@@ -115,63 +129,66 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
 
 ## Clarifications and Nuances
 
-### ICCLiquidityTemplate Integration
-- **Liquid Settlement Process**: `settleBuyLiquid` and `settleSellLiquid` transfer principal from listing to `ICCLiquidityTemplate` (`_checkAndTransferPrincipal`), update liquidity (`_updateLiquidity`), transfer output tokens to recipients via listing contract, and call `listingContract.update`.
-- **Router Registration**: Requires `liquidityContract.routers(address(this))` to be true.
+### ICCLiquidity Integration
+- **Liquid Settlement Process**: `settleBuyLiquid` and `settleSellLiquid` transfer principal (tokenB for buy, tokenA for sell) from listing to `ICCLiquidity` via `_checkAndTransferPrincipal`, update liquidity via `_updateLiquidity` (calling `ICCLiquidity.updateLiquidity` with `depositor = address(this)`), transfer output tokens (tokenA for buy, tokenB for sell) to recipients via listing contract, and call `listingContract.update` with `depositor = address(this)`.
+- **Router Registration**: Requires `liquidityContract.isRouter(address(this))` to be true, checked in `_prepareLiquidityTransaction`.
+- **Depositor Usage**: `depositor` is set to `address(this)` in `ICCLiquidity` calls (`updateLiquidity`, `transactToken`, `transactNative`), aligning with `ICCLiquidity.sol` (v0.0.4) updates replacing `caller` with `depositor` for consistency.
 - **Balance Checks**: Pre/post balance checks in `_checkAndTransferPrincipal`, `_prepBuy/SellOrderUpdate`, `_prepBuy/SellLiquidUpdates` handle fee-on-transfer tokens and ETH.
 
 ### Price Impact Restrictions
 - **Validation**: Uses `_computeSwapImpact` to calculate hypothetical price impact using Uniswap V2 reserves (0.3% fee). Orders are only settled if `minPrice <= price <= maxPrice`.
-- **Implementation**: Added `SwapImpactContext`, `_getSwapReserves`, `_computeSwapImpact` to check price impact before calling `executeSingleBuyLiquid` or `executeSingleSellLiquid`.
+- **Implementation**: Uses `SwapImpactContext`, `_getSwapReserves`, `_computeSwapImpact` to check price impact before calling `executeSingleBuyLiquid` or `executeSingleSellLiquid`.
 
 ### Decimal Handling
-- **Normalization**: Amounts normalized to 18 decimals via `normalize` (inherited) for consistent calculations.
-- **Denormalization**: Input/output amounts denormalized to native decimals via `denormalize`.
-- **ETH Handling**: ETH transfers use 18 decimals, `msg.value`.
+- **Normalization**: Amounts normalized to 1e18 via `normalize` (inherited) for calculations in `_updateLiquidity`, `_prepBuy/SellOrderUpdate`.
+- **Denormalization**: Input/output amounts denormalized to native decimals via `denormalize` for transfers in `_prepBuy/SellOrderUpdate`.
+- **ETH Handling**: ETH transfers use 18 decimals, `msg.value` in `transactNative`.
 
 ### Order Settlement Mechanics
-- **Execution**: Orders processed fully (status 3) if `normalizedReceived >= pendingAmount`, otherwise skipped.
+- **Execution**: Orders processed fully (status 3) if `normalizedReceived >= pendingAmount`, otherwise skipped (returns empty `UpdateType[]`).
 - **Amount Tracking**: `amountSent` tracks output tokens (tokenA for buy, tokenB for sell), `amountReceived`/`normalizedReceived` track received tokens.
 - **Pricing**: `_checkPricing` uses `maxPrice >= minPrice`, supplemented by `_computeSwapImpact` for impact validation.
 
 ### Gas Optimization
-- **Max Iterations**: `maxIterations` limits loop iterations.
-- **Dynamic Arrays**: `tempUpdates` oversized (`iterationCount * 3`), resized to `finalUpdates`.
-- **Helper Functions**: Logic split into `_getSwapReserves`, `_computeSwapImpact`, `_prepareLiquidityTransaction`, `_checkAndTransferPrincipal`, `_prepBuy/SellLiquidUpdates`.
+- **Max Iterations**: `maxIterations` limits loop iterations in `settleBuyLiquid`, `settleSellLiquid`.
+- **Dynamic Arrays**: `tempUpdates` oversized (`iterationCount * 3`), resized to `finalUpdates` for `listingContract.update`.
+- **Helper Functions**: Logic split into `_getSwapReserves`, `_computeSwapImpact`, `_prepareLiquidityTransaction`, `_checkAndTransferPrincipal`, `_prepBuy/SellLiquidUpdates`, `_createBuy/SellOrderUpdates`.
 
 ### Security Measures
-- **Reentrancy Protection**: `nonReentrant` on all external functions.
-- **Listing Validation**: `onlyValidListing` checks `ICCAgent.getListing`.
-- **Safe Transfers**: IERC20 from `CCMainPartial` with pre/post balance checks.
-- **Router Validation**: Requires `liquidityContract.routers(address(this))`.
+- **Reentrancy Protection**: `nonReentrant` on `settleBuyLiquid`, `settleSellLiquid`.
+- **Listing Validation**: `onlyValidListing` checks `ICCAgent.getListing` in `checkValidListing`.
+- **Safe Transfers**: Uses `IERC20` from `CCMainPartial` with pre/post balance checks in `_checkAndTransferPrincipal`, `_prepBuy/SellOrderUpdate`.
+- **Router Validation**: Requires `liquidityContract.isRouter(address(this))` in `_prepareLiquidityTransaction`.
 - **Safety**:
-  - Explicit casting for interfaces.
-  - No inline assembly.
-  - Hidden state variables (`agent`) accessed via `agentView`.
-  - Avoids reserved keywords, unnecessary virtual/override.
+  - Explicit casting for interfaces (`ICCListing`, `ICCLiquidity`, `IERC20`, `IUniswapV2Pair`).
+  - No inline assembly, per style guide.
+  - Hidden state variables (`agent`, `uniswapV2Router`) accessed via `agentView`, `uniswapV2RouterView`.
+  - Avoids reserved keywords, unnecessary `virtual`/`override`.
+  - Graceful degradation with descriptive revert reasons (e.g., `"Invalid pricing"`, `"No amount sent from listing"`).
 
 ### Limitations and Assumptions
-- **No Uniswap V2 Swaps**: Relies on `ICCLiquidityTemplate` for settlements.
-- **No Order Creation/Cancellation**: Lacks order creation, cancellation, payouts, liquidity management.
+- **No Uniswap V2 Swaps**: Relies on `ICCLiquidity` for settlements, not direct Uniswap V2 swaps.
+- **No Order Creation/Cancellation**: Lacks order creation, cancellation, payouts, or liquidity management, focusing solely on liquid settlement.
 - **Price Impact**: Uses Uniswap V2 reserves for hypothetical price impact, not actual swaps.
-- **Zero-Amount Handling**: Zero amounts or failed transfers return empty `ICCListing.UpdateType[]`.
+- **Zero-Amount Handling**: Zero amounts or failed transfers return empty `ICCListing.UpdateType[]` in `_prepBuy/SellLiquidUpdates`.
+- **Depositor Usage**: `depositor` set to `address(this)` in `ICCLiquidity` calls for consistency, not used for user-specific state updates in `settleBuyLiquid` or `settleSellLiquid`.
 
 ### Differences from CCSettlementRouter
-- **Scope**: Focuses on liquid settlements, omitting Uniswap V2-based settlements, order creation, cancellation, payouts, liquidity management.
+- **Scope**: Focuses on liquid settlements via `ICCLiquidity`, omitting Uniswap V2-based settlements, order creation, cancellation, payouts, or liquidity management.
 - **Inheritance**: Inherits `CCLiquidPartial`, `CCMainPartial`, excludes `CCUniPartial`, `CCSettlementPartial`.
-- **Pricing**: Uses `_computeSwapImpact` for impact restrictions, retains simplified `_checkPricing`.
+- **Pricing**: Uses `_computeSwapImpact` for price impact restrictions, retains simplified `_checkPricing`.
 
 ## Additional Details
-- **Decimal Handling**: Normalizes to 1e18, denormalizes for transfers, ETH uses 18 decimals.
+- **Decimal Handling**: Normalizes to 1e18 for calculations, denormalizes for transfers, ETH uses 18 decimals.
 - **Reentrancy Protection**: `nonReentrant` on all state-changing functions.
-- **Gas Optimization**: `maxIterations`, dynamic arrays, helper functions.
-- **Listing Validation**: `onlyValidListing` ensures listing integrity.
+- **Gas Optimization**: Uses `maxIterations`, dynamic array resizing, helper functions for modularity.
+- **Listing Validation**: `onlyValidListing` ensures listing integrity via `ICCAgent.getListing`.
 - **Token Usage**:
   - Buy orders: Input tokenB, output tokenA, `amountSent` tracks tokenA.
   - Sell orders: Input tokenA, output tokenB, `amountSent` tracks tokenB.
-- **Events**: Relies on `listingContract`, `liquidityContract` events.
+- **Events**: Relies on `listingContract` (`LiquidityUpdated`, `FeesUpdated`) and `liquidityContract` events, does not emit own events.
 - **Safety**:
-  - Explicit casting for interfaces.
-  - No inline assembly.
-  - Hidden state variables accessed via view functions.
-  - Avoids reserved keywords, unnecessary virtual/override.
+  - Explicit interface casting for `ICCListing`, `ICCLiquidity`, `IERC20`, `IUniswapV2Pair`.
+  - No inline assembly, per style guide.
+  - Hidden state variables (`agent`, `uniswapV2Router`) accessed via view functions (`agentView`, `uniswapV2RouterView`).
+  - Avoids reserved keywords, unnecessary `virtual`/`override`.

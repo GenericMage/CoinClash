@@ -1,11 +1,11 @@
 # CCOrderRouter Contract Documentation
 
 ## Overview
-The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a streamlined router for creating and canceling buy and sell orders on a decentralized trading platform. It inherits functionality from `CCOrderPartial`, which extends `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `IERC20`) for token operations and `ReentrancyGuard` for reentrancy protection. The contract focuses on order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`) and cancellation (`clearSingleOrder`, `clearOrders`), leveraging inherited functions for order preparation and execution. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, ensures graceful degradation, and avoids inline assembly.
+The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a streamlined router for creating and canceling buy and sell orders on a decentralized trading platform. It inherits functionality from `CCOrderPartial` (v0.0.03), which extends `CCMainPartial` (v0.0.10), and integrates with external interfaces (`ICCListing` v0.0.7, `IERC20`) for token operations and `ReentrancyGuard` for reentrancy protection. The contract focuses on order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`) and cancellation (`clearSingleOrder`, `clearOrders`), leveraging inherited functions for order preparation and execution. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, ensures graceful degradation, and avoids inline assembly.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.6 (updated 2025-07-27)
+**Version:** 0.0.7 (updated 2025-07-31)
 
 **Inheritance Tree:** `CCOrderRouter` → `CCOrderPartial` → `CCMainPartial`
 
@@ -43,7 +43,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 
 ### createNativeBuyOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
 - **Parameters**: Same as `createTokenBuyOrder`, but for native ETH input (tokenB).
-- **Behavior**: Creates a buy order for native ETH, transferring ETH to the listing contract, normalizing amounts, and initializing `amountSent=0`.
+- **Behavior**: Creates a buy order for native ETH, transferring ETH to the listing contract via `transactNative`, normalizing amounts, and initializing `amountSent=0`.
 - **Internal Call Flow**:
   - Similar to `createTokenBuyOrder`, using `_checkTransferAmountNative` to verify `msg.value == inputAmount` and transfer ETH via `listingContract.transactNative`.
   - Verifies `tokenB == address(0)` (native ETH requirement).
@@ -114,7 +114,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 - **Internal Call Flow**:
   - Fetches `orderIds` via `listingContract.makerPendingOrdersView(msg.sender)`.
   - Iterates up to `maxIterations`:
-    - For each `orderId`, checks if `msg.sender` is the maker via `getBuyOrderCore` or `getSellOrderCore` with corrected tuple destructuring.
+    - For each `orderId`, checks if `msg.sender` is the maker via `getBuyOrderCore` or `getSellOrderCore` with single `maker` variable to avoid shadowing.
     - Calls `_clearOrderData` for valid orders, refunding pending amounts (tokenB for buy, tokenA for sell) and setting status to 0.
   - Transfer destination: `recipientAddress`.
 - **Balance Checks**:
@@ -139,10 +139,26 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
   - Reverts if `newAgent` is zero (`"Invalid agent address"`).
 - **Gas Usage Controls**: Minimal gas due to single state write.
 
+### setUniswapV2Router(address newRouter)
+- **Parameters**:
+  - `newRouter` (address): New Uniswap V2 router address.
+- **Behavior**: Updates `uniswapV2Router` state variable, inherited from `CCMainPartial`.
+- **Internal Call Flow**: Direct state update, validates `newRouter` is non-zero. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**:
+  - **uniswapV2Router** (state variable): Stores Uniswap V2 router address.
+- **Restrictions**:
+  - Restricted to `onlyOwner`.
+  - Reverts if `newRouter` is zero (`"Invalid router address"`).
+- **Gas Usage Controls**: Minimal gas due to single state write.
+
+## View Functions
+- **agentView()**: Returns current `agent` address (inherited from `CCMainPartial`).
+- **uniswapV2RouterView()**: Returns current `uniswapV2Router` address (inherited from `CCMainPartial`).
+
 ## Clarifications and Nuances
 
 ### Token Handling and Decimal Normalization
-- **Normalization**: The contract normalizes token amounts to 18 decimals using the `normalize` function (inherited from `CCMainPartial`) to ensure consistent precision across tokens with varying decimals (e.g., USDC with 6 decimals, ETH with 18 decimals). For buy orders, `inputAmount` (tokenB) is normalized using `decimalsB`; for sell orders, `inputAmount` (tokenA) uses `decimalsA`.
+- **Normalization**: The contract normalizes token amounts to 18 decimals using `normalize` (inherited from `CCMainPartial`) to ensure consistent precision across tokens with varying decimals (e.g., USDC with 6 decimals, ETH with 18 decimals). For buy orders, `inputAmount` (tokenB) is normalized using `decimalsB`; for sell orders, `inputAmount` (tokenA) uses `decimalsA`.
 - **Denormalization**: Refunds in `clearSingleOrder` and `clearOrders` are denormalized to the token’s native decimals (via `denormalize`) to ensure accurate transfers to `recipientAddress`.
 - **ETH Handling**: For native ETH (address(0)), `createNativeBuyOrder` and `createNativeSellOrder` check `msg.value == inputAmount` and use `listingContract.transactNative`, ensuring compatibility with ETH-based listings.
 
@@ -150,10 +166,12 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 - **Input Validation**: `_handleOrderPrep` enforces non-zero `maker`, `recipient`, and `amount`, preventing invalid orders from being processed.
 - **Amount Tracking**: `amountReceived` (denormalized) and `normalizedReceived` (normalized to 1e18) are computed in `_checkTransferAmountToken` or `_checkTransferAmountNative` to handle fee-on-transfer tokens or ETH, ensuring the actual received amount is tracked accurately.
 - **Order Initialization**: `_executeSingleOrder` initializes orders with `amountSent=0`, as `CCOrderRouter` focuses on order creation, not settlement. Settlement (tracking `amountSent`) is handled by other contracts.
+- **Interface Update**: Removed `caller` parameter from `listingContract.update` and `transact` calls to align with `ICCListing.sol` v0.0.7, using direct `update` calls in `_executeSingleOrder` and `_clearOrderData`.
 
 ### Order Cancellation
 - **Maker Restriction**: Only the order’s maker (`msg.sender == maker`) can cancel orders via `_clearOrderData`, ensuring no unauthorized cancellations.
 - **Pending Amount Refunds**: Refunds are issued only for orders with `pending > 0` and status 1 (pending) or 2 (partially filled). The refund amount is denormalized based on token decimals (tokenB for buy, tokenA for sell).
+- **Shadowing Fix**: In `clearOrders`, a single `maker` variable is used for both `getBuyOrderCore` and `getSellOrderCore` destructuring to avoid shadowing, improving code clarity.
 - **Graceful Degradation**: If a refund fails, `_clearOrderData` reverts with `"Token refund failed"` or `"Native refund failed"`, ensuring atomicity.
 
 ### Gas Optimization
@@ -169,7 +187,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
 
 ### Limitations and Assumptions
 - **No Settlement**: `CCOrderRouter` does not handle order settlement (`settleBuyOrders`, `settleSellOrders`, etc.), focusing solely on creation and cancellation. Settlement is handled by another contract (e.g., `CCLiquidityRouter`).
-- **No Liquidity Management**: Functions like `deposit`, `withdraw`, `claimFees`, and `changeDepositor` are absent, as `CCOrderRouter` does not interact with liquidity pools (`ICCLiquidityTemplate`).
+- **No Liquidity Management**: Functions like `deposit`, `withdraw`, `claimFees`, and `changeDepositor` are absent, as `CCOrderRouter` does not interact with liquidity pools (`ICCLiquidity`).
 - **No Payouts**: Long and short payout settlement (`settleLongPayouts`, `settleShortPayouts`) is not supported, as `CCOrderRouter` focuses on order management.
 - **Zero-Amount Handling**: `CCOrderRouter` does not deal with payouts, so no zero-amount payout logic exists.
 
@@ -192,6 +210,6 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a st
   - Explicit casting for interfaces (e.g., `ICCListing(listingAddress)`).
   - No inline assembly, using high-level Solidity.
   - Conditional checks in `_clearOrderData` for refund transfers.
-  - Hidden state variables (e.g., `agent`) accessed via `agentView`.
+  - Hidden state variables (e.g., `agent`, `uniswapV2Router`) accessed via `agentView` and `uniswapV2RouterView`.
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
   - Maker-only cancellation enforced in `_clearOrderData`.

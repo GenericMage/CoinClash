@@ -1,11 +1,11 @@
 # CCSettlementRouter Contract Documentation
 
 ## Overview
-The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using Uniswap V2 for order execution. It inherits functionality from `CCSettlementPartial`, which extends `CCUniPartial` and `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `IUniswapV2Pair`, `IUniswapV2Router02`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles order settlement (`settleBuyOrders`, `settleSellOrders`) via Uniswap V2 swaps, with robust gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation. All transfers to or from the listing correctly call `listingContract.update` after successful Uniswap V2 swaps, ensuring state consistency. Transfer taxes are handled by using the actual amount received (`amountInReceived`) in swaps.
+The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using Uniswap V2 for order execution. It inherits functionality from `CCSettlementPartial`, which extends `CCUniPartial` and `CCMainPartial`, and integrates with external interfaces (`ICCListing`, `IUniswapV2Pair`, `IUniswapV2Router02`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles order settlement (`settleBuyOrders`, `settleSellOrders`) via Uniswap V2 swaps, with robust gas optimization and safety mechanisms. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation with try-catch returning decoded error reasons. All transfers to or from the listing correctly call `listingContract.update` after successful Uniswap V2 swaps, ensuring state consistency. Transfer taxes are handled by using the actual amount received (`amountInReceived`) in swaps.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.6 (updated 2025-07-27)
+**Version:** 0.0.7 (updated 2025-07-31)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
@@ -62,7 +62,7 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `maxIterations` (uint256): Maximum orders to process.
-- **Behavior**: Settles pending buy orders up to `maxIterations` using Uniswap V2 swaps, transferring tokenB to `CCSettlementRouter`, swapping for tokenA, and sending to recipients. Tracks `amountSent` (tokenB) and calls `listingContract.update` after successful swaps. Uses `amountInReceived` for swaps to handle transfer taxes.
+- **Behavior**: Settles pending buy orders up to `maxIterations` using Uniswap V2 swaps, transferring tokenB to `CCSettlementRouter`, swapping for tokenA, and sending to recipients. Tracks `amountSent` (tokenB, using `amountInReceived`) and calls `listingContract.update` after successful swaps. Uses try-catch for transfers and swaps, returning decoded error reasons.
 - **Internal Call Flow**:
   - Fetches `orderIdentifiers` via `pendingBuyOrdersView`.
   - Iterates up to `maxIterations`:
@@ -73,7 +73,7 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
       - Executes swap via `_executePartialBuySwap`, using `_executeBuyETHSwap` (if `tokenIn == address(0)`) or `_executeBuyTokenSwap`.
       - Uses `amountInReceived` (`postBalanceIn - preBalanceIn`) for token swaps, ensuring tax-adjusted input.
       - Creates `UpdateType[]` with `amountSent` (set to `amountInReceived`) and updated status (3 if fully filled, 2 if partial).
-  - Collects updates in `tempUpdates`, resizes to `finalUpdates`, and applies via `listingContract.update`.
+  - Collects updates in `tempUpdates`, resizes to `finalUpdates`, and applies via `listingContract.update` with try-catch.
 - **Balance Checks**:
   - Pre/post balance checks in `_executeBuyETHSwap`, `_executeBuyTokenSwap`, `_performETHBuySwap`, and `_executeTokenSwap` ensure `amountReceived > 0`.
   - For token-to-token swaps, `_executeTokenSwap` checks `amountInReceived > 0` before swapping.
@@ -82,11 +82,11 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
 - **Restrictions**:
   - Protected by `nonReentrant` and `onlyValidListing`.
   - Skips orders with zero pending amount, invalid pricing, or failed swaps.
-- **Gas Usage Controls**: `maxIterations` limits iteration, dynamic array resizing, try-catch for swaps.
+- **Gas Usage Controls**: `maxIterations` limits iteration, dynamic array resizing, try-catch for swaps and updates.
 
 ### settleSellOrders(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyOrders`.
-- **Behavior**: Settles pending sell orders up to `maxIterations` using Uniswap V2 swaps, transferring tokenA to `CCSettlementRouter`, swapping for tokenB, and sending to recipients. Tracks `amountSent` (tokenA) and calls `listingContract.update` after successful swaps. Uses `amountInReceived` for swaps to handle transfer taxes.
+- **Behavior**: Settles pending sell orders up to `maxIterations` using Uniswap V2 swaps, transferring tokenA to `CCSettlementRouter`, swapping for tokenB, and sending to recipients. Tracks `amountSent` (tokenA, using `amountInReceived`) and calls `listingContract.update` after successful swaps. Uses try-catch for transfers and swaps, returning decoded error reasons.
 - **Internal Call Flow**:
   - Similar to `settleBuyOrders`, using `pendingSellOrdersView` and `_processSellOrder`.
   - Executes swap via `_executePartialSellSwap`, using `_executeSellETHSwapInternal` (if `tokenOut == address(0)`) or `_executeSellTokenSwap`.
@@ -124,10 +124,11 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
 ## Clarifications and Nuances
 
 ### Uniswap V2 Integration
-- **Swap Execution**: `settleBuyOrders` and `settleSellOrders` use Uniswap V2 swaps via `_executePartialBuySwap` and `_executePartialSellSwap`, supporting both token-to-token (`swapExactTokensForTokens`) and ETH-based swaps (`swapExactETHForTokens`, `swapExactTokensForETH`), with `listingContract.update` called after successful swaps.
+- **Swap Execution**: `settleBuyOrders` and `settleSellOrders` use Uniswap V2 swaps via `_executePartialBuySwap` and `_executePartialSellSwap`, supporting both token-to-token (`swapExactTokensForTokens`) and ETH-based swaps (`swapExactETHForTokens`, `swapExactTokensForETH`), with `listingContract.update` called after successful swaps using try-catch for error handling.
 - **Price Validation**: `_checkPricing` uses `_computeSwapImpact` to ensure swap price stays within `maxPrice` and `minPrice`, accounting for 0.3% Uniswap V2 fee.
 - **Path Construction**: Swap paths are constructed with `tokenIn` and `tokenOut` based on order type, ensuring correct token pair ordering per Uniswap V2 pair (`token0`, `token1`).
 - **Tax Handling**: For token-to-token and token-to-ETH swaps, `_executeTokenSwap` and `_performETHSellSwap` use `amountInReceived` (`postBalanceIn - preBalanceIn`) to account for transfer taxes, ensuring swaps proceed with the actual received amount.
+- **Error Handling**: Try-catch blocks in `_performETHBuySwap`, `_performETHSellSwap`, `_executeTokenSwap`, and `settleBuyOrders`/`settleSellOrders` return decoded error reasons (e.g., `"Token transfer failed: <reason>"`, `"Swap failed: <reason>"`).
 
 ### Decimal Handling
 - **Normalization**: Amounts are normalized to 18 decimals using `normalize` (inherited from `CCMainPartial`) for consistent calculations across tokens with varying decimals (e.g., USDC with 6 decimals, ETH with 18 decimals).
@@ -137,13 +138,13 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
 ### Order Settlement Mechanics
 - **Partial Execution**: `_processBuyOrder` and `_processSellOrder` use `maxAmountIn` to limit swap amounts to `min(maxAmountIn, pendingAmount)`, enabling partial fills when price constraints limit execution.
 - **Status Updates**: Orders are updated to status 3 (completed) if `normalizedReceived >= pendingAmount`, otherwise status 2 (partially filled).
-- **Amount Tracking**: `amountSent` tracks input tokens transferred (tokenB for buy, tokenA for sell, using `amountInReceived` for tax adjustments), while `amountReceived` and `normalizedReceived` track output tokens received.
+- **Amount Tracking**: `amountSent` tracks input tokens transferred (tokenB for buy, tokenA for sell, using `amountInReceived`), while `amountReceived` and `normalizedReceived` track output tokens received.
 
 ### Gas Optimization
 - **Max Iterations**: `maxIterations` limits loop iterations in all settlement functions, preventing gas limit issues.
 - **Dynamic Arrays**: `tempUpdates` is oversized (`iterationCount * 2`) and resized to `finalUpdates` to minimize gas while collecting updates.
 - **Helper Functions**: Complex logic is split into helpers (e.g., `_prepareSwapData`, `_executeBuyETHSwap`, `_performETHBuySwap`, `_computeSwapImpact`) to reduce stack depth and gas usage.
-- **Try-Catch**: External calls (transfers, swaps) use try-catch to handle failures gracefully, returning empty `ICCListing.UpdateType[]` arrays.
+- **Try-Catch**: External calls (transfers, swaps, updates) use try-catch to handle failures gracefully, returning empty `ICCListing.UpdateType[]` arrays.
 
 ### Security Measures
 - **Reentrancy Protection**: All state-changing functions use `nonReentrant` modifier.
@@ -153,7 +154,7 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
 - **Safety**:
   - Explicit casting for interfaces (e.g., `ICCListing`, `IUniswapV2Router02`).
   - No inline assembly, using high-level Solidity.
-  - Try-catch blocks for external calls (transfers, swaps).
+  - Try-catch blocks for external calls (transfers, swaps, updates) with decoded error reasons.
   - Hidden state variables (`agent`, `uniswapV2Router`) accessed via `agentView` and `uniswapV2RouterView`.
   - Avoids reserved keywords and unnecessary virtual/override modifiers.
 
@@ -181,16 +182,8 @@ The formulas below govern Uniswap V2 swaps and price calculations, as implemente
   - **to**: Set to `context.recipientAddress` from `getBuyOrderCore` or `getSellOrderCore`.
   - **deadline**: Set to `block.timestamp + 300` (5 minutes).
   - **Token Approvals**: Uses `IERC20(tokenIn).approve(uniswapV2Router, data.amountInReceived)` for token-to-token and token-to-ETH swaps.
-  - **ETH Transfers**: Uses `listingContract.transactNative{value: denormAmountIn}` for ETH swaps.
+  - **ETH Transfers**: Uses `listingContract.transactNative{value: denormAmountIn}` for ETH swaps with corrected argument count.
   - **Validation**: Checks non-zero `uniswapV2Router`, `uniswapV2PairView`, valid pricing, and non-zero reserves.
-- **Token Flow**: Tokens flow from the listing contract (`transactToken` or `transactNative`) to the `CCSettlementRouter`, which approves and swaps them via Uniswap V2 LP (`swapExactTokensForTokens`, `swapExactETHForTokens`, or `swapExactTokensForETH`) using `amountInReceived` for tax handling. Pre/post balance checks ensure `amountReceived > 0` and `amountInReceived > 0` before updating the listing state with `listingContract.update`.
+- **Token Flow**: Tokens flow from the listing contract (`transactToken` or `transactNative`) to the `CCSettlementRouter`, which approves and swaps them via Uniswap V2 LP (`swapExactTokensForTokens`, `swapExactETHForTokens`, or `swapExactTokensForETH`) using `amountInReceived` for tax handling. Pre/post balance checks ensure `amountReceived > 0` and `amountInReceived > 0` before updating the listing state with `listingContract.update`. Errors in transfers and swaps are caught and returned as decoded strings (e.g., `"Token transfer failed: <reason>"`).
+- **Error Handling**: Updated in `CCUniPartial.sol` (v0.0.14) to use corrected `transactToken` and `transactNative` calls (removing `depositor` parameter) and return decoded error reasons in try-catch blocks for `_performETHBuySwap`, `_performETHSellSwap`, and `_executeTokenSwap`.
 
-
-**Verification and Updates:**
-- **System Intactness**: The system is complete, with `CCSettlementRouter.sol` (v0.0.5), `CCSettlementPartial.sol` (v0.0.18), and `CCUniPartial.sol` (v0.0.13) fully implementing the requested tax-handling logic. No placeholders or incomplete functions exist.
-- **Changes Reflected**:
-  - Updated `CCSettlementRouterDocs.md` to version 0.0.6, reflecting `CCUniPartial.sol` v0.0.13 changes (added `amountInReceived`, `preBalanceIn`, `postBalanceIn` to `ETHSwapData`).
-  - Added tax-handling details in `settleBuyOrders`, `settleSellOrders`, and `Uniswap V2 Integration`, specifying use of `amountInReceived` for token-to-token and token-to-ETH swaps.
-  - Updated `Token Flow` to include `amountInReceived` usage for tax adjustments.
-  - Clarified balance checks for `amountInReceived > 0` in `_executeTokenSwap` and `_performETHSellSwap`.
-- **Compatibility**: The system remains compatible with `CCMainPartial.sol` (v0.0.07), `ICCListing.sol` (v0.0.3), and the provided versions of dependent contracts.
