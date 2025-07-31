@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.16
+// Version: 0.0.17
 // Changes:
+// - v0.0.17: Modified checkRouterInvolved to check both routers mapping and routerAddresses array. Ensured globalizeLiquidity and registryAddress calls in globalizeUpdate and updateRegistry succeed, reverting with explicit error messages.
 // - v0.0.16: Removed view modifier from checkRouterInvolved due to event emission. Renamed local isRouter to isValidRouter to avoid naming conflict with isRouter function.
 // - v0.0.15: Renamed 'caller' to 'depositor' in functions to avoid confusion. Updated checkRouterInvolved to only check msg.sender. Added isRouter view function.
 // - v0.0.14: Refactored router check to iterate over routerAddresses, checking msg.sender and caller. Added RouterCheckFailed event.
@@ -111,13 +112,15 @@ contract CCLiquidityTemplate {
     event TransactFailed(address indexed depositor, address token, uint256 amount, string reason);
     event RouterCheckFailed(address indexed msgSender, string reason);
 
-    // Checks if msg.sender is a registered router
+    // Checks if msg.sender is a registered router in both routers mapping and routerAddresses array
     function checkRouterInvolved() internal {
-        bool isValidRouter = false;
-        for (uint256 i = 0; i < routerAddresses.length; i++) {
-            if (routerAddresses[i] == msg.sender) {
-                isValidRouter = true;
-                break;
+        bool isValidRouter = routers[msg.sender];
+        if (!isValidRouter) {
+            for (uint256 i = 0; i < routerAddresses.length; i++) {
+                if (routerAddresses[i] == msg.sender) {
+                    isValidRouter = true;
+                    break;
+                }
             }
         }
         if (!isValidRouter) {
@@ -288,6 +291,7 @@ contract CCLiquidityTemplate {
         address token = isX ? tokenA : tokenB;
         uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
         uint256 normalizedAmount = normalize(amount, decimals);
+        bool success;
         try ICCAgent(agent).globalizeLiquidity{gas: 1_000_000}(
             listingId,
             tokenA,
@@ -295,29 +299,38 @@ contract CCLiquidityTemplate {
             depositor,
             normalizedAmount,
             isDeposit
-        ) {} catch (bytes memory reason) {
+        ) {
+            success = true;
+        } catch (bytes memory reason) {
             emit GlobalizeUpdateFailed(depositor, listingId, isX, amount, reason);
             revert(string(abi.encodePacked("Globalize update failed: ", reason)));
         }
+        if (!success) revert("Globalize update failed: no response");
     }
 
     function updateRegistry(address depositor, bool isX) external {
         if (agent == address(0)) revert("Agent not set");
         address registry;
+        bool success;
         try ICCAgent(agent).registryAddress{gas: 1_000_000}() returns (address reg) {
             registry = reg;
+            success = true;
         } catch (bytes memory reason) {
             emit UpdateRegistryFailed(depositor, isX, reason);
             revert(string(abi.encodePacked("Agent registry fetch failed: ", reason)));
         }
+        if (!success) revert("Registry fetch failed: no response");
         if (registry == address(0)) revert("Registry not set");
         address token = isX ? tokenA : tokenB;
         address[] memory users = new address[](1);
         users[0] = depositor;
-        try ITokenRegistry(registry).initializeBalances{gas: 1_000_000}(token, users) {} catch (bytes memory reason) {
+        try ITokenRegistry(registry).initializeBalances{gas: 1_000_000}(token, users) {
+            success = true;
+        } catch (bytes memory reason) {
             emit UpdateRegistryFailed(depositor, isX, reason);
             revert(string(abi.encodePacked("Registry update failed: ", reason)));
         }
+        if (!success) revert("Registry update failed: no response");
     }
 
     function changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor) external {

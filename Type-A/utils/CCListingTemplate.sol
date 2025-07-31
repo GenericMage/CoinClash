@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.10
+// Version: 0.0.11
 // Changes:
-// - v0.0.10: Removed caller parameter from update, ssUpdate, transactToken, transactNative; used msg.sender for router validation to prevent unauthorized senders.
-// - v0.0.9: Removed ReentrancyGuard inheritance and nonReentrant modifiers from update, ssUpdate, transactToken, transactNative, as router-level security handles reentrancy protection.
+// - v0.0.11: Modified _updateRegistry and globalizeUpdate to check gas explicitly, revert with error messages on failure, and remove try-catch.
+// - v0.0.10: Removed caller parameter from update, ssUpdate, transactToken, transactNative; used msg.sender for router validation.
+// - v0.0.9: Removed ReentrancyGuard inheritance and nonReentrant modifiers from update, ssUpdate, transactToken, transactNative.
 // - v0.0.8: Added explicit gas limit (500000) to ITokenRegistry.initializeBalances call in _updateRegistry.
 // - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate.
 // - v0.0.6: Updated ICCListing interface and liquidityAddressView function for CCAgent.sol v0.0.5 compatibility.
@@ -283,7 +284,12 @@ contract CCListingTemplate {
         for (uint256 i = 0; i < makerCount; i++) {
             makers[i] = tempMakers[i];
         }
-        try ITokenRegistry(_registryAddress).initializeBalances{gas: 500000}(tokenAddress, makers) {} catch {}
+        uint256 gasBefore = gasleft();
+        ITokenRegistry(_registryAddress).initializeBalances{gas: 500000}(tokenAddress, makers);
+        uint256 gasUsed = gasBefore - gasleft();
+        if (gasUsed > 500000) {
+            revert("Registry call out of gas");
+        }
     }
 
     function setRouters(address[] memory routers_) external {
@@ -341,7 +347,8 @@ contract CCListingTemplate {
             BuyOrderCore memory order = _buyOrderCores[orderId];
             BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
             if (order.status == 1 || order.status == 2) {
-                try ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
+                uint256 gasBefore = gasleft();
+                ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
                     _listingId,
                     _tokenA,
                     _tokenB,
@@ -351,7 +358,11 @@ contract CCListingTemplate {
                     order.recipientAddress,
                     amounts.pending,
                     order.status
-                ) {} catch {}
+                );
+                uint256 gasUsed = gasBefore - gasleft();
+                if (gasUsed > gasLimit) {
+                    revert("Globalize buy order call out of gas");
+                }
             }
         }
         for (uint256 i = 0; i < _pendingSellOrders.length; i++) {
@@ -359,7 +370,8 @@ contract CCListingTemplate {
             SellOrderCore memory order = _sellOrderCores[orderId];
             SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
             if (order.status == 1 || order.status == 2) {
-                try ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
+                uint256 gasBefore = gasleft();
+                ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
                     _listingId,
                     _tokenA,
                     _tokenB,
@@ -369,7 +381,11 @@ contract CCListingTemplate {
                     order.recipientAddress,
                     amounts.pending,
                     order.status
-                ) {} catch {}
+                );
+                uint256 gasUsed = gasBefore - gasleft();
+                if (gasUsed > gasLimit) {
+                    revert("Globalize sell order call out of gas");
+                }
             }
         }
     }
