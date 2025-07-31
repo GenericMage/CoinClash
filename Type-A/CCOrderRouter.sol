@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.8
+// Version: 0.0.10
 // Changes:
+// - v0.0.10: Fixed shadowing declaration of 'maker' in clearOrders by reusing the same variable for getBuyOrderCore and getSellOrderCore destructuring.
+// - v0.0.9: Removed caller parameter from listingContract.update and transact calls to align with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.10. Updated _executeSingleOrder to pass msg.sender as depositor.
 // - v0.0.8: Fixed TypeError in clearOrders by correcting tuple destructuring for getSellOrderCore from (,,address maker) to (address maker,,).
-// - v0.0.7: Removed SafeERC20 usage, replaced with IERC20 interface. Removed require success checks for transfers, relying on pre/post balance checks. Ensured no partial implementations.
-// - v0.0.6: Split createBuyOrder and createSellOrder into createTokenBuyOrder, createNativeBuyOrder, createTokenSellOrder, and createNativeSellOrder to handle ERC20 and native ETH separately. Removed payableAmount usage to avoid field errors.
-// - v0.0.5: Updated to use ICCListing interface from SSMainPartial.sol v0.0.26. Split _checkTransferAmount into _checkTransferAmountToken and _checkTransferAmountNative to align with CCListing.sol v0.0.3 transactToken/transactNative split.
-// - v0.0.4: Fixed ParserError in clearOrders by correcting tuple destructuring.
-// - v0.0.3: Integrated clearSingleOrder and clearOrders functions.
-// - v0.0.2: Fixed illegal character in _checkTransferAmount, used transferFrom.
-// - v0.0.1: Created CCOrderRouter.sol from SSRouter.sol v0.0.61.
-// Compatible with CCListing.sol (v0.0.3), CCOrderPartial.sol (v0.0.02), CCMainPartial.sol (v0.0.07).
+// - v0.0.7: Removed SafeERC20 usage, replaced with IERC20 interface. Removed require success checks for transfers, relying on pre/post balance checks.
+// Compatible with CCListing.sol (v0.0.3), CCOrderPartial.sol (v0.0.03), CCMainPartial.sol (v0.0.10).
 
 import "./utils/CCOrderPartial.sol";
 
@@ -137,7 +133,7 @@ contract CCOrderRouter is CCOrderPartial {
         uint8 tokenDecimals = 18;
         uint256 preBalance = to.balance;
         require(msg.value == inputAmount, "Incorrect ETH amount");
-        listingContract.transactNative(address(this), inputAmount, to);
+        listingContract.transactNative{value: inputAmount}(inputAmount, to);
         uint256 postBalance = to.balance;
         amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
         normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
@@ -157,11 +153,12 @@ contract CCOrderRouter is CCOrderPartial {
         for (uint256 i = 0; i < iterationCount; i++) {
             uint256 orderId = orderIds[i];
             bool isBuyOrder = false;
-            (address maker,,) = listingContract.getBuyOrderCore(orderId);
+            address maker;
+            (maker,,) = listingContract.getBuyOrderCore(orderId);
             if (maker == msg.sender) {
                 isBuyOrder = true;
             } else {
-                (address maker,,) = listingContract.getSellOrderCore(orderId);
+                (maker,,) = listingContract.getSellOrderCore(orderId);
                 if (maker != msg.sender) {
                     continue;
                 }

@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.5
+// Version: 0.0.6
 // Changes:
+// - v0.0.6: Updated to use depositor in ICCLiquidity.update call in settleBuyLiquid and settleSellLiquid, aligning with ICCLiquidity.sol v0.0.4 and CCMainPartial.sol v0.0.11. Ensured consistency with ICCListing.sol v0.0.7.
 // - v0.0.5: Removed duplicated ICCListing interface, relying on CCMainPartial.sol (v0.0.9) definitions to resolve interface duplication per linearization.
-// - v0.0.4: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView (line 19) for compatibility with CCListingTemplate.sol v0.0.6. Replaced liquidityAddressView(0) with liquidityAddressView() in _getSwapReserves (line 29).
+// - v0.0.4: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView for compatibility with CCListingTemplate.sol v0.0.6. Replaced liquidityAddressView(0) with liquidityAddressView() in _getSwapReserves.
 // - v0.0.3: Added price impact restrictions in settleBuyLiquid and settleSellLiquid, using Uniswap V2 reserve data to ensure hypothetical price changes stay within order bounds.
 // - v0.0.2: Removed SafeERC20 usage, used IERC20 from CCMainPartial, removed redundant require success checks for transfers.
 // - v0.0.1: Created CCLiquidRouter.sol, extracted settleBuyLiquid and settleSellLiquid from CCSettlementRouter.sol.
-// Compatible with CCListingTemplate.sol (v0.0.6), ICCLiquidity.sol, CCMainPartial.sol (v0.0.9), CCLiquidPartial.sol (v0.0.5).
+// Compatible with CCListingTemplate.sol (v0.0.10), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.11), CCLiquidPartial.sol (v0.0.8).
 
 import "./utils/CCLiquidPartial.sol";
 
@@ -84,7 +85,7 @@ contract CCLiquidRouter is CCLiquidPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.update(address(this), finalUpdates);
+            listingContract.update(finalUpdates);
         }
     }
 
@@ -113,7 +114,7 @@ contract CCLiquidRouter is CCLiquidPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.update(address(this), finalUpdates);
+            listingContract.update(finalUpdates);
         }
     }
 }

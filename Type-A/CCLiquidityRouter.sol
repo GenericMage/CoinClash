@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.15
+// Version: 0.0.16
 // Changes:
-// - v0.0.15: Updated depositToken and depositNativeToken to capture and emit detailed revert reasons from CCLiquidityTemplate as strings. Added DepositTokenFailed and DepositNativeFailed events.
-// - v0.0.14: Removed duplicated ICCListing/ICCLiquidityTemplate interfaces, relying on CCMainPartial.sol.
+// - v0.0.16: Updated to align with ICCLiquidity.sol v0.0.4 and ICCListing.sol v0.0.7. Replaced 'caller' with 'depositor' in function calls to liquidityContract. Ensured unused 'depositor' in addFees is retained for consistency. Updated ssUpdate call in settleLongLiquid and settleShortLiquid to remove 'caller' parameter.
+// - v0.0.15: Added DepositTokenFailed and DepositNativeFailed events, captured revert reasons as strings.
+// - v0.0.14: Removed duplicated ICCListing/ICCLiquidityTemplate interfaces, used CCMainPartial.sol.
 // - v0.0.13: Updated ICCListing interface, removed uint256 from liquidityAddressView.
 // - v0.0.12: Removed redundant require(success) in depositToken.
 // - v0.0.11: Removed duplicate TransferFailed/InsufficientAllowance declarations.
@@ -22,21 +23,21 @@ pragma solidity ^0.8.2;
 import "./utils/CCLiquidityPartial.sol";
 
 contract CCLiquidityRouter is CCLiquidityPartial {
-    event DepositTokenFailed(address indexed caller, address token, uint256 amount, string reason);
-    event DepositNativeFailed(address indexed caller, uint256 amount, string reason);
+    event DepositTokenFailed(address indexed depositor, address token, uint256 amount, string reason);
+    event DepositNativeFailed(address indexed depositor, uint256 amount, string reason);
 
     function depositNativeToken(address listingAddress, uint256 inputAmount, bool isTokenA) external payable nonReentrant onlyValidListing(listingAddress) {
         // Deposits ETH to liquidity pool for msg.sender, supports zero-balance initialization
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
         require(msg.value == inputAmount, "Incorrect ETH amount");
         address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
         require(tokenAddress == address(0), "Use depositToken for ERC20");
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
         require(xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0, "Invalid initial deposit");
-        try liquidityContract.depositNative{value: inputAmount}(msg.sender, inputAmount) {
+        try liquidityContract.depositNative(msg.sender, inputAmount) {
             // No return value
         } catch (bytes memory reason) {
             emit DepositNativeFailed(msg.sender, inputAmount, string(reason));
@@ -48,8 +49,8 @@ contract CCLiquidityRouter is CCLiquidityPartial {
         // Deposits ERC20 tokens to liquidity pool for msg.sender, supports zero-balance initialization
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
         address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
         require(tokenAddress != address(0), "Use depositNative for ETH");
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
@@ -59,7 +60,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
             revert InsufficientAllowance(msg.sender, tokenAddress, inputAmount, allowance);
         }
         uint256 preBalance = IERC20(tokenAddress).balanceOf(address(this));
-        try IERC20(tokenAddress).transferFrom(msg.sender, address(this), inputAmount) returns (bool) {
+        try IERC20(tokenAddress).transferFrom(msg.sender, address(this), inputAmount) {
             // Balance checks ensure success
         } catch (bytes memory reason) {
             emit TransferFailed(msg.sender, tokenAddress, inputAmount, reason);
@@ -81,12 +82,12 @@ contract CCLiquidityRouter is CCLiquidityPartial {
         // Withdraws tokens from liquidity pool for msg.sender
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
-        require(msg.sender != address(0), "Invalid caller address");
-        ICCLiquidityTemplate.PreparedWithdrawal memory withdrawal;
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        require(msg.sender != address(0), "Invalid depositor address");
+        ICCLiquidity.PreparedWithdrawal memory withdrawal;
         if (isX) {
-            try liquidityContract.xPrepOut(msg.sender, inputAmount, index) returns (ICCLiquidityTemplate.PreparedWithdrawal memory result) {
+            try liquidityContract.xPrepOut(msg.sender, inputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
                 withdrawal = result;
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Withdrawal preparation failed: ", reason)));
@@ -97,7 +98,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
                 revert(string(abi.encodePacked("Withdrawal execution failed: ", reason)));
             }
         } else {
-            try liquidityContract.yPrepOut(msg.sender, inputAmount, index) returns (ICCLiquidityTemplate.PreparedWithdrawal memory result) {
+            try liquidityContract.yPrepOut(msg.sender, inputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
                 withdrawal = result;
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Withdrawal preparation failed: ", reason)));
@@ -114,9 +115,9 @@ contract CCLiquidityRouter is CCLiquidityPartial {
         // Claims fees from liquidity pool for msg.sender
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
-        require(msg.sender != address(0), "Invalid caller address");
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        require(msg.sender != address(0), "Invalid depositor address");
         try liquidityContract.claimFees(msg.sender, listingAddress, liquidityIndex, isX, volumeAmount) {
             // No return value
         } catch (bytes memory reason) {
@@ -128,9 +129,9 @@ contract CCLiquidityRouter is CCLiquidityPartial {
         // Changes depositor for a liquidity slot for msg.sender
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidityTemplate liquidityContract = ICCLiquidityTemplate(liquidityAddr);
-        require(liquidityContract.routers(address(this)), "Router not registered");
-        require(msg.sender != address(0), "Invalid caller address");
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        require(msg.sender != address(0), "Invalid depositor address");
         require(newDepositor != address(0), "Invalid new depositor");
         try liquidityContract.changeSlotDepositor(msg.sender, isX, slotIndex, newDepositor) {
             // No return value
@@ -156,7 +157,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.ssUpdate(address(this), finalUpdates);
+            listingContract.ssUpdate(finalUpdates);
         }
     }
 
@@ -177,7 +178,7 @@ contract CCLiquidityRouter is CCLiquidityPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.ssUpdate(address(this), finalUpdates);
+            listingContract.ssUpdate(finalUpdates);
         }
     }
 

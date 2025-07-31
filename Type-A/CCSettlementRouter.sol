@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.5
+// Version: 0.0.6
 // Changes:
+// - v0.0.6: Updated update call in settleBuyOrders and settleSellOrders to include 'depositor' parameter, aligning with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.12.
 // - v0.0.5: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, no transfer success checks, ensured pre/post balance checks in dependencies.
 // - v0.0.4: Removed liquid settlement functions and dependencies from CCSettlementPartial.sol, removed ICCLiquidity interface, retained Uniswap V2 settlement.
 // - v0.0.3: Replaced ISSListingTemplate with ICCListing, updated UpdateType references.
 // - v0.0.2: Updated settleBuyOrders and settleSellOrders to use Uniswap V2 swaps.
 // - v0.0.1: Created CCSettlementRouter.sol, extracted settlement functions from SSRouter.sol v0.0.61, retained setAgent.
-// Compatible with ICCListing.sol (v0.0.3), CCMainPartial.sol (v0.0.07), CCUniPartial.sol (v0.0.7).
+// Compatible with ICCListing.sol (v0.0.7), CCMainPartial.sol (v0.0.12), CCUniPartial.sol (v0.0.7).
 
 import "./utils/CCSettlementPartial.sol";
 
@@ -35,7 +36,10 @@ contract CCSettlementRouter is CCSettlementPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.update(address(this), finalUpdates);
+            try listingContract.update(finalUpdates) {
+            } catch Error(string memory reason) {
+                revert(string(abi.encodePacked("Update failed: ", reason)));
+            }
         }
     }
 
@@ -61,7 +65,10 @@ contract CCSettlementRouter is CCSettlementPartial {
             finalUpdates[i] = tempUpdates[i];
         }
         if (updateIndex > 0) {
-            listingContract.update(address(this), finalUpdates);
+            try listingContract.update(finalUpdates) {
+            } catch Error(string memory reason) {
+                revert(string(abi.encodePacked("Update failed: ", reason)));
+            }
         }
     }
 }
