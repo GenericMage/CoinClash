@@ -1,215 +1,161 @@
 # CCOrderRouter Contract Documentation
 
 ## Overview
-The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a streamlined router for creating and canceling buy and sell orders on a decentralized trading platform. It inherits functionality from `CCOrderPartial` (v0.0.03), which extends `CCMainPartial` (v0.0.10), and integrates with external interfaces (`ICCListing` v0.0.7, `IERC20`) for token operations and `ReentrancyGuard` for reentrancy protection. The contract focuses on order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`) and cancellation (`clearSingleOrder`, `clearOrders`), leveraging inherited functions for order preparation and execution. State variables are hidden, accessed via view functions with unique names, and decimal precision is maintained across tokens. The contract avoids reserved keywords, uses explicit casting, ensures graceful degradation, and avoids inline assembly.
+The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a router for creating, canceling, and settling buy/sell orders and long/short payouts on a decentralized trading platform. It inherits functionality from `CCOrderPartial` (v0.0.04), which extends `CCMainPartial` (v0.0.10), and integrates with `ICCListing` (v0.0.7), `ICCLiquidity` (v0.0.4), and `IERC20` interfaces for token operations, using `ReentrancyGuard` for security. The contract handles order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`), cancellation (`clearSingleOrder`, `clearOrders`), and payout settlement (`settleLongLiquid`, `settleShortLiquid`, `settleLongPayouts`, `settleShortPayouts`). State variables are hidden, accessed via unique view functions, with normalized amounts (1e18 decimals) for precision.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.7 (updated 2025-07-31)
+**Version:** 0.0.11 (Updated 2025-08-01)
 
 **Inheritance Tree:** `CCOrderRouter` → `CCOrderPartial` → `CCMainPartial`
 
+**Compatibility:** `CCListing.sol` (v0.0.3), `CCOrderPartial.sol` (v0.0.04), `CCMainPartial.sol` (v0.0.10), `ICCLiquidity.sol` (v0.0.4), `ICCListing.sol` (v0.0.7).
+
 ## Mappings
-- None defined directly in `CCOrderRouter`. Inherits mappings indirectly via `CCOrderPartial` and `CCMainPartial`, but relies on `ICCListing` view functions (e.g., `makerPendingOrdersView`) for order tracking.
+- **`payoutPendingAmounts`**: `mapping(address => mapping(uint256 => uint256))` (inherited from `CCOrderPartial`)
+  - Tracks pending payout amounts per listing address and order ID, normalized to 1e18 decimals.
+  - Updated in `settleSingleLongLiquid`, `settleSingleShortLiquid`, `executeLongPayout`, `executeShortPayout` by decrementing `normalizedReceived`.
 
 ## Structs
-- **OrderPrep**: Contains `maker` (address), `recipient` (address), `amount` (uint256, normalized), `maxPrice` (uint256), `minPrice` (uint256), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256). Defined in `CCOrderPartial.sol`.
+- **OrderPrep**: Defined in `CCOrderPartial`, contains `maker` (address), `recipient` (address), `amount` (uint256, normalized), `maxPrice` (uint256), `minPrice` (uint256), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256).
+- **PayoutContext**: Defined in `CCOrderPartial`, contains `listingAddress` (address), `liquidityAddr` (address), `tokenOut` (address), `tokenDecimals` (uint8), `amountOut` (uint256, denormalized), `recipientAddress` (address).
+- **ICCListing.PayoutUpdate**: Contains `payoutType` (uint8, 0=Long, 1=Short), `recipient` (address), `required` (uint256, normalized).
+- **ICCListing.LongPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `required` (uint256, normalized), `filled` (uint256, normalized), `orderId` (uint256), `status` (uint8).
+- **ICCListing.ShortPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `amount` (uint256, normalized), `filled` (uint256, normalized), `orderId` (uint256), `status` (uint8).
+- **ICCListing.UpdateType**: Contains `updateType` (uint8), `structId` (uint8), `index` (uint256), `value` (uint256), `addr` (address), `recipient` (address), `maxPrice` (uint256), `minPrice` (uint256), `amountSent` (uint256).
+
+## Formulas
+1. **Payout Amount**:
+   - **Formula**: `amountOut = denormalize(payout.required, tokenDecimals)` (long), `amountOut = denormalize(payout.amount, tokenDecimals)` (short).
+   - **Used in**: `settleSingleLongLiquid`, `settleSingleShortLiquid`, `executeLongPayout`, `executeShortPayout`.
+2. **Liquidity Check**:
+   - **Formula**: `sufficient = isLong ? yAmount >= requiredAmount : xAmount >= requiredAmount`.
+   - **Used in**: `_checkLiquidityBalance`.
+3. **Transfer Tracking**:
+   - **Formula**: `amountReceived = postBalance - preBalance`, `normalizedReceived = normalize(amountReceived, tokenDecimals)`.
+   - **Used in**: `_transferNative`, `_transferToken`, `_checkTransferAmountToken`, `_checkTransferAmountNative`.
 
 ## External Functions
 
 ### createTokenBuyOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
 - **Parameters**:
-  - `listingAddress` (address): Listing contract address.
-  - `recipientAddress` (address): Order recipient.
-  - `inputAmount` (uint256): Input amount (denormalized, tokenB, ERC20).
-  - `maxPrice` (uint256): Maximum price (normalized).
-  - `minPrice` (uint256): Minimum price (normalized).
-- **Behavior**: Creates a buy order for ERC20 tokenB, transferring tokens to the listing contract, normalizing amounts, and initializing `amountSent=0`.
+  - `listingAddress`: `ICCListing` contract address.
+  - `recipientAddress`: Order recipient.
+  - `inputAmount`: TokenB amount (denormalized, ERC20).
+  - `maxPrice`, `minPrice`: Normalized prices (1e18).
+- **Behavior**: Creates buy order for ERC20 tokenB, transfers tokens to `listingAddress`, normalizes amounts, initializes `amountSent=0`.
 - **Internal Call Flow**:
-  - Calls `_handleOrderPrep` (inherited) to validate inputs and create `OrderPrep` struct, normalizing `inputAmount` using `listingContract.decimalsB`.
-  - Verifies `tokenB != address(0)` (ERC20 requirement).
-  - Calls `_checkTransferAmountToken` to transfer `inputAmount` in tokenB from `msg.sender` to `listingAddress` via `IERC20.transferFrom`, with pre/post balance checks.
-  - Calls `_executeSingleOrder` (inherited) to fetch `getNextOrderId`, create `UpdateType[]` for pending order status, pricing, and amounts (with `amountSent=0`), and invoke `listingContract.update`.
-  - Transfer destination: `listingAddress`.
-- **Balance Checks**:
-  - Pre-balance check captures `listingAddress` balance before transfer.
-  - Post-balance check ensures `postBalance > preBalance`, computes `amountReceived`, and normalizes to `normalizedReceived`.
-- **Mappings/Structs Used**:
-  - **Structs**: `OrderPrep`, `UpdateType` (from `ICCListing`).
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `maker`, `recipient`, or `amount` is invalid, `tokenB` is native, or transfer fails (`"No tokens received"`).
-- **Gas Usage Controls**: Single transfer, minimal array updates (3 `UpdateType` elements).
+  - Calls `_handleOrderPrep` to validate inputs, normalize `inputAmount` (using `decimalsB`).
+  - Verifies `tokenB != address(0)`.
+  - Calls `_checkTransferAmountToken` to transfer tokens via `IERC20.transferFrom`, checks balances.
+  - Calls `_executeSingleOrder` to create order via `listingContract.update`.
+- **Balance Checks**: Pre/post balance for `listingAddress` in `_checkTransferAmountToken`.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`, reverts on invalid inputs or failed transfer.
 
 ### createNativeBuyOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
-- **Parameters**: Same as `createTokenBuyOrder`, but for native ETH input (tokenB).
-- **Behavior**: Creates a buy order for native ETH, transferring ETH to the listing contract via `transactNative`, normalizing amounts, and initializing `amountSent=0`.
+- **Parameters**: Same as `createTokenBuyOrder`, for ETH (tokenB).
+- **Behavior**: Creates buy order for ETH, transfers ETH via `transactNative`.
 - **Internal Call Flow**:
-  - Similar to `createTokenBuyOrder`, using `_checkTransferAmountNative` to verify `msg.value == inputAmount` and transfer ETH via `listingContract.transactNative`.
-  - Verifies `tokenB == address(0)` (native ETH requirement).
-  - Calls `_executeSingleOrder` for order creation.
-- **Balance Checks**: Same as `createTokenBuyOrder`, with ETH balance checks.
-- **Mappings/Structs Used**: Same as `createTokenBuyOrder`.
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `tokenB` is not native, `msg.value != inputAmount` (`"Incorrect ETH amount"`), or transfer fails (`"No ETH received"`).
-- **Gas Usage Controls**: Same as `createTokenBuyOrder`.
+  - Verifies `tokenB == address(0)`, `msg.value == inputAmount`.
+  - Uses `_checkTransferAmountNative` to transfer ETH, checks balances.
+  - Calls `_executeSingleOrder`.
+- **Balance Checks**: Pre/post ETH balance for `listingAddress`.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`, payable.
 
 ### createTokenSellOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
-- **Parameters**: Same as `createTokenBuyOrder`, but for sell orders with tokenA input (ERC20).
-- **Behavior**: Creates a sell order for ERC20 tokenA, transferring tokens to the listing contract, normalizing amounts, and initializing `amountSent=0`.
-- **Internal Call Flow**:
-  - Similar to `createTokenBuyOrder`, using tokenA and `listingContract.decimalsA` for normalization.
-  - Verifies `tokenA != address(0)` (ERC20 requirement).
-  - Calls `_checkTransferAmountToken` for tokenA transfer.
-  - Calls `_executeSingleOrder` for sell-specific `UpdateType[]`.
+- **Parameters**: Same as `createTokenBuyOrder`, for tokenA (ERC20).
+- **Behavior**: Creates sell order for ERC20 tokenA, transfers tokens.
+- **Internal Call Flow**: Similar to `createTokenBuyOrder`, uses `tokenA`, `decimalsA`.
 - **Balance Checks**: Same as `createTokenBuyOrder`.
-- **Mappings/Structs Used**: Same as `createTokenBuyOrder`.
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `tokenA` is native or transfer fails.
-- **Gas Usage Controls**: Same as `createTokenBuyOrder`.
+- **Restrictions**: Same as `createTokenBuyOrder`.
 
 ### createNativeSellOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
-- **Parameters**: Same as `createTokenBuyOrder`, but for sell orders with native ETH input (tokenA).
-- **Behavior**: Creates a sell order for native ETH, transferring ETH to the listing contract, normalizing amounts, and initializing `amountSent=0`.
-- **Internal Call Flow**:
-  - Similar to `createNativeBuyOrder`, using tokenA and `_checkTransferAmountNative`.
-  - Verifies `tokenA == address(0)` (native ETH requirement).
-  - Calls `_executeSingleOrder` for sell-specific `UpdateType[]`.
+- **Parameters**: Same as `createTokenBuyOrder`, for ETH (tokenA).
+- **Behavior**: Creates sell order for ETH, transfers ETH.
+- **Internal Call Flow**: Similar to `createNativeBuyOrder`, uses `tokenA`.
 - **Balance Checks**: Same as `createNativeBuyOrder`.
-- **Mappings/Structs Used**: Same as `createTokenBuyOrder`.
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `tokenA` is not native or transfer fails.
-- **Gas Usage Controls**: Same as `createTokenBuyOrder`.
+- **Restrictions**: Same as `createNativeBuyOrder`.
 
 ### clearSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder)
 - **Parameters**:
-  - `listingAddress` (address): Listing contract address.
-  - `orderIdentifier` (uint256): Order ID.
-  - `isBuyOrder` (bool): True for buy, false for sell.
-- **Behavior**: Cancels a single order, refunding pending amounts to `recipientAddress`, restricted to the order’s maker via `_clearOrderData`.
+  - `listingAddress`: `ICCListing` contract address.
+  - `orderIdentifier`: Order ID.
+  - `isBuyOrder`: True for buy, false for sell.
+- **Behavior**: Cancels order, refunds pending amounts to `recipientAddress`.
 - **Internal Call Flow**:
-  - Calls `_clearOrderData` (inherited):
-    - Retrieves order data via `getBuyOrderCore` or `getSellOrderCore`, and `getBuyOrderAmounts` or `getSellOrderAmounts` (including `amountSent`).
-    - Verifies `msg.sender` is the maker, reverts if not (`"Only maker can cancel"`).
-    - Refunds pending amount via `listingContract.transactToken` (ERC20) or `transactNative` (ETH), using denormalized amount based on `decimalsB` (buy) or `decimalsA` (sell).
-    - Sets status to 0 (cancelled) via `listingContract.update` with `UpdateType[]`.
-  - Transfer destination: `recipientAddress`.
-- **Balance Checks**:
-  - `_clearOrderData` uses conditional checks for refund transfers, relying on pre/post balance checks in `transactToken` or `transactNative`.
-- **Mappings/Structs Used**:
-  - **Structs**: `UpdateType` (from `ICCListing`).
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Reverts if `msg.sender` is not the maker, refund fails, or order is not pending (status != 1 or 2).
-- **Gas Usage Controls**: Single transfer and update, minimal array (1 `UpdateType`).
+  - Calls `_clearOrderData` to verify maker, refund via `transactToken`/`transactNative`, update status to 0.
+- **Balance Checks**: Implicit in `transactToken`/`transactNative`.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`, maker-only.
 
 ### clearOrders(address listingAddress, uint256 maxIterations)
 - **Parameters**:
-  - `listingAddress` (address): Listing contract address.
-  - `maxIterations` (uint256): Maximum orders to process.
-- **Behavior**: Cancels pending buy and sell orders for `msg.sender` up to `maxIterations`, refunding pending amounts to `recipientAddress`.
+  - `listingAddress`: `ICCListing` contract address.
+  - `maxIterations`: Maximum orders to process.
+- **Behavior**: Cancels pending orders for `msg.sender` up to `maxIterations`.
 - **Internal Call Flow**:
-  - Fetches `orderIds` via `listingContract.makerPendingOrdersView(msg.sender)`.
-  - Iterates up to `maxIterations`:
-    - For each `orderId`, checks if `msg.sender` is the maker via `getBuyOrderCore` or `getSellOrderCore` with single `maker` variable to avoid shadowing.
-    - Calls `_clearOrderData` for valid orders, refunding pending amounts (tokenB for buy, tokenA for sell) and setting status to 0.
-  - Transfer destination: `recipientAddress`.
-- **Balance Checks**:
-  - Same as `clearSingleOrder`, handled by `_clearOrderData` with pre/post balance checks.
-- **Mappings/Structs Used**:
-  - **Structs**: `UpdateType` (from `ICCListing`).
-- **Restrictions**:
-  - Protected by `nonReentrant` and `onlyValidListing`.
-  - Skips orders where `msg.sender` is not the maker or if order is not pending.
-  - Reverts if refund fails in `_clearOrderData`.
-- **Gas Usage Controls**: `maxIterations` limits iteration, minimal updates per order (1 `UpdateType`).
+  - Fetches `makerPendingOrdersView`, iterates, calls `_clearOrderData` for valid orders.
+- **Balance Checks**: Same as `clearSingleOrder`.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`.
+
+### settleLongLiquid(address listingAddress, uint256 maxIterations)
+- **Parameters**:
+  - `listingAddress`: `ICCListing` contract address.
+  - `maxIterations`: Maximum payouts to process.
+- **Behavior**: Processes long liquidation payouts (token B) via `ICCLiquidity`.
+- **Internal Call Flow**:
+  - Fetches `longPayoutByIndexView`, iterates, calls `settleSingleLongLiquid`:
+    - Fetches `LongPayoutStruct`, handles zero `required`.
+    - Uses `_prepPayoutContext`, `_checkLiquidityBalance`, `_transferNative`/`_transferToken` (with `depositor=msg.sender`).
+    - Updates `payoutPendingAmounts`, creates `PayoutUpdate`.
+  - Resizes updates, calls `ssUpdate`.
+- **Balance Checks**: Pre/post balance in `_transferNative`/`_transferToken`, liquidity check.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`.
+
+### settleShortLiquid(address listingAddress, uint256 maxIterations)
+- **Parameters**: Same as `settleLongLiquid`.
+- **Behavior**: Processes short liquidation payouts (token A) via `ICCLiquidity`.
+- **Internal Call Flow**: Similar to `settleLongLiquid`, uses `shortPayoutByIndexView`, `ShortPayoutStruct`.
+- **Balance Checks**: Same as `settleLongLiquid`.
+- **Restrictions**: Same as `settleLongLiquid`.
+
+### settleLongPayouts(address listingAddress, uint256 maxIterations)
+- **Parameters**: Same as `settleLongLiquid`.
+- **Behavior**: Executes long payouts (token B) via `listingContract`.
+- **Internal Call Flow**:
+  - Calls `executeLongPayouts`, iterates `longPayoutByIndexView`, uses `executeLongPayout`:
+    - Skips zero `required`, transfers via `_transferNative`/`_transferToken` (no `depositor`).
+    - Updates `payoutPendingAmounts`, creates `PayoutUpdate`.
+  - Resizes updates, calls `ssUpdate`.
+- **Balance Checks**: Pre/post balance in `_transferNative`/`_transferToken`.
+- **Restrictions**: `nonReentrant`, `onlyValidListing`.
+
+### settleShortPayouts(address listingAddress, uint256 maxIterations)
+- **Parameters**: Same as `settleLongLiquid`.
+- **Behavior**: Executes short payouts (token A) via `listingContract`.
+- **Internal Call Flow**: Similar to `settleLongPayouts`, uses `shortPayoutByIndexView`, `ShortPayoutStruct`.
+- **Balance Checks**: Same as `settleLongPayouts`.
+- **Restrictions**: Same as `settleLongPayouts`.
 
 ### setAgent(address newAgent)
-- **Parameters**:
-  - `newAgent` (address): New ICCAgent address.
-- **Behavior**: Updates `agent` state variable for listing validation, inherited from `CCMainPartial`.
-- **Internal Call Flow**: Direct state update, validates `newAgent` is non-zero. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **agent** (state variable): Stores ICCAgent address.
-- **Restrictions**:
-  - Restricted to `onlyOwner`.
-  - Reverts if `newAgent` is zero (`"Invalid agent address"`).
-- **Gas Usage Controls**: Minimal gas due to single state write.
+- **Parameters**: `newAgent`: New `ICCAgent` address.
+- **Behavior**: Updates `agent` state variable (inherited).
+- **Restrictions**: `onlyOwner`, non-zero `newAgent`.
 
 ### setUniswapV2Router(address newRouter)
-- **Parameters**:
-  - `newRouter` (address): New Uniswap V2 router address.
-- **Behavior**: Updates `uniswapV2Router` state variable, inherited from `CCMainPartial`.
-- **Internal Call Flow**: Direct state update, validates `newRouter` is non-zero. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **uniswapV2Router** (state variable): Stores Uniswap V2 router address.
-- **Restrictions**:
-  - Restricted to `onlyOwner`.
-  - Reverts if `newRouter` is zero (`"Invalid router address"`).
-- **Gas Usage Controls**: Minimal gas due to single state write.
+- **Parameters**: `newRouter`: New Uniswap V2 router address.
+- **Behavior**: Updates `uniswapV2Router` state variable (inherited).
+- **Restrictions**: `onlyOwner`, non-zero `newRouter`.
 
 ## View Functions
-- **agentView()**: Returns current `agent` address (inherited from `CCMainPartial`).
-- **uniswapV2RouterView()**: Returns current `uniswapV2Router` address (inherited from `CCMainPartial`).
+- **agentView()**: Returns `agent` address (inherited).
+- **uniswapV2RouterView()**: Returns `uniswapV2Router` address (inherited).
 
 ## Clarifications and Nuances
-
-### Token Handling and Decimal Normalization
-- **Normalization**: The contract normalizes token amounts to 18 decimals using `normalize` (inherited from `CCMainPartial`) to ensure consistent precision across tokens with varying decimals (e.g., USDC with 6 decimals, ETH with 18 decimals). For buy orders, `inputAmount` (tokenB) is normalized using `decimalsB`; for sell orders, `inputAmount` (tokenA) uses `decimalsA`.
-- **Denormalization**: Refunds in `clearSingleOrder` and `clearOrders` are denormalized to the token’s native decimals (via `denormalize`) to ensure accurate transfers to `recipientAddress`.
-- **ETH Handling**: For native ETH (address(0)), `createNativeBuyOrder` and `createNativeSellOrder` check `msg.value == inputAmount` and use `listingContract.transactNative`, ensuring compatibility with ETH-based listings.
-
-### Order Creation Mechanics
-- **Input Validation**: `_handleOrderPrep` enforces non-zero `maker`, `recipient`, and `amount`, preventing invalid orders from being processed.
-- **Amount Tracking**: `amountReceived` (denormalized) and `normalizedReceived` (normalized to 1e18) are computed in `_checkTransferAmountToken` or `_checkTransferAmountNative` to handle fee-on-transfer tokens or ETH, ensuring the actual received amount is tracked accurately.
-- **Order Initialization**: `_executeSingleOrder` initializes orders with `amountSent=0`, as `CCOrderRouter` focuses on order creation, not settlement. Settlement (tracking `amountSent`) is handled by other contracts.
-- **Interface Update**: Removed `caller` parameter from `listingContract.update` and `transact` calls to align with `ICCListing.sol` v0.0.7, using direct `update` calls in `_executeSingleOrder` and `_clearOrderData`.
-
-### Order Cancellation
-- **Maker Restriction**: Only the order’s maker (`msg.sender == maker`) can cancel orders via `_clearOrderData`, ensuring no unauthorized cancellations.
-- **Pending Amount Refunds**: Refunds are issued only for orders with `pending > 0` and status 1 (pending) or 2 (partially filled). The refund amount is denormalized based on token decimals (tokenB for buy, tokenA for sell).
-- **Shadowing Fix**: In `clearOrders`, a single `maker` variable is used for both `getBuyOrderCore` and `getSellOrderCore` destructuring to avoid shadowing, improving code clarity.
-- **Graceful Degradation**: If a refund fails, `_clearOrderData` reverts with `"Token refund failed"` or `"Native refund failed"`, ensuring atomicity.
-
-### Gas Optimization
-- **Max Iterations**: `clearOrders` uses `maxIterations` to limit loop iterations, preventing gas limit issues when processing many orders.
-- **Minimal Updates**: `clearSingleOrder` and `clearOrders` use a single `UpdateType` for cancellation (status=0), minimizing state writes.
-- **Dynamic Arrays**: Arrays like `UpdateType[]` are dynamically sized (e.g., 3 elements in `_executeSingleOrder`, 1 in `_clearOrderData`) to reduce gas costs.
-
-### Security Measures
-- **Reentrancy Protection**: All external functions (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`, `clearSingleOrder`, `clearOrders`) are protected by `nonReentrant`, preventing reentrancy attacks.
-- **Listing Validation**: The `onlyValidListing` modifier ensures `listingAddress` is registered with the `ICCAgent` contract via `checkValidListing`, using `agentView` for validation.
-- **Safe Transfers**: `IERC20.transferFrom` is used for ERC20 token transfers, with pre/post balance checks to handle edge cases like non-standard tokens.
-- **Balance Checks**: Pre/post balance checks in `_checkTransferAmountToken` and `_checkTransferAmountNative` ensure transfers are successful, accounting for fee-on-transfer tokens or failed ETH transfers.
-
-### Limitations and Assumptions
-- **No Settlement**: `CCOrderRouter` does not handle order settlement (`settleBuyOrders`, `settleSellOrders`, etc.), focusing solely on creation and cancellation. Settlement is handled by another contract (e.g., `CCLiquidityRouter`).
-- **No Liquidity Management**: Functions like `deposit`, `withdraw`, `claimFees`, and `changeDepositor` are absent, as `CCOrderRouter` does not interact with liquidity pools (`ICCLiquidity`).
-- **No Payouts**: Long and short payout settlement (`settleLongPayouts`, `settleShortPayouts`) is not supported, as `CCOrderRouter` focuses on order management.
-- **Zero-Amount Handling**: `CCOrderRouter` does not deal with payouts, so no zero-amount payout logic exists.
-
-### Differences from SSRouter
-- **Scope**: `CCOrderRouter` is a subset of `SSRouter`, focusing only on order creation and cancellation, omitting settlement, liquidity management, and payout processing.
-- **Inheritance**: Inherits `CCOrderPartial` and `CCMainPartial`, not `SSSettlementPartial`, reducing scope compared to `SSRouter`.
-- **Functionality**: Lacks `settleBuyOrders`, `settleSellOrders`, `settleBuyLiquid`, `settleSellLiquid`, `settleLongPayouts`, `settleShortPayouts`, `settleLongLiquid`, `settleShortLiquid`, `deposit`, `withdraw`, `claimFees`, and `changeDepositor`.
-- **Gas Efficiency**: More lightweight due to fewer functions and no complex settlement logic.
-
-## Additional Details
-- **Decimal Handling**: Relies on `normalize` and `denormalize` from `CCMainPartial` for consistent precision (1e18). Token decimals are fetched via `IERC20.decimals` or set to 18 for ETH.
-- **Reentrancy Protection**: All state-changing functions use `nonReentrant` modifier.
-- **Gas Optimization**: Uses `maxIterations` in `clearOrders`, minimal `UpdateType[]` arrays, and efficient balance checks.
-- **Listing Validation**: Uses `onlyValidListing` modifier with `ICCAgent.getListing` checks.
-- **Token Usage**:
-  - Buy orders: Input tokenB (ERC20 or ETH), output tokenA (settlement not handled).
-  - Sell orders: Input tokenA (ERC20 or ETH), output tokenB (settlement not handled).
-- **Events**: No events defined; relies on `listingContract` events for logging.
-- **Safety**:
-  - Explicit casting for interfaces (e.g., `ICCListing(listingAddress)`).
-  - No inline assembly, using high-level Solidity.
-  - Conditional checks in `_clearOrderData` for refund transfers.
-  - Hidden state variables (e.g., `agent`, `uniswapV2Router`) accessed via `agentView` and `uniswapV2RouterView`.
-  - Avoids reserved keywords and unnecessary virtual/override modifiers.
-  - Maker-only cancellation enforced in `_clearOrderData`.
+- **Payout Mechanics**:
+  - **Long vs. Short**: Long payouts transfer token B, short payouts transfer token A. Liquidations use `ICCLiquidity`, payouts use `listingContract`.
+  - **Zero-Amount Payouts**: Sets status to 3 if `required`/`amount` is zero, returns `PayoutUpdate` with `required=0`.
+  - **Depositor Handling**: Liquidation functions pass `msg.sender` as `depositor` in `ICCLiquidity` calls; payout functions do not use `depositor` in `listingContract` calls.
+- **Decimal Handling**: Normalizes to 1e18 decimals, denormalizes for transfers using `decimalsA`/`decimalsB`.
+- **Security**: `nonReentrant`, try-catch with revert strings, explicit casting, no inline assembly.
+- **Gas Optimization**: `maxIterations`, dynamic array resizing, helper functions (`_prepPayoutContext`, `_checkLiquidityBalance`).
+- **Limitations**: No liquidity management or fee updates; `uniswapV2Router` settable but unused.
