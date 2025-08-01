@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.18
+// Version: 0.0.19
 // Changes:
-// - v0.0.18: Removed redundant isRouter checks in _validateDeposit, _prepWithdrawal, _executeWithdrawal, _validateFeeClaim, as CCLiquidityTemplate validates routers[msg.sender]. Updated _executeTokenTransfer to use receivedAmount for transfer and balance checks, handling tax-on-transfer tokens. Updated compatibility comments.
+// - v0.0.19: Removed pool check (xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0) in _validateDeposit to allow deposits in any pool state. Updated compatibility comments.
+// - v0.0.18: Removed redundant isRouter checks in _validateDeposit, _prepWithdrawal, _executeWithdrawal, _validateFeeClaim, as CCLiquidityTemplate validates routers[msg.sender]. Updated _executeTokenTransfer to use receivedAmount for transfer and balance checks, handling tax-on-transfer tokens.
 // - v0.0.17: Removed listingId from FeeClaimContext and FeesClaimed event, updated _validateFeeClaim to remove getListingId call, as it’s unnecessary with onlyValidListing validation.
-// - v0.0.16: Modified _executeTokenTransfer and _executeNativeTransfer to transfer tokens/ETH to CCLiquidityTemplate. Added pre/post balance checks for tax-on-transfer tokens.
 // Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.0.20).
 
 import "./CCMainPartial.sol";
@@ -57,7 +57,6 @@ contract CCLiquidityPartial is CCMainPartial {
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
-        require(xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0, "Invalid initial deposit");
         return DepositContext({
             listingAddress: listingAddress,
             depositor: depositor,
