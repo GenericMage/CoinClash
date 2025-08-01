@@ -1,399 +1,290 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11
+// Version: 0.0.17
 // Changes:
-// - v0.0.11: Updated to align with ICCLiquidity.sol v0.0.4 and ICCListing.sol v0.0.7. Replaced 'caller' with 'depositor' in function calls to liquidityContract. Ensured unused 'depositor' in addFees is retained for consistency. Updated ssUpdate call in settleSingleLongLiquid and settleSingleShortLiquid to remove 'caller' parameter.
-// - v0.0.10: Updated liquidityAddressView(0) to liquidityAddressView() in _prepPayoutContext to comply with ICCListing interface in CCMainPartial.sol (v0.0.9).
-// - v0.0.9: Removed duplicated ICCListing and ICCLiquidity interfaces, used CCMainPartial.sol definitions.
-// - v0.0.8: Removed SafeERC20, used IERC20.transfer directly, added allowance check with InsufficientAllowance error, added TransferFailed event.
-// - v0.0.7: Fixed TypeError in _transferNative/_transferToken by removing incorrect returns clause in try blocks.
-// - v0.0.6: Fixed ParserError in _transferNative by correcting try block syntax.
-// - v0.0.5: Removed inlined ICCListing/ICCLiquidity, used CCMainPartial interfaces, made depositNative/TransactNative payable.
-// - v0.0.4: Split _transferPayoutAmount/_TransferListingPayouts into _transferNative/_transferToken, aligned with ICCLiquidity depositToken/depositNative.
-// - v0.0.3: Created from SSPayoutPartial.sol v0.0.58, extracted liquidity functions, used ICCListing/ICCLiquidity, split transact calls.
-// - v0.0.2: Modified settleSingleLongLiquid/settleSingleShortLiquid to set zero-amount payouts to completed (3).
-// - v0.0.1: Initial extraction from SSPayoutPartial.sol.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.16), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7).
+// - v0.0.17: Removed listingId from FeeClaimContext and FeesClaimed event, updated _validateFeeClaim to remove getListingId call, as it’s unnecessary with onlyValidListing validation. Updated compatibility comments.
+// - v0.0.16: Modified _executeTokenTransfer and _executeNativeTransfer to transfer tokens/ETH to CCLiquidityTemplate. Added pre/post balance checks for tax-on-transfer tokens.
+// - v0.0.15: Refactored _processFeeShare with FeeClaimContext struct and helper functions to reduce stack usage.
+// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.23), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.0.20).
 
 import "./CCMainPartial.sol";
 
 contract CCLiquidityPartial is CCMainPartial {
     // Emitted when IERC20.transfer fails
     event TransferFailed(address indexed sender, address indexed token, uint256 amount, bytes reason);
-    // Emitted when allowance is insufficient
+    // Emitted when deposit fails
+    event DepositFailed(address indexed depositor, address token, uint256 amount, string reason);
+    // Emitted when fees are claimed
+    event FeesClaimed(address indexed listingAddress, uint256 liquidityIndex, uint256 xFees, uint256 yFees);
+    // Emitted when depositor is changed
+    event SlotDepositorChanged(bool isX, uint256 indexed slotIndex, address indexed oldDepositor, address indexed newDepositor);
+    // Emitted when deposit is received
+    event DepositReceived(address indexed depositor, address token, uint256 amount, uint256 normalizedAmount);
+    // Error for insufficient allowance
     error InsufficientAllowance(address sender, address token, uint256 required, uint256 available);
 
-    struct PayoutContext {
+    // Struct to hold deposit data, reducing stack usage
+    struct DepositContext {
         address listingAddress;
+        address depositor;
+        uint256 inputAmount;
+        bool isTokenA;
+        address tokenAddress;
         address liquidityAddr;
-        address tokenOut;
-        uint8 tokenDecimals;
-        uint256 amountOut;
-        address recipientAddress;
+        uint256 xAmount;
+        uint256 yAmount;
+        uint256 receivedAmount;
+        uint256 normalizedAmount;
+        uint256 index;
     }
 
-    mapping(address => mapping(uint256 => uint256)) internal payoutPendingAmounts;
-
-    function _prepPayoutContext(
-        address listingAddress,
-        uint256 orderId,
-        bool isLong
-    ) internal view returns (PayoutContext memory context) {
-        // Prepares payout context
-        ICCListing listing = ICCListing(listingAddress);
-        context = PayoutContext({
-            listingAddress: listingAddress,
-            liquidityAddr: listing.liquidityAddressView(),
-            tokenOut: isLong ? listing.tokenB() : listing.tokenA(),
-            tokenDecimals: isLong ? listing.decimalsB() : listing.decimalsA(),
-            amountOut: 0,
-            recipientAddress: address(0)
-        });
+    // Struct to hold fee claim data, reducing stack usage
+    struct FeeClaimContext {
+        address listingAddress;
+        address depositor;
+        uint256 liquidityIndex;
+        bool isX;
+        address liquidityAddr;
+        uint256 xBalance;
+        uint256 xLiquid;
+        uint256 yLiquid;
+        uint256 xFees;
+        uint256 yFees;
+        uint256 liquid;
+        uint256 fees;
+        uint256 allocation;
+        uint256 dFeesAcc;
+        address transferToken;
+        uint256 feeShare;
     }
 
-    function _checkLiquidityBalance(
-        PayoutContext memory context,
-        uint256 requiredAmount,
-        bool isLong
-    ) internal view returns (bool sufficient) {
-        // Checks if liquidity pool has sufficient tokens
-        ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+    // Validates deposit inputs and fetches token/liquidity data
+    function _validateDeposit(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal view returns (DepositContext memory) {
+        ICCListing listingContract = ICCListing(listingAddress);
+        address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
+        address liquidityAddr = listingContract.liquidityAddressView();
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
-        sufficient = isLong ? yAmount >= requiredAmount : xAmount >= requiredAmount;
-    }
-
-    function _transferNative(
-        address payable contractAddr,
-        uint256 amountOut,
-        address recipientAddress,
-        bool isLiquidityContract
-    ) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
-        // Transfers ETH, tracks received amount
-        ICCLiquidity liquidityContract;
-        ICCListing listing;
-        if (isLiquidityContract) {
-            liquidityContract = ICCLiquidity(contractAddr);
-        } else {
-            listing = ICCListing(contractAddr);
-        }
-        uint256 preBalance = recipientAddress.balance;
-        bool success = true;
-        if (isLiquidityContract) {
-            try liquidityContract.transactNative(msg.sender, amountOut, recipientAddress) {
-                // No return value expected
-            } catch (bytes memory reason) {
-                success = false;
-                emit TransferFailed(msg.sender, address(0), amountOut, reason);
-            }
-            require(success, "Native transfer failed");
-        } else {
-            try listing.transactNative(amountOut, recipientAddress) {
-                // No return value expected
-            } catch (bytes memory reason) {
-                success = false;
-                emit TransferFailed(msg.sender, address(0), amountOut, reason);
-            }
-            require(success, "Native transfer failed");
-        }
-        uint256 postBalance = recipientAddress.balance;
-        amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, 18) : 0;
-    }
-
-    function _transferToken(
-        address contractAddr,
-        address tokenAddress,
-        uint256 amountOut,
-        address recipientAddress,
-        uint8 tokenDecimals,
-        bool isLiquidityContract
-    ) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
-        // Transfers ERC20 tokens, tracks received amount
-        ICCLiquidity liquidityContract;
-        ICCListing listing;
-        if (isLiquidityContract) {
-            liquidityContract = ICCLiquidity(contractAddr);
-        } else {
-            listing = ICCListing(contractAddr);
-        }
-        uint256 preBalance = IERC20(tokenAddress).balanceOf(recipientAddress);
-        bool success = true;
-        if (isLiquidityContract) {
-            try liquidityContract.transactToken(msg.sender, tokenAddress, amountOut, recipientAddress) {
-                // No return value expected
-            } catch (bytes memory reason) {
-                success = false;
-                emit TransferFailed(msg.sender, tokenAddress, amountOut, reason);
-            }
-            require(success, "ERC20 transfer failed");
-        } else {
-            try listing.transactToken(tokenAddress, amountOut, recipientAddress) {
-                // No return value expected
-            } catch (bytes memory reason) {
-                success = false;
-                emit TransferFailed(msg.sender, tokenAddress, amountOut, reason);
-            }
-            require(success, "ERC20 transfer failed");
-        }
-        uint256 postBalance = IERC20(tokenAddress).balanceOf(recipientAddress);
-        amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
-    }
-
-    function _createPayoutUpdate(
-        uint256 normalizedReceived,
-        address recipientAddress,
-        bool isLong
-    ) internal pure returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Creates payout updates
-        updates = new ICCListing.PayoutUpdate[](1);
-        updates[0] = ICCListing.PayoutUpdate({
-            payoutType: isLong ? 0 : 1,
-            recipient: recipientAddress,
-            required: normalizedReceived
+        require(xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0, "Invalid initial deposit");
+        return DepositContext({
+            listingAddress: listingAddress,
+            depositor: depositor,
+            inputAmount: inputAmount,
+            isTokenA: isTokenA,
+            tokenAddress: tokenAddress,
+            liquidityAddr: liquidityAddr,
+            xAmount: xAmount,
+            yAmount: yAmount,
+            receivedAmount: 0,
+            normalizedAmount: 0,
+            index: isTokenA ? liquidityContract.activeXLiquiditySlotsView().length : liquidityContract.activeYLiquiditySlotsView().length
         });
     }
 
-    function settleSingleLongLiquid(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Settles single long liquidation payout
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
-        if (payout.required == 0) {
-            updates = new ICCListing.PayoutUpdate[](1);
-            updates[0] = ICCListing.PayoutUpdate({
-                payoutType: 0,
-                recipient: payout.recipientAddress,
-                required: 0
-            });
-            ICCListing.UpdateType[] memory statusUpdate = new ICCListing.UpdateType[](1);
-            statusUpdate[0] = ICCListing.UpdateType({
-                updateType: 0,
-                structId: 0,
-                index: orderIdentifier,
-                value: 3,
-                addr: payout.makerAddress,
-                recipient: payout.recipientAddress,
-                maxPrice: 0,
-                minPrice: 0,
-                amountSent: 0
-            });
-            listing.update(statusUpdate);
-            return updates;
+    // Handles ERC20 token transfer and approval
+    function _executeTokenTransfer(DepositContext memory context) internal returns (DepositContext memory) {
+        require(context.tokenAddress != address(0), "Use depositNative for ETH");
+        uint256 allowance = IERC20(context.tokenAddress).allowance(context.depositor, address(this));
+        if (allowance < context.inputAmount) revert InsufficientAllowance(context.depositor, context.tokenAddress, context.inputAmount, allowance);
+        uint256 preBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
+        try IERC20(context.tokenAddress).transferFrom(context.depositor, address(this), context.inputAmount) {
+        } catch (bytes memory reason) {
+            emit TransferFailed(context.depositor, context.tokenAddress, context.inputAmount, reason);
+            revert("TransferFrom failed");
         }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.required, context.tokenDecimals);
-        if (!_checkLiquidityBalance(context, payout.required, true)) {
-            return new ICCListing.PayoutUpdate[](0);
+        uint256 postBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
+        context.receivedAmount = postBalanceRouter - preBalanceRouter;
+        require(context.receivedAmount > 0, "No tokens received");
+        uint256 preBalanceTemplate = IERC20(context.tokenAddress).balanceOf(context.liquidityAddr);
+        try IERC20(context.tokenAddress).transfer(context.liquidityAddr, context.receivedAmount) {
+        } catch (bytes memory reason) {
+            emit TransferFailed(address(this), context.tokenAddress, context.receivedAmount, reason);
+            revert("Transfer to liquidity template failed");
         }
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(context.liquidityAddr),
-                context.amountOut,
-                context.recipientAddress,
-                true
-            );
+        uint256 postBalanceTemplate = IERC20(context.tokenAddress).balanceOf(context.liquidityAddr);
+        context.receivedAmount = postBalanceTemplate - preBalanceTemplate;
+        require(context.receivedAmount > 0, "No tokens received by liquidity template");
+        uint8 decimals = IERC20(context.tokenAddress).decimals();
+        context.normalizedAmount = normalize(context.receivedAmount, decimals);
+        return context;
+    }
+
+    // Validates ETH amount for native deposit and forwards to liquidity template
+    function _executeNativeTransfer(DepositContext memory context) internal returns (DepositContext memory) {
+        require(context.tokenAddress == address(0), "Use depositToken for ERC20");
+        require(context.inputAmount == msg.value, "Incorrect ETH amount");
+        uint256 preBalanceTemplate = context.liquidityAddr.balance;
+        (bool success, bytes memory reason) = context.liquidityAddr.call{value: context.inputAmount}("");
+        if (!success) {
+            emit TransferFailed(context.depositor, address(0), context.inputAmount, reason);
+            revert("ETH transfer to liquidity template failed");
+        }
+        uint256 postBalanceTemplate = context.liquidityAddr.balance;
+        context.receivedAmount = postBalanceTemplate - preBalanceTemplate;
+        require(context.receivedAmount > 0, "No ETH received by liquidity template");
+        context.normalizedAmount = normalize(context.receivedAmount, 18);
+        return context;
+    }
+
+    // Creates and applies liquidity update
+    function _updateDeposit(DepositContext memory context) internal {
+        ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+        ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
+        updates[0] = ICCLiquidity.UpdateType(context.isTokenA ? 2 : 3, context.index, context.normalizedAmount, context.depositor, address(0));
+        try liquidityContract.update(context.depositor, updates) {
+        } catch (bytes memory reason) {
+            emit DepositFailed(context.depositor, context.tokenAddress, context.receivedAmount, string(reason));
+            revert(string(abi.encodePacked("Deposit update failed: ", reason)));
+        }
+        emit DepositReceived(context.depositor, context.tokenAddress, context.receivedAmount, context.normalizedAmount);
+    }
+
+    // Internal function to handle token deposit
+    function _depositToken(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal returns (uint256) {
+        DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
+        context = _executeTokenTransfer(context);
+        _updateDeposit(context);
+        return context.receivedAmount;
+    }
+
+    // Internal function to handle native ETH deposit
+    function _depositNative(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal {
+        DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
+        context = _executeNativeTransfer(context);
+        _updateDeposit(context);
+    }
+
+    // Internal function to prepare withdrawal
+    function _prepWithdrawal(address listingAddress, address depositor, uint256 inputAmount, uint256 index, bool isX) internal returns (ICCLiquidity.PreparedWithdrawal memory) {
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView();
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        require(depositor != address(0), "Invalid depositor");
+        if (isX) {
+            try liquidityContract.xPrepOut(depositor, inputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
+                return result;
+            } catch (bytes memory reason) {
+                revert(string(abi.encodePacked("Withdrawal preparation failed: ", reason)));
+            }
         } else {
-            (amountReceived, normalizedReceived) = _transferToken(
-                context.liquidityAddr,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                true
-            );
+            try liquidityContract.yPrepOut(depositor, inputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
+                return result;
+            } catch (bytes memory reason) {
+                revert(string(abi.encodePacked("Withdrawal preparation failed: ", reason)));
+            }
         }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, true);
     }
 
-    function settleSingleShortLiquid(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Settles single short liquidation payout
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
-        if (payout.amount == 0) {
-            updates = new ICCListing.PayoutUpdate[](1);
-            updates[0] = ICCListing.PayoutUpdate({
-                payoutType: 1,
-                recipient: payout.recipientAddress,
-                required: 0
-            });
-            ICCListing.UpdateType[] memory statusUpdate = new ICCListing.UpdateType[](1);
-            statusUpdate[0] = ICCListing.UpdateType({
-                updateType: 0,
-                structId: 0,
-                index: orderIdentifier,
-                value: 3,
-                addr: payout.makerAddress,
-                recipient: payout.recipientAddress,
-                maxPrice: 0,
-                minPrice: 0,
-                amountSent: 0
-            });
-            listing.update(statusUpdate);
-            return updates;
-        }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.amount, context.tokenDecimals);
-        if (!_checkLiquidityBalance(context, payout.amount, false)) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(context.liquidityAddr),
-                context.amountOut,
-                context.recipientAddress,
-                true
-            );
+    // Internal function to execute withdrawal
+    function _executeWithdrawal(address listingAddress, address depositor, uint256 index, bool isX, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView();
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        if (isX) {
+            try liquidityContract.xExecuteOut(depositor, index, withdrawal) {
+            } catch (bytes memory reason) {
+                revert(string(abi.encodePacked("Withdrawal execution failed: ", reason)));
+            }
         } else {
-            (amountReceived, normalizedReceived) = _transferToken(
-                context.liquidityAddr,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                true
-            );
-        }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, false);
-    }
-
-    function executeLongPayouts(address listingAddress, uint256 maxIterations) internal onlyValidListing(listingAddress) {
-        // Executes multiple long payouts
-        ICCListing listing = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listing.longPayoutByIndexView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; ++i) {
-            ICCListing.PayoutUpdate[] memory payoutUpdates = executeLongPayout(listingAddress, orderIdentifiers[i]);
-            if (payoutUpdates.length == 0) continue;
-            tempUpdates[updateIndex++] = payoutUpdates[0];
-        }
-        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; ++i) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            listing.ssUpdate(finalUpdates);
+            try liquidityContract.yExecuteOut(depositor, index, withdrawal) {
+            } catch (bytes memory reason) {
+                revert(string(abi.encodePacked("Withdrawal execution failed: ", reason)));
+            }
         }
     }
 
-    function executeShortPayouts(address listingAddress, uint256 maxIterations) internal onlyValidListing(listingAddress) {
-        // Executes multiple short payouts
-        ICCListing listing = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listing.shortPayoutByIndexView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; ++i) {
-            ICCListing.PayoutUpdate[] memory payoutUpdates = executeShortPayout(listingAddress, orderIdentifiers[i]);
-            if (payoutUpdates.length == 0) continue;
-            tempUpdates[updateIndex++] = payoutUpdates[0];
-        }
-        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; ++i) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            listing.ssUpdate(finalUpdates);
-        }
+    // Validates fee claim inputs and fetches liquidity/slot data
+    function _validateFeeClaim(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal view returns (FeeClaimContext memory) {
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView();
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        require(depositor != address(0), "Invalid depositor");
+        (uint256 xBalance, ) = listingContract.volumeBalances(0);
+        require(xBalance > 0, "Invalid listing balance");
+        (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, , ) = liquidityContract.liquidityDetailsView();
+        ICCLiquidity.Slot memory slot = isX ? liquidityContract.getXSlotView(liquidityIndex) : liquidityContract.getYSlotView(liquidityIndex);
+        require(slot.depositor == depositor, "Depositor not slot owner");
+        require(xLiquid > 0 || yLiquid > 0, "No liquidity available");
+        require(slot.allocation > 0, "No allocation for slot");
+        return FeeClaimContext({
+            listingAddress: listingAddress,
+            depositor: depositor,
+            liquidityIndex: liquidityIndex,
+            isX: isX,
+            liquidityAddr: liquidityAddr,
+            xBalance: xBalance,
+            xLiquid: xLiquid,
+            yLiquid: yLiquid,
+            xFees: xFees,
+            yFees: yFees,
+            liquid: isX ? xLiquid : yLiquid,
+            fees: isX ? yFees : xFees,
+            allocation: slot.allocation,
+            dFeesAcc: slot.dFeesAcc,
+            transferToken: isX ? listingContract.tokenB() : listingContract.tokenA(),
+            feeShare: 0
+        });
     }
 
-    function executeLongPayout(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Executes long payout
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
-        if (payout.required == 0) {
-            return new ICCListing.PayoutUpdate[](0);
+    // Calculates fee share based on liquidity contribution
+    function _calculateFeeShare(FeeClaimContext memory context) internal pure returns (FeeClaimContext memory) {
+        uint256 contributedFees = context.fees > context.dFeesAcc ? context.fees - context.dFeesAcc : 0;
+        uint256 liquidityContribution = context.liquid > 0 ? (context.allocation * 1e18) / context.liquid : 0;
+        context.feeShare = (contributedFees * liquidityContribution) / 1e18;
+        context.feeShare = context.feeShare > context.fees ? context.fees : context.feeShare;
+        return context;
+    }
+
+    // Applies updates and transfers fees
+    function _executeFeeClaim(FeeClaimContext memory context) internal {
+        if (context.feeShare == 0) revert("No fees to claim");
+        ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+        ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](2);
+        updates[0] = ICCLiquidity.UpdateType(1, context.isX ? 1 : 0, context.fees - context.feeShare, address(0), address(0));
+        updates[1] = ICCLiquidity.UpdateType(context.isX ? 2 : 3, context.liquidityIndex, context.allocation, context.depositor, address(0));
+        try liquidityContract.update(context.depositor, updates) {
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Fee claim update failed: ", reason)));
         }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.required, context.tokenDecimals);
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(listingAddress),
-                context.amountOut,
-                context.recipientAddress,
-                false
-            );
+        uint8 decimals = context.transferToken == address(0) ? 18 : IERC20(context.transferToken).decimals();
+        uint256 denormalizedFee = denormalize(context.feeShare, decimals);
+        if (context.transferToken == address(0)) {
+            try liquidityContract.transactNative(context.depositor, denormalizedFee, context.depositor) {
+            } catch (bytes memory reason) {
+                revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
+            }
         } else {
-            (amountReceived, normalizedReceived) = _transferToken(
-                listingAddress,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                false
-            );
+            try liquidityContract.transactToken(context.depositor, context.transferToken, denormalizedFee, context.depositor) {
+            } catch (bytes memory reason) {
+                revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
+            }
         }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, true);
+        emit FeesClaimed(context.listingAddress, context.liquidityIndex, context.isX ? 0 : context.feeShare, context.isX ? context.feeShare : 0);
     }
 
-    function executeShortPayout(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Executes short payout
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
-        if (payout.amount == 0) {
-            return new ICCListing.PayoutUpdate[](0);
+    // Internal function to process fee claims
+    function _processFeeShare(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal {
+        FeeClaimContext memory context = _validateFeeClaim(listingAddress, depositor, liquidityIndex, isX);
+        context = _calculateFeeShare(context);
+        _executeFeeClaim(context);
+    }
+
+    // Internal function to change depositor
+    function _changeDepositor(address listingAddress, address depositor, bool isX, uint256 slotIndex, address newDepositor) internal {
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView();
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(liquidityContract.isRouter(address(this)), "Router not registered");
+        require(depositor != address(0), "Invalid depositor");
+        require(newDepositor != address(0), "Invalid new depositor");
+        try liquidityContract.changeSlotDepositor(depositor, isX, slotIndex, newDepositor) {
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Depositor change failed: ", reason)));
         }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.amount, context.tokenDecimals);
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(listingAddress),
-                context.amountOut,
-                context.recipientAddress,
-                false
-            );
-        } else {
-            (amountReceived, normalizedReceived) = _transferToken(
-                listingAddress,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                false
-            );
-        }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, false);
     }
 }
