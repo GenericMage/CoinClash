@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.8
+// Version: 0.0.9
 // Changes:
+// - v0.0.9: Removed unnecessary isRouter check in _prepareLiquidityTransaction to fix compatibility with CCLiquidityTemplate.sol v0.1.0, where isRouter was removed.
 // - v0.0.8: Updated to use depositor in ICCLiquidity function calls (update, updateLiquidity, transactToken, transactNative) in _updateLiquidity, _prepBuyOrderUpdate, _prepSellOrderUpdate to align with ICCLiquidity.sol v0.0.4. Ensured consistency with CCMainPartial.sol v0.0.11 and ICCListing.sol v0.0.7.
 // - v0.0.7: Added _prepBuyLiquidUpdates and _prepSellLiquidUpdates to prepare buy/sell order liquidation updates, fixing DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid.
 // - v0.0.6: Replaced ICCLiquidity with ICCLiquidityTemplate in _prepareLiquidityTransaction to fix DeclarationError, aligning with CCMainPartial.sol (v0.0.9).
@@ -11,7 +12,7 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Updated ICCLiquidity to return bool for transactToken and transactNative, removed redundant SafeERC20 import.
 // - v0.0.2: Added ICCLiquidity interface to resolve DeclarationError, copied from CCSettlementPartial.sol.
 // - v0.0.1: Created CCLiquidPartial.sol, extracted liquid settlement functions from CCSettlementPartial.sol, integrated normalize/denormalize from CCMainPartial.sol, removed CCUniPartial.sol dependency.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.11), CCLiquidRouter.sol (v0.0.6), CCLiquidityRouter.sol (v0.0.16).
+// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.11), CCLiquidRouter.sol (v0.0.6), CCLiquidityRouter.sol (v0.0.25), CCLiquidityTemplate.sol (v0.1.0).
 
 import "./CCMainPartial.sol";
 
@@ -89,7 +90,6 @@ contract CCLiquidPartial is CCMainPartial {
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-        require(liquidityContract.isRouter(address(this)), "Router not registered");
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
         amountOut = inputAmount; // Simplified, assumes external swap logic
         if (isBuyOrder) {

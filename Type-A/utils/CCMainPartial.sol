@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.10
+// Version: 0.0.11
 // Changes:
+// - v0.0.11: Modified onlyValidListing modifier to use CCAgent.isValidListing instead of checkValidListing, allowing interaction with old listings after a relist, as isValidListing checks allListings array. Added ListingDetails struct to ICCAgent interface to resolve DeclarationError.
 // - v0.0.10: Updated ICCListing and ICCLiquidity interfaces to match ICCListing.sol v0.0.7 and ICCLiquidity.sol v0.0.4. Replaced 'caller' with 'depositor' in ICCLiquidity, removed 'caller' from ICCListing's update, ssUpdate, transactToken, transactNative. Added isRouter and routerAddressesView to ICCLiquidity.
 // - v0.0.9: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView for compatibility with CCListingTemplate.sol v0.0.6.
 // - v0.0.8: Modified checkValidListing to use contract's own agent state variable, removed agentView call.
@@ -13,7 +14,7 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Fixed DeclarationError in checkValidListing.
 // - v0.0.2: Fixed TypeError in checkValidListing.
 // - v0.0.1: Inlined ICCListing, split transact into token/native.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCOrderRouter.sol (v0.0.8), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol (v0.0.4), CCLiquidityRouter.sol (v0.0.16).
+// Compatible with CCListingTemplate.sol (v0.0.10), CCOrderRouter.sol (v0.0.11), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol (v0.0.4), CCLiquidityRouter.sol (v0.0.16), CCAgent.sol (v0.1.2).
 
 import "../imports/IERC20.sol";
 import "../imports/ReentrancyGuard.sol";
@@ -113,7 +114,6 @@ interface ICCLiquidity {
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function getPrice() external view returns (uint256);
     function getRegistryAddress() external view returns (address);
-    function isRouter(address _address) external view returns (bool);
     function routerAddressesView() external view returns (address[] memory);
     function setRouters(address[] memory _routers) external;
     function setListingId(uint256 _listingId) external;
@@ -143,7 +143,15 @@ interface ICCLiquidity {
 }
 
 interface ICCAgent {
+    struct ListingDetails {
+        address listingAddress; // Listing contract address
+        address liquidityAddress; // Associated liquidity contract address
+        address tokenA; // First token in pair
+        address tokenB; // Second token in pair
+        uint256 listingId; // Listing ID
+    }
     function getListing(address tokenA, address tokenB) external view returns (address);
+    function isValidListing(address listingAddress) external view returns (bool isValid, ListingDetails memory details);
 }
 
 contract CCMainPartial is ReentrancyGuard {
@@ -202,7 +210,10 @@ contract CCMainPartial is ReentrancyGuard {
     }
 
     modifier onlyValidListing(address listing) {
-        checkValidListing(listing);
+        // Validates listing using CCAgent.isValidListing
+        require(agent != address(0), "Contract agent not set");
+        (bool isValid, ) = ICCAgent(agent).isValidListing(listing);
+        require(isValid, "Invalid listing");
         _;
     }
 

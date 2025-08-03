@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11
+// Version: 0.1.0
 // Changes:
-// - v0.0.11: Modified _updateRegistry and globalizeUpdate to check gas explicitly, revert with error messages on failure, and remove try-catch.
-// - v0.0.10: Removed caller parameter from update, ssUpdate, transactToken, transactNative; used msg.sender for router validation.
-// - v0.0.9: Removed ReentrancyGuard inheritance and nonReentrant modifiers from update, ssUpdate, transactToken, transactNative.
-// - v0.0.8: Added explicit gas limit (500000) to ITokenRegistry.initializeBalances call in _updateRegistry.
-// - v0.0.7: Added explicit gas limit (1000000) to ICCAgent.globalizeOrders calls in globalizeUpdate.
-// - v0.0.6: Updated ICCListing interface and liquidityAddressView function for CCAgent.sol v0.0.5 compatibility.
-// - v0.0.5: Added agentView function for ICCListing compliance.
-// - v0.0.4: Removed SafeERC20, used direct IERC20.transfer, added getTokens function.
-// - v0.0.3: Split transact into transactToken and transactNative.
-// - v0.0.2: Added uniswapV2PairView function.
-// - v0.0.1: Changed to BSL 1.1, added Uniswap V2 pair support.
+// - v0.1.0: Added globalizeUpdate to call globalizeOrders on _globalizerAddress at the end of update, passing maker and listing addresses.
+// Added makerPendingBuyOrdersView, makerPendingSellOrdersView, getFullBuyOrderDetails, getFullSellOrderDetails, and makerOrdersView to return pending and historical order details with maxIterations and step.
+// - Added globalizerAddressView function to return _globalizerAddress.
+//  Removed globalizeUpdate function and its calls, added globalizerAddress with one-time setter callable by anyone, commented that order globalization will be handled by a new globalizer contract.
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -21,19 +14,19 @@ interface IERC20 {
 }
 
 interface ICCListing {
-    function prices(uint256) external view returns (uint256);
-    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView() external view returns (address);
-    function tokenA() external view returns (address);
-    function tokenB() external view returns (address);
     struct PayoutUpdate {
         uint8 payoutType; // 0: Long, 1: Short
         address recipient;
         uint256 required;
     }
-    function ssUpdate(PayoutUpdate[] calldata updates) external;
+    function prices(uint256) external view returns (uint256);
+    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
+    function liquidityAddressView() external view returns (address);
+    function tokenA() external view returns (address);
+    function tokenB() external view returns (address);
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
+    function ssUpdate(PayoutUpdate[] calldata updates) external;
 }
 
 interface IUniswapV2Pair {
@@ -42,22 +35,11 @@ interface IUniswapV2Pair {
     function token1() external view returns (address);
 }
 
-interface ICCAgent {
-    function globalizeOrders(
-        uint256 listingId,
-        address tokenA,
-        address tokenB,
-        uint256 orderId,
-        bool isBuy,
-        address maker,
-        address recipient,
-        uint256 amount,
-        uint8 status
-    ) external;
-}
-
 interface ICCListingTemplate {
     function getTokens() external view returns (address tokenA, address tokenB);
+    function globalizerAddressView() external view returns (address);
+    function makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds);
+    function makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds);
 }
 
 interface ICCLiquidityTemplate {
@@ -73,7 +55,11 @@ interface ITokenRegistry {
     function initializeBalances(address token, address[] memory users) external;
 }
 
-contract CCListingTemplate {
+interface ICCGlobalizer {
+    function globalizeOrders(address maker, address listing) external;
+}
+
+contract CCListingTemplate is ICCListing, ICCListingTemplate {
     mapping(address => bool) private _routers;
     bool private _routersSet;
     address private _tokenA;
@@ -86,6 +72,8 @@ contract CCListingTemplate {
     address private _agent;
     address private _registryAddress;
     address private _liquidityAddress;
+    address private _globalizerAddress;
+    bool private _globalizerSet;
     uint256 private _nextOrderId;
     struct LastDayFee {
         uint256 xFees;
@@ -116,7 +104,6 @@ contract CCListingTemplate {
         uint256 timestamp;
     }
     HistoricalData[] private _historicalData;
-
     struct BuyOrderCore {
         address makerAddress;
         address recipientAddress;
@@ -145,11 +132,6 @@ contract CCListingTemplate {
         uint256 filled;     // Amount of tokenA filled
         uint256 amountSent; // Amount of tokenB sent during settlement
     }
-    struct PayoutUpdate {
-        uint8 payoutType; // 0: Long, 1: Short
-        address recipient;
-        uint256 required;
-    }
     struct LongPayoutStruct {
         address makerAddress;
         address recipientAddress;
@@ -177,7 +159,6 @@ contract CCListingTemplate {
         uint256 minPrice; // for Pricing struct or packed xVolume/yVolume (historical)
         uint256 amountSent; // Amount of opposite token sent during settlement
     }
-
     mapping(uint256 => BuyOrderCore) private _buyOrderCores;
     mapping(uint256 => BuyOrderPricing) private _buyOrderPricings;
     mapping(uint256 => BuyOrderAmounts) private _buyOrderAmounts;
@@ -190,47 +171,18 @@ contract CCListingTemplate {
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
+    event GlobalizerAddressSet(address indexed globalizer);
 
-    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
-        else return amount / 10 ** (uint256(decimals) - uint256(18));
+    // Sets globalizer contract address, callable by anyone, one-time only
+    function setGlobalizerAddress(address globalizerAddress_) external {
+        require(!_globalizerSet, "Globalizer already set");
+        require(globalizerAddress_ != address(0), "Invalid globalizer address");
+        _globalizerAddress = globalizerAddress_;
+        _globalizerSet = true;
+        emit GlobalizerAddressSet(globalizerAddress_);
     }
 
-    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        else if (decimals < 18) return amount / 10 ** (uint256(18) - uint256(decimals));
-        else return amount * 10 ** (uint256(decimals) - uint256(18));
-    }
-
-    function _isSameDay(uint256 time1, uint256 time2) internal pure returns (bool) {
-        uint256 midnight1 = time1 - (time1 % 86400);
-        uint256 midnight2 = time2 - (time2 % 86400);
-        return midnight1 == midnight2;
-    }
-
-    function _floorToMidnight(uint256 timestamp) internal pure returns (uint256) {
-        return timestamp - (timestamp % 86400);
-    }
-
-    function _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) internal view returns (uint256) {
-        uint256 currentVolume = isA ? _volumeBalance.xVolume : _volumeBalance.yVolume;
-        uint256 iterationsLeft = maxIterations;
-        if (_historicalData.length == 0) return 0;
-        for (uint256 i = _historicalData.length; i > 0 && iterationsLeft > 0; i--) {
-            HistoricalData memory data = _historicalData[i - 1];
-            iterationsLeft--;
-            if (data.timestamp >= startTime) {
-                return currentVolume - (isA ? data.xVolume : data.yVolume);
-            }
-        }
-        if (iterationsLeft == 0 || _historicalData.length <= maxIterations) {
-            HistoricalData memory earliest = _historicalData[0];
-            return currentVolume - (isA ? earliest.xVolume : earliest.yVolume);
-        }
-        return 0;
-    }
-
+    // Sets Uniswap V2 pair address, callable once
     function setUniswapV2Pair(address uniswapV2Pair_) external {
         require(!_uniswapV2PairSet, "Uniswap V2 pair already set");
         require(uniswapV2Pair_ != address(0), "Invalid pair address");
@@ -238,60 +190,7 @@ contract CCListingTemplate {
         _uniswapV2PairSet = true;
     }
 
-    function queryYield(bool isA, uint256 maxIterations) external view returns (uint256) {
-        require(maxIterations > 0, "Invalid maxIterations");
-        if (_lastDayFee.timestamp == 0 || _historicalData.length == 0 || !_isSameDay(block.timestamp, _lastDayFee.timestamp)) {
-            return 0;
-        }
-        uint256 feeDifference = isA ? _volumeBalance.xVolume - _lastDayFee.xFees : _volumeBalance.yVolume - _lastDayFee.yFees;
-        if (feeDifference == 0) return 0;
-        uint256 liquidity = 0;
-        try ICCLiquidityTemplate(_liquidityAddress).liquidityAmounts() returns (uint256 xLiquid, uint256 yLiquid) {
-            liquidity = isA ? xLiquid : yLiquid;
-        } catch {
-            return 0;
-        }
-        if (liquidity == 0) return 0;
-        uint256 dailyFees = (feeDifference * 5) / 10000; // 0.05% fee
-        uint256 dailyYield = (dailyFees * 1e18) / liquidity;
-        return dailyYield * 365;
-    }
-
-    function _updateRegistry() internal {
-        if (_registryAddress == address(0)) return;
-        bool isBuy = block.timestamp % 2 == 0;
-        uint256[] memory orders = isBuy ? _pendingBuyOrders : _pendingSellOrders;
-        address tokenAddress = isBuy ? _tokenB : _tokenA;
-        if (orders.length == 0) return;
-        address[] memory tempMakers = new address[](orders.length);
-        uint256 makerCount = 0;
-        for (uint256 i = 0; i < orders.length; i++) {
-            address makerAddress = isBuy ? _buyOrderCores[orders[i]].makerAddress : _sellOrderCores[orders[i]].makerAddress;
-            if (makerAddress != address(0)) {
-                bool exists = false;
-                for (uint256 j = 0; j < makerCount; j++) {
-                    if (tempMakers[j] == makerAddress) {
-                        exists = true;
-                        break;
-                    }
-                }
-                if (!exists) {
-                    tempMakers[makerCount++] = makerAddress;
-                }
-            }
-        }
-        address[] memory makers = new address[](makerCount);
-        for (uint256 i = 0; i < makerCount; i++) {
-            makers[i] = tempMakers[i];
-        }
-        uint256 gasBefore = gasleft();
-        ITokenRegistry(_registryAddress).initializeBalances{gas: 500000}(tokenAddress, makers);
-        uint256 gasUsed = gasBefore - gasleft();
-        if (gasUsed > 500000) {
-            revert("Registry call out of gas");
-        }
-    }
-
+    // Sets router addresses, callable once
     function setRouters(address[] memory routers_) external {
         require(!_routersSet, "Routers already set");
         require(routers_.length > 0, "No routers provided");
@@ -302,17 +201,20 @@ contract CCListingTemplate {
         _routersSet = true;
     }
 
+    // Sets listing ID, callable once
     function setListingId(uint256 listingId_) external {
         require(_listingId == 0, "Listing ID already set");
         _listingId = listingId_;
     }
 
+    // Sets liquidity address, callable once
     function setLiquidityAddress(address liquidityAddress_) external {
         require(_liquidityAddress == address(0), "Liquidity already set");
         require(liquidityAddress_ != address(0), "Invalid liquidity address");
         _liquidityAddress = liquidityAddress_;
     }
 
+    // Sets token addresses, callable once
     function setTokens(address tokenA_, address tokenB_) external {
         require(_tokenA == address(0) && _tokenB == address(0), "Tokens already set");
         require(tokenA_ != tokenB_, "Tokens must be different");
@@ -323,103 +225,42 @@ contract CCListingTemplate {
         _decimalsB = tokenB_ == address(0) ? 18 : IERC20(tokenB_).decimals();
     }
 
+    // Sets agent address, callable once
     function setAgent(address agent_) external {
         require(_agent == address(0), "Agent already set");
         require(agent_ != address(0), "Invalid agent address");
         _agent = agent_;
     }
 
+    // Sets registry address, callable once
     function setRegistry(address registryAddress_) external {
         require(_registryAddress == address(0), "Registry already set");
         require(registryAddress_ != address(0), "Invalid registry address");
         _registryAddress = registryAddress_;
     }
 
-    function agentView() external view returns (address) {
-        return _agent;
-    }
-
-    function globalizeUpdate() internal {
-        if (_agent == address(0)) return;
-        uint256 gasLimit = 1000000;
-        for (uint256 i = 0; i < _pendingBuyOrders.length; i++) {
-            uint256 orderId = _pendingBuyOrders[i];
-            BuyOrderCore memory order = _buyOrderCores[orderId];
-            BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
-            if (order.status == 1 || order.status == 2) {
-                uint256 gasBefore = gasleft();
-                ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
-                    _listingId,
-                    _tokenA,
-                    _tokenB,
-                    orderId,
-                    true,
-                    order.makerAddress,
-                    order.recipientAddress,
-                    amounts.pending,
-                    order.status
-                );
-                uint256 gasUsed = gasBefore - gasleft();
-                if (gasUsed > gasLimit) {
-                    revert("Globalize buy order call out of gas");
-                }
-            }
-        }
-        for (uint256 i = 0; i < _pendingSellOrders.length; i++) {
-            uint256 orderId = _pendingSellOrders[i];
-            SellOrderCore memory order = _sellOrderCores[orderId];
-            SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
-            if (order.status == 1 || order.status == 2) {
-                uint256 gasBefore = gasleft();
-                ICCAgent(_agent).globalizeOrders{gas: gasLimit}(
-                    _listingId,
-                    _tokenA,
-                    _tokenB,
-                    orderId,
-                    false,
-                    order.makerAddress,
-                    order.recipientAddress,
-                    amounts.pending,
-                    order.status
-                );
-                uint256 gasUsed = gasBefore - gasleft();
-                if (gasUsed > gasLimit) {
-                    revert("Globalize sell order call out of gas");
-                }
-            }
-        }
-    }
-
-    function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
-        for (uint256 i = 0; i < orders.length; i++) {
-            if (orders[i] == orderId) {
-                orders[i] = orders[orders.length - 1];
-                orders.pop();
-                break;
-            }
-        }
-    }
-
+    // Updates balances, orders, or historical data, restricted to routers
     function update(UpdateType[] memory updates) external {
         require(_routers[msg.sender], "Router only");
         VolumeBalance storage balances = _volumeBalance;
         bool volumeUpdated = false;
+        address maker = address(0);
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0 && (u.index == 2 || u.index == 3)) {
                 volumeUpdated = true;
-                break;
             } else if (u.updateType == 1 && u.structId == 2 && u.value > 0) {
                 volumeUpdated = true;
-                break;
             } else if (u.updateType == 2 && u.structId == 2 && u.value > 0) {
                 volumeUpdated = true;
-                break;
+            }
+            if (u.updateType == 1 || u.updateType == 2) {
+                maker = u.addr; // Track maker for globalizeUpdate
             }
         }
         if (volumeUpdated && (_lastDayFee.timestamp == 0 || block.timestamp >= _lastDayFee.timestamp + 86400)) {
-            _lastDayFee.xFees = _volumeBalance.xVolume;
-            _lastDayFee.yFees = _volumeBalance.yVolume;
+            _lastDayFee.xFees = balances.xVolume;
+            _lastDayFee.yFees = balances.yVolume;
             _lastDayFee.timestamp = _floorToMidnight(block.timestamp);
         }
         for (uint256 i = 0; i < updates.length; i++) {
@@ -516,278 +357,504 @@ contract CCListingTemplate {
                     }
                 }
             } else if (u.updateType == 3) {
-                (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
-                uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
-                uint256 reserveB = _tokenB == IUniswapV2Pair(_uniswapV2Pair).token1() ? reserve1 : reserve0;
-                uint256 normalizedReserveA = normalize(reserveA, _decimalsA);
-                uint256 normalizedReserveB = normalize(reserveB, _decimalsB);
-                _historicalData.push(HistoricalData(
-                    normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0,
-                    u.maxPrice >> 128, u.maxPrice & ((1 << 128) - 1),
-                    u.minPrice >> 128, u.minPrice & ((1 << 128) - 1),
-                    block.timestamp
-                ));
+                HistoricalData memory data;
+                data.price = u.value;
+                data.xBalance = balances.xBalance;
+                data.yBalance = balances.yBalance;
+                data.xVolume = balances.xVolume;
+                data.yVolume = balances.yVolume;
+                data.timestamp = block.timestamp;
+                _historicalData.push(data);
             }
         }
-        if (_uniswapV2Pair != address(0)) {
-            (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
-            uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
-            uint256 reserveB = _tokenB == IUniswapV2Pair(_uniswapV2Pair).token1() ? reserve1 : reserve0;
-            uint256 normalizedReserveA = normalize(reserveA, _decimalsA);
-            uint256 normalizedReserveB = normalize(reserveB, _decimalsB);
-            _currentPrice = normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0;
+        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
+            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
+            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
+            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
+            _currentPrice = reserveB == 0 ? 0 : (reserveA * 1e18) / reserveB;
+        } catch {
+            // Silent failure, keep _currentPrice unchanged
         }
+        _updateRegistry();
         emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
-        globalizeUpdate();
+        if (maker != address(0)) {
+            globalizeUpdate(maker);
+        }
     }
 
-    function ssUpdate(PayoutUpdate[] memory payoutUpdates) external {
+    // Processes payout updates, restricted to routers
+    function ssUpdate(ICCListing.PayoutUpdate[] memory payoutUpdates) external override {
         require(_routers[msg.sender], "Router only");
         for (uint256 i = 0; i < payoutUpdates.length; i++) {
-            PayoutUpdate memory p = payoutUpdates[i];
-            uint256 orderId = _nextOrderId;
+            ICCListing.PayoutUpdate memory p = payoutUpdates[i];
             if (p.payoutType == 0) {
-                LongPayoutStruct storage payout = _longPayouts[orderId];
-                payout.makerAddress = msg.sender;
+                LongPayoutStruct storage payout = _longPayouts[_nextOrderId];
+                payout.makerAddress = p.recipient;
                 payout.recipientAddress = p.recipient;
                 payout.required = p.required;
-                payout.filled = 0;
-                payout.orderId = orderId;
-                payout.status = 0;
-                _longPayoutsByIndex.push(orderId);
-                _userPayoutIDs[p.recipient].push(orderId);
-                emit PayoutOrderCreated(orderId, true, 0);
+                payout.orderId = _nextOrderId;
+                payout.status = 1;
+                _longPayoutsByIndex.push(_nextOrderId);
+                _userPayoutIDs[p.recipient].push(_nextOrderId);
+                emit PayoutOrderCreated(_nextOrderId, true, 1);
+                _nextOrderId++;
             } else if (p.payoutType == 1) {
-                ShortPayoutStruct storage payout = _shortPayouts[orderId];
-                payout.makerAddress = msg.sender;
+                ShortPayoutStruct storage payout = _shortPayouts[_nextOrderId];
+                payout.makerAddress = p.recipient;
                 payout.recipientAddress = p.recipient;
                 payout.amount = p.required;
-                payout.filled = 0;
-                payout.orderId = orderId;
-                payout.status = 0;
-                _shortPayoutsByIndex.push(orderId);
-                _userPayoutIDs[p.recipient].push(orderId);
-                emit PayoutOrderCreated(orderId, false, 0);
-            } else {
-                revert("Invalid payout type");
+                payout.orderId = _nextOrderId;
+                payout.status = 1;
+                _shortPayoutsByIndex.push(_nextOrderId);
+                _userPayoutIDs[p.recipient].push(_nextOrderId);
+                emit PayoutOrderCreated(_nextOrderId, false, 1);
+                _nextOrderId++;
             }
-            _nextOrderId = orderId + 1;
         }
     }
 
+    // Transfers ERC20 tokens, restricted to routers
     function transactToken(address token, uint256 amount, address recipient) external {
         require(_routers[msg.sender], "Router only");
-        require(token != address(0), "Use transactNative for ETH");
         require(token == _tokenA || token == _tokenB, "Invalid token");
-        VolumeBalance storage balances = _volumeBalance;
-        uint8 decimals = IERC20(token).decimals();
+        uint8 decimals = token == _tokenA ? _decimalsA : _decimalsB;
         uint256 normalizedAmount = normalize(amount, decimals);
-        require(balances.xBalance >= normalizedAmount || balances.yBalance >= normalizedAmount, "Insufficient balance");
+        if (token == _tokenA) {
+            _volumeBalance.xBalance += normalizedAmount;
+            _volumeBalance.xVolume += normalizedAmount;
+        } else {
+            _volumeBalance.yBalance += normalizedAmount;
+            _volumeBalance.yVolume += normalizedAmount;
+        }
         if (_lastDayFee.timestamp == 0 || block.timestamp >= _lastDayFee.timestamp + 86400) {
             _lastDayFee.xFees = _volumeBalance.xVolume;
             _lastDayFee.yFees = _volumeBalance.yVolume;
             _lastDayFee.timestamp = _floorToMidnight(block.timestamp);
         }
-        if (token == _tokenA) {
-            balances.xBalance -= normalizedAmount;
-            balances.xVolume += normalizedAmount;
-        } else {
-            balances.yBalance -= normalizedAmount;
-            balances.yVolume += normalizedAmount;
+        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
+            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
+            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
+            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
+            _currentPrice = reserveB == 0 ? 0 : (reserveA * 1e18) / reserveB;
+        } catch {
+            // Silent failure, keep _currentPrice unchanged
         }
-        IERC20(token).transfer(recipient, amount);
-        if (_uniswapV2Pair != address(0)) {
-            (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
-            uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
-            uint256 reserveB = _tokenB == IUniswapV2Pair(_uniswapV2Pair).token1() ? reserve1 : reserve0;
-            uint256 normalizedReserveA = normalize(reserveA, _decimalsA);
-            uint256 normalizedReserveB = normalize(reserveB, _decimalsB);
-            _currentPrice = normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0;
-        }
-        emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
+        require(IERC20(token).transfer(recipient, amount), "Token transfer failed");
         _updateRegistry();
+        emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
     }
 
+    // Transfers native ETH, restricted to routers
     function transactNative(uint256 amount, address recipient) external {
         require(_routers[msg.sender], "Router only");
-        require(_tokenA == address(0) || _tokenB == address(0), "No native token in pair");
-        VolumeBalance storage balances = _volumeBalance;
+        require(_tokenA == address(0) || _tokenB == address(0), "No native token");
         uint256 normalizedAmount = normalize(amount, 18);
-        require(balances.xBalance >= normalizedAmount || balances.yBalance >= normalizedAmount, "Insufficient balance");
+        if (_tokenA == address(0)) {
+            _volumeBalance.xBalance += normalizedAmount;
+            _volumeBalance.xVolume += normalizedAmount;
+        } else {
+            _volumeBalance.yBalance += normalizedAmount;
+            _volumeBalance.yVolume += normalizedAmount;
+        }
         if (_lastDayFee.timestamp == 0 || block.timestamp >= _lastDayFee.timestamp + 86400) {
             _lastDayFee.xFees = _volumeBalance.xVolume;
             _lastDayFee.yFees = _volumeBalance.yVolume;
             _lastDayFee.timestamp = _floorToMidnight(block.timestamp);
         }
-        if (_tokenA == address(0)) {
-            balances.xBalance -= normalizedAmount;
-            balances.xVolume += normalizedAmount;
-        } else {
-            balances.yBalance -= normalizedAmount;
-            balances.yVolume += normalizedAmount;
+        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
+            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
+            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
+            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
+            _currentPrice = reserveB == 0 ? 0 : (reserveA * 1e18) / reserveB;
+        } catch {
+            // Silent failure, keep _currentPrice unchanged
         }
         (bool success, ) = recipient.call{value: amount}("");
-        require(success, "ETH transfer failed");
-        if (_uniswapV2Pair != address(0)) {
-            (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
-            uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
-            uint256 reserveB = _tokenB == IUniswapV2Pair(_uniswapV2Pair).token1() ? reserve1 : reserve0;
-            uint256 normalizedReserveA = normalize(reserveA, _decimalsA);
-            uint256 normalizedReserveB = normalize(reserveB, _decimalsB);
-            _currentPrice = normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0;
-        }
-        emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
+        require(success, "Native transfer failed");
         _updateRegistry();
+        emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
     }
 
-    function uniswapV2PairView() external view returns (address) {
+    // Normalizes amount to 1e18 precision
+    function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
+        else return amount / 10 ** (uint256(decimals) - uint256(18));
+    }
+
+    // Denormalizes amount from 1e18 to token decimals
+    function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        else if (decimals < 18) return amount / 10 ** (uint256(18) - uint256(decimals));
+        else return amount * 10 ** (uint256(decimals) - uint256(18));
+    }
+
+    // Checks if two timestamps are on the same day
+    function _isSameDay(uint256 time1, uint256 time2) internal pure returns (bool) {
+        uint256 midnight1 = time1 - (time1 % 86400);
+        uint256 midnight2 = time2 - (time2 % 86400);
+        return midnight1 == midnight2;
+    }
+
+    // Rounds timestamp to midnight
+    function _floorToMidnight(uint256 timestamp) internal pure returns (uint256) {
+        return timestamp - (timestamp % 86400);
+    }
+
+    // Calculates volume change since startTime
+    function _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) internal view returns (uint256) {
+        uint256 currentVolume = isA ? _volumeBalance.xVolume : _volumeBalance.yVolume;
+        uint256 iterationsLeft = maxIterations;
+        if (_historicalData.length == 0) return 0;
+        for (uint256 i = _historicalData.length; i > 0 && iterationsLeft > 0; i--) {
+            HistoricalData memory data = _historicalData[i - 1];
+            iterationsLeft--;
+            if (data.timestamp >= startTime) {
+                return currentVolume - (isA ? data.xVolume : data.yVolume);
+            }
+        }
+        if (iterationsLeft == 0 || _historicalData.length <= maxIterations) {
+            HistoricalData memory earliest = _historicalData[0];
+            return currentVolume - (isA ? earliest.xVolume : earliest.yVolume);
+        }
+        return 0;
+    }
+
+    // Updates token registry with maker balances
+    function _updateRegistry() internal {
+        if (_registryAddress == address(0)) return;
+        bool isBuy = block.timestamp % 2 == 0;
+        uint256[] memory orders = isBuy ? _pendingBuyOrders : _pendingSellOrders;
+        address tokenAddress = isBuy ? _tokenB : _tokenA;
+        if (orders.length == 0) return;
+        address[] memory tempMakers = new address[](orders.length);
+        uint256 makerCount = 0;
+        for (uint256 i = 0; i < orders.length; i++) {
+            address makerAddress = isBuy ? _buyOrderCores[orders[i]].makerAddress : _sellOrderCores[orders[i]].makerAddress;
+            if (makerAddress != address(0)) {
+                bool exists = false;
+                for (uint256 j = 0; j < makerCount; j++) {
+                    if (tempMakers[j] == makerAddress) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    tempMakers[makerCount++] = makerAddress;
+                }
+            }
+        }
+        address[] memory makers = new address[](makerCount);
+        for (uint256 i = 0; i < makerCount; i++) {
+            makers[i] = tempMakers[i];
+        }
+        uint256 gasBefore = gasleft();
+        ITokenRegistry(_registryAddress).initializeBalances{gas: 500000}(tokenAddress, makers);
+        uint256 gasUsed = gasBefore - gasleft();
+        if (gasUsed > 500000) {
+            revert("Registry call out of gas");
+        }
+    }
+
+    // Removes order ID from array
+    function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
+        for (uint256 i = 0; i < orders.length; i++) {
+            if (orders[i] == orderId) {
+                orders[i] = orders[orders.length - 1];
+                orders.pop();
+                break;
+            }
+        }
+    }
+
+    // Calls globalizeOrders on the globalizer contract
+    function globalizeUpdate(address maker) internal {
+        if (_globalizerAddress == address(0)) return;
+        uint256 gasBefore = gasleft();
+        try ICCGlobalizer(_globalizerAddress).globalizeOrders(maker, address(this)) {
+            // Success
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Globalizer call failed: ", reason)));
+        }
+        if (gasleft() < gasBefore / 10) {
+            revert("Globalizer call gas usage too high");
+        }
+    }
+
+    // Calculates annualized yield from fees
+    function queryYield(bool isA, uint256 maxIterations) external view returns (uint256) {
+        require(maxIterations > 0, "Invalid maxIterations");
+        if (_lastDayFee.timestamp == 0 || _historicalData.length == 0 || !_isSameDay(block.timestamp, _lastDayFee.timestamp)) {
+            return 0;
+        }
+        uint256 feeDifference = isA ? _volumeBalance.xVolume - _lastDayFee.xFees : _volumeBalance.yVolume - _lastDayFee.yFees;
+        if (feeDifference == 0) return 0;
+        uint256 liquidity = 0;
+        try ICCLiquidityTemplate(_liquidityAddress).liquidityAmounts() returns (uint256 xLiquid, uint256 yLiquid) {
+            liquidity = isA ? xLiquid : yLiquid;
+        } catch {
+            return 0;
+        }
+        if (liquidity == 0) return 0;
+        uint256 dailyFees = (feeDifference * 5) / 10000; // 0.05% fee
+        uint256 dailyYield = (dailyFees * 1e18) / liquidity;
+        return dailyYield * 365;
+    }
+
+    // Returns agent address
+    function agentView() external view returns (address agent) {
+        return _agent;
+    }
+
+    // Returns Uniswap V2 pair address
+    function uniswapV2PairView() external view returns (address pair) {
         return _uniswapV2Pair;
     }
 
-    function prices(uint256) external view returns (uint256) {
-        if (_uniswapV2Pair == address(0)) return 0;
-        (uint256 reserve0, uint256 reserve1, ) = IUniswapV2Pair(_uniswapV2Pair).getReserves();
-        uint256 reserveA = _tokenA == IUniswapV2Pair(_uniswapV2Pair).token0() ? reserve0 : reserve1;
-        uint256 reserveB = _tokenB == IUniswapV2Pair(_uniswapV2Pair).token1() ? reserve1 : reserve0;
-        uint256 normalizedReserveA = normalize(reserveA, _decimalsA);
-        uint256 normalizedReserveB = normalize(reserveB, _decimalsB);
-        return normalizedReserveA > 0 && normalizedReserveB > 0 ? (normalizedReserveA * 1e18) / normalizedReserveB : 0;
+    // Computes current price from Uniswap V2 reserves
+    function prices(uint256) external view returns (uint256 price) {
+        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
+            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
+            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
+            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
+            return reserveB == 0 ? 0 : (reserveA * 1e18) / reserveB;
+        } catch {
+            return _currentPrice;
+        }
     }
 
+    // Returns token pair
     function getTokens() external view returns (address tokenA, address tokenB) {
-        address fetchedTokenA = _tokenA;
-        address fetchedTokenB = _tokenB;
-        require(fetchedTokenA != address(0) || fetchedTokenB != address(0), "No valid tokens set");
-        return (fetchedTokenA, fetchedTokenB);
+        require(_tokenA != address(0) || _tokenB != address(0), "Tokens not set");
+        return (_tokenA, _tokenB);
     }
 
+    // Returns volume balances
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
         return (_volumeBalance.xBalance, _volumeBalance.yBalance);
     }
 
-    function liquidityAddressView() external view returns (address) {
+    // Returns liquidity address
+    function liquidityAddressView() external view returns (address liquidityAddress) {
         return _liquidityAddress;
     }
 
-    function tokenA() external view returns (address) {
+    // Returns tokenA address
+    function tokenA() external view returns (address token) {
         return _tokenA;
     }
 
-    function tokenB() external view returns (address) {
+    // Returns tokenB address
+    function tokenB() external view returns (address token) {
         return _tokenB;
     }
 
-    function decimalsA() external view returns (uint8) {
+    // Returns decimalsA
+    function decimalsA() external view returns (uint8 decimals) {
         return _decimalsA;
     }
 
-    function decimalsB() external view returns (uint8) {
+    // Returns decimalsB
+    function decimalsB() external view returns (uint8 decimals) {
         return _decimalsB;
     }
 
-    function getListingId() external view returns (uint256) {
+    // Returns listing ID
+    function getListingId() external view returns (uint256 listingId) {
         return _listingId;
     }
 
-    function getNextOrderId() external view returns (uint256) {
+    // Returns next order ID
+    function getNextOrderId() external view returns (uint256 nextOrderId) {
         return _nextOrderId;
     }
 
+    // Returns volume balance details
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
         return (_volumeBalance.xBalance, _volumeBalance.yBalance, _volumeBalance.xVolume, _volumeBalance.yVolume);
     }
 
-    function listingPriceView() external view returns (uint256) {
+    // Returns current price
+    function listingPriceView() external view returns (uint256 price) {
         return _currentPrice;
     }
 
-    function pendingBuyOrdersView() external view returns (uint256[] memory) {
+    // Returns pending buy order IDs
+    function pendingBuyOrdersView() external view returns (uint256[] memory orderIds) {
         return _pendingBuyOrders;
     }
 
-    function pendingSellOrdersView() external view returns (uint256[] memory) {
+    // Returns pending sell order IDs
+    function pendingSellOrdersView() external view returns (uint256[] memory orderIds) {
         return _pendingSellOrders;
     }
 
-    function makerPendingOrdersView(address maker) external view returns (uint256[] memory) {
+    // Returns all order IDs for a maker
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory orderIds) {
         return _makerPendingOrders[maker];
     }
 
-    function longPayoutByIndexView() external view returns (uint256[] memory) {
+    // Returns long payout IDs
+    function longPayoutByIndexView() external view returns (uint256[] memory orderIds) {
         return _longPayoutsByIndex;
     }
 
-    function shortPayoutByIndexView() external view returns (uint256[] memory) {
+    // Returns short payout IDs
+    function shortPayoutByIndexView() external view returns (uint256[] memory orderIds) {
         return _shortPayoutsByIndex;
     }
 
-    function userPayoutIDsView(address user) external view returns (uint256[] memory) {
+    // Returns payout IDs for a user
+    function userPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
         return _userPayoutIDs[user];
     }
 
-    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory) {
+    // Returns long payout details
+    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory payout) {
         return _longPayouts[orderId];
     }
 
-    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory) {
+    // Returns short payout details
+    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory payout) {
         return _shortPayouts[orderId];
     }
 
+    // Returns buy order core details
     function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
         BuyOrderCore memory core = _buyOrderCores[orderId];
         return (core.makerAddress, core.recipientAddress, core.status);
     }
 
+    // Returns buy order pricing details
     function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
         BuyOrderPricing memory pricing = _buyOrderPricings[orderId];
         return (pricing.maxPrice, pricing.minPrice);
     }
 
+    // Returns buy order amounts
     function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
         BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
         return (amounts.pending, amounts.filled, amounts.amountSent);
     }
 
+    // Returns sell order core details
     function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
         SellOrderCore memory core = _sellOrderCores[orderId];
         return (core.makerAddress, core.recipientAddress, core.status);
     }
 
+    // Returns sell order pricing details
     function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
         SellOrderPricing memory pricing = _sellOrderPricings[orderId];
         return (pricing.maxPrice, pricing.minPrice);
     }
 
+    // Returns sell order amounts
     function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
         SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
         return (amounts.pending, amounts.filled, amounts.amountSent);
     }
 
-    function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory) {
+    // Returns historical data at index
+    function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data) {
         require(index < _historicalData.length, "Invalid index");
         return _historicalData[index];
     }
 
-    function historicalDataLengthView() external view returns (uint256) {
+    // Returns historical data length
+    function historicalDataLengthView() external view returns (uint256 length) {
         return _historicalData.length;
     }
 
-    function getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) external view returns (HistoricalData memory) {
-        require(_historicalData.length > 0, "No historical data");
+    // Returns historical data closest to target timestamp
+    function getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) external view returns (HistoricalData memory data) {
+        if (_historicalData.length == 0) return HistoricalData(0, 0, 0, 0, 0, 0);
         uint256 minDiff = type(uint256).max;
         uint256 closestIndex = 0;
         for (uint256 i = 0; i < _historicalData.length; i++) {
-            uint256 diff;
-            if (targetTimestamp >= _historicalData[i].timestamp) {
-                diff = targetTimestamp - _historicalData[i].timestamp;
-            } else {
-                diff = _historicalData[i].timestamp - targetTimestamp;
-            }
+            uint256 diff = targetTimestamp > _historicalData[i].timestamp
+                ? targetTimestamp - _historicalData[i].timestamp
+                : _historicalData[i].timestamp - targetTimestamp;
             if (diff < minDiff) {
                 minDiff = diff;
                 closestIndex = i;
             }
         }
         return _historicalData[closestIndex];
+    }
+
+    // Returns globalizer address
+    function globalizerAddressView() external view returns (address globalizerAddress) {
+        return _globalizerAddress;
+    }
+
+    // Returns up to maxIterations pending buy order IDs for a maker, starting from step
+    function makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
+        uint256[] memory allOrders = _makerPendingOrders[maker];
+        uint256 count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (_buyOrderCores[allOrders[i]].makerAddress == maker && _buyOrderCores[allOrders[i]].status == 1) {
+                count++;
+            }
+        }
+        orderIds = new uint256[](count);
+        count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (_buyOrderCores[allOrders[i]].makerAddress == maker && _buyOrderCores[allOrders[i]].status == 1) {
+                orderIds[count++] = allOrders[i];
+            }
+        }
+    }
+
+    // Returns up to maxIterations pending sell order IDs for a maker, starting from step
+    function makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
+        uint256[] memory allOrders = _makerPendingOrders[maker];
+        uint256 count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (_sellOrderCores[allOrders[i]].makerAddress == maker && _sellOrderCores[allOrders[i]].status == 1) {
+                count++;
+            }
+        }
+        orderIds = new uint256[](count);
+        count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (_sellOrderCores[allOrders[i]].makerAddress == maker && _sellOrderCores[allOrders[i]].status == 1) {
+                orderIds[count++] = allOrders[i];
+            }
+        }
+    }
+
+    // Returns full buy order details
+    function getFullBuyOrderDetails(uint256 orderId) external view returns (
+        BuyOrderCore memory core,
+        BuyOrderPricing memory pricing,
+        BuyOrderAmounts memory amounts
+    ) {
+        core = _buyOrderCores[orderId];
+        pricing = _buyOrderPricings[orderId];
+        amounts = _buyOrderAmounts[orderId];
+    }
+
+    // Returns full sell order details
+    function getFullSellOrderDetails(uint256 orderId) external view returns (
+        SellOrderCore memory core,
+        SellOrderPricing memory pricing,
+        SellOrderAmounts memory amounts
+    ) {
+        core = _sellOrderCores[orderId];
+        pricing = _sellOrderPricings[orderId];
+        amounts = _sellOrderAmounts[orderId];
+    }
+
+    // Returns up to maxIterations order IDs for a maker, starting from step
+    function makerOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
+        uint256[] memory allOrders = _makerPendingOrders[maker];
+        uint256 length = allOrders.length;
+        if (step >= length) return new uint256[](0);
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        orderIds = new uint256[](limit);
+        for (uint256 i = 0; i < limit; i++) {
+            orderIds[i] = allOrders[step + i];
+        }
     }
 }
