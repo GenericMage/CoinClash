@@ -5,11 +5,11 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.5 (updated 2025-07-31)
+**Version:** 0.0.6 (updated 2025-08-03)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
 
-**Compatibility:** CCListingTemplate.sol (v0.0.10), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.11), CCLiquidPartial.sol (v0.0.8), CCLiquidityRouter.sol (v0.0.16).
+**Compatibility:** CCListingTemplate.sol (v0.0.10), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.11), CCLiquidPartial.sol (v0.0.9), CCLiquidityRouter.sol (v0.0.25), CCLiquidityTemplate.sol (v0.1.0).
 
 ## Mappings
 - None defined directly in `CCLiquidRouter`. Relies on `ICCListing` view functions (e.g., `pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -74,12 +74,11 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
   - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `BuyOrderUpdateContext`, `ICCListing.UpdateType`, `SwapImpactContext`.
 - **Interactions**:
   - **ICCListing**: Calls `pendingBuyOrdersView`, `getBuyOrderAmounts`, `getBuyOrderPricing`, `transactNative`, `transactToken`, `update`.
-  - **ICCLiquidity**: Calls `isRouter`, `liquidityAmounts`, `updateLiquidity` (with `depositor = address(this)`).
+  - **ICCLiquidity**: Calls `liquidityAmounts`, `updateLiquidity` (with `depositor = address(this)`).
   - **IERC20**: Checks balances for token transfers.
   - **IUniswapV2Pair**: Fetches reserves via `getReserves`.
 - **Restrictions**:
   - Protected by `nonReentrant`, `onlyValidListing`.
-  - Requires `liquidityContract.isRouter(address(this))`.
   - Reverts if pricing invalid, transfers fail, liquidity insufficient, or price impact exceeds bounds (`"Invalid pricing"`, `"No amount sent from listing"`, `"No amount received by liquidity"`, `"Zero reserves"`).
 - **Gas Usage Controls**: Uses `maxIterations`, resizes `tempUpdates` to `finalUpdates` dynamically.
 
@@ -107,7 +106,7 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
   - **Structs**: `OrderContext`, `PrepOrderUpdateResult`, `SellOrderUpdateContext`, `ICCListing.UpdateType`, `SwapImpactContext`.
 - **Interactions**:
   - **ICCListing**: Calls `pendingSellOrdersView`, `getSellOrderAmounts`, `getSellOrderPricing`, `transactNative`, `transactToken`, `update`.
-  - **ICCLiquidity**: Calls `isRouter`, `liquidityAmounts`, `updateLiquidity` (with `depositor = address(this)`).
+  - **ICCLiquidity**: Calls `liquidityAmounts`, `updateLiquidity` (with `depositor = address(this)`).
   - **IERC20**: Checks balances for token transfers.
   - **IUniswapV2Pair**: Fetches reserves via `getReserves`.
 - **Restrictions**: Same as `settleBuyLiquid`.
@@ -131,7 +130,7 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
 
 ### ICCLiquidity Integration
 - **Liquid Settlement Process**: `settleBuyLiquid` and `settleSellLiquid` transfer principal (tokenB for buy, tokenA for sell) from listing to `ICCLiquidity` via `_checkAndTransferPrincipal`, update liquidity via `_updateLiquidity` (calling `ICCLiquidity.updateLiquidity` with `depositor = address(this)`), transfer output tokens (tokenA for buy, tokenB for sell) to recipients via listing contract, and call `listingContract.update` with `depositor = address(this)`.
-- **Router Registration**: Requires `liquidityContract.isRouter(address(this))` to be true, checked in `_prepareLiquidityTransaction`.
+- **Router Registration**: Router validation is handled by `CCLiquidityTemplate.sol` via the `routers` mapping in functions like `update`, `transactToken`, `transactNative`, ensuring only authorized routers can call these functions.
 - **Depositor Usage**: `depositor` is set to `address(this)` in `ICCLiquidity` calls (`updateLiquidity`, `transactToken`, `transactNative`), aligning with `ICCLiquidity.sol` (v0.0.4) updates replacing `caller` with `depositor` for consistency.
 - **Balance Checks**: Pre/post balance checks in `_checkAndTransferPrincipal`, `_prepBuy/SellOrderUpdate`, `_prepBuy/SellLiquidUpdates` handle fee-on-transfer tokens and ETH.
 
@@ -158,7 +157,6 @@ The formulas govern liquid settlement calculations in `CCLiquidPartial.sol` and 
 - **Reentrancy Protection**: `nonReentrant` on `settleBuyLiquid`, `settleSellLiquid`.
 - **Listing Validation**: `onlyValidListing` checks `ICCAgent.getListing` in `checkValidListing`.
 - **Safe Transfers**: Uses `IERC20` from `CCMainPartial` with pre/post balance checks in `_checkAndTransferPrincipal`, `_prepBuy/SellOrderUpdate`.
-- **Router Validation**: Requires `liquidityContract.isRouter(address(this))` in `_prepareLiquidityTransaction`.
 - **Safety**:
   - Explicit casting for interfaces (`ICCListing`, `ICCLiquidity`, `IERC20`, `IUniswapV2Pair`).
   - No inline assembly, per style guide.
