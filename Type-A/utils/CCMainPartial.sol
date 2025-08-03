@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11
+// Version: 0.0.13
 // Changes:
-// - v0.0.11: Modified onlyValidListing modifier to use CCAgent.isValidListing instead of checkValidListing, allowing interaction with old listings after a relist, as isValidListing checks allListings array. Added ListingDetails struct to ICCAgent interface to resolve DeclarationError.
-// - v0.0.10: Updated ICCListing and ICCLiquidity interfaces to match ICCListing.sol v0.0.7 and ICCLiquidity.sol v0.0.4. Replaced 'caller' with 'depositor' in ICCLiquidity, removed 'caller' from ICCListing's update, ssUpdate, transactToken, transactNative. Added isRouter and routerAddressesView to ICCLiquidity.
-// - v0.0.9: Updated ICCListing interface to remove uint256 parameter from liquidityAddressView for compatibility with CCListingTemplate.sol v0.0.6.
-// - v0.0.8: Modified checkValidListing to use contract's own agent state variable, removed agentView call.
-// - v0.0.7: Removed SafeERC20, imported IERC20 from ../imports/.
-// - v0.0.6: Updated ICCListing's transactNative to payable.
-// - v0.0.5: Updated ICCLiquidityTemplate, split transact/deposit, updated Slot timestamp to uint256.
-// - v0.0.4: Integrated uniswapV2Router state variable and setters.
-// - v0.0.3: Fixed DeclarationError in checkValidListing.
-// - v0.0.2: Fixed TypeError in checkValidListing.
-// - v0.0.1: Inlined ICCListing, split transact into token/native.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCOrderRouter.sol (v0.0.11), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol (v0.0.4), CCLiquidityRouter.sol (v0.0.16), CCAgent.sol (v0.1.2).
+// - v0.0.13: Added nextXSlotIDView and nextYSlotIDView to ICCLiquidity interface for CCLiquidityTemplate.sol v0.1.1 compatibility. Updated compatibility comments.
+// - v0.0.12: Added userXIndexView and userYIndexView to ICCLiquidity interface.
+// - v0.0.11: Modified onlyValidListing modifier to use CCAgent.isValidListing.
+// Compatible with CCListingTemplate.sol (v0.1.0), CCOrderRouter.sol (v0.0.11), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol (v0.0.5), CCLiquidityRouter.sol (v0.0.27), CCAgent.sol (v0.1.2), CCLiquidityTemplate.sol (v0.1.1).
 
 import "../imports/IERC20.sol";
 import "../imports/ReentrancyGuard.sol";
@@ -137,9 +129,12 @@ interface ICCLiquidity {
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory);
     function activeYLiquiditySlotsView() external view returns (uint256[] memory);
-    function userIndexView(address user) external view returns (uint256[] memory);
+    function userXIndexView(address user) external view returns (uint256[] memory);
+    function userYIndexView(address user) external view returns (uint256[] memory);
     function getXSlotView(uint256 index) external view returns (Slot memory);
     function getYSlotView(uint256 index) external view returns (Slot memory);
+    function nextXSlotIDView() external view returns (uint256);
+    function nextYSlotIDView() external view returns (uint256);
 }
 
 interface ICCAgent {

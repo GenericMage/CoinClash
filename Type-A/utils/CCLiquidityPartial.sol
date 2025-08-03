@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.19
+// Version: 0.0.21
 // Changes:
-// - v0.0.19: Removed pool check (xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0) in _validateDeposit to allow deposits in any pool state. Updated compatibility comments.
-// - v0.0.18: Removed redundant isRouter checks in _validateDeposit, _prepWithdrawal, _executeWithdrawal, _validateFeeClaim, as CCLiquidityTemplate validates routers[msg.sender]. Updated _executeTokenTransfer to use receivedAmount for transfer and balance checks, handling tax-on-transfer tokens.
-// - v0.0.17: Removed listingId from FeeClaimContext and FeesClaimed event, updated _validateFeeClaim to remove getListingId call, as it’s unnecessary with onlyValidListing validation.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.0.20).
+// - v0.0.21: Updated _validateDeposit to use nextXSlotIDView/nextYSlotIDView for new slots, userXIndexView/userYIndexView for existing slots. Fixed _depositToken/_depositNative to claim fees for existing slots, reset dFeesAcc, and update allocation correctly. Updated compatibility comments.
+// - v0.0.20: Modified _depositToken and _depositNative to check for existing slot, claim fees, reset dFeesAcc, and update slot allocation if found, else create new slot. Added depositor parameter for third-party deposits.
+// - v0.0.19: Removed pool check in _validateDeposit to allow deposits in any pool state.
+// - v0.0.18: Removed redundant isRouter checks, updated _executeTokenTransfer to use receivedAmount.
+// Compatible with CCListingTemplate.sol (v0.1.0), CCMainPartial.sol (v0.0.12), CCLiquidityRouter.sol (v0.0.27), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.1.1).
 
 import "./CCMainPartial.sol";
 
@@ -52,11 +53,19 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _validateDeposit(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal view returns (DepositContext memory) {
+        // Validates deposit, assigns index from userX/YIndexView for existing slots or nextX/YSlotIDView for new slots
         ICCListing listingContract = ICCListing(listingAddress);
         address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
+        uint256 index;
+        uint256[] memory userIndices = isTokenA ? liquidityContract.userXIndexView(depositor) : liquidityContract.userYIndexView(depositor);
+        if (userIndices.length > 0) {
+            index = userIndices[0]; // Use first existing slot
+        } else {
+            index = isTokenA ? liquidityContract.nextXSlotIDView() : liquidityContract.nextYSlotIDView(); // New slot ID
+        }
         return DepositContext({
             listingAddress: listingAddress,
             depositor: depositor,
@@ -68,18 +77,19 @@ contract CCLiquidityPartial is CCMainPartial {
             yAmount: yAmount,
             receivedAmount: 0,
             normalizedAmount: 0,
-            index: isTokenA ? liquidityContract.activeXLiquiditySlotsView().length : liquidityContract.activeYLiquiditySlotsView().length
+            index: index
         });
     }
 
     function _executeTokenTransfer(DepositContext memory context) internal returns (DepositContext memory) {
+        // Executes ERC20 token transfer with pre/post balance checks
         require(context.tokenAddress != address(0), "Use depositNative for ETH");
-        uint256 allowance = IERC20(context.tokenAddress).allowance(context.depositor, address(this));
-        if (allowance < context.inputAmount) revert InsufficientAllowance(context.depositor, context.tokenAddress, context.inputAmount, allowance);
+        uint256 allowance = IERC20(context.tokenAddress).allowance(msg.sender, address(this));
+        if (allowance < context.inputAmount) revert InsufficientAllowance(msg.sender, context.tokenAddress, context.inputAmount, allowance);
         uint256 preBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
-        try IERC20(context.tokenAddress).transferFrom(context.depositor, address(this), context.inputAmount) {
+        try IERC20(context.tokenAddress).transferFrom(msg.sender, address(this), context.inputAmount) {
         } catch (bytes memory reason) {
-            emit TransferFailed(context.depositor, context.tokenAddress, context.inputAmount, reason);
+            emit TransferFailed(msg.sender, context.tokenAddress, context.inputAmount, reason);
             revert("TransferFrom failed");
         }
         uint256 postBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
@@ -100,12 +110,13 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _executeNativeTransfer(DepositContext memory context) internal returns (DepositContext memory) {
+        // Executes ETH transfer with pre/post balance checks
         require(context.tokenAddress == address(0), "Use depositToken for ERC20");
         require(context.inputAmount == msg.value, "Incorrect ETH amount");
         uint256 preBalanceTemplate = context.liquidityAddr.balance;
         (bool success, bytes memory reason) = context.liquidityAddr.call{value: context.inputAmount}("");
         if (!success) {
-            emit TransferFailed(context.depositor, address(0), context.inputAmount, reason);
+            emit TransferFailed(msg.sender, address(0), context.inputAmount, reason);
             revert("ETH transfer to liquidity template failed");
         }
         uint256 postBalanceTemplate = context.liquidityAddr.balance;
@@ -116,6 +127,7 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _updateDeposit(DepositContext memory context) internal {
+        // Updates liquidity slot with normalized amount
         ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
         ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
         updates[0] = ICCLiquidity.UpdateType(context.isTokenA ? 2 : 3, context.index, context.normalizedAmount, context.depositor, address(0));
@@ -128,19 +140,60 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _depositToken(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal returns (uint256) {
+        // Handles ERC20 token deposit, claims fees and updates existing slot or creates new
         DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
-        context = _executeTokenTransfer(context);
-        _updateDeposit(context);
+        ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+        uint256[] memory indices = isTokenA ? liquidityContract.userXIndexView(depositor) : liquidityContract.userYIndexView(depositor);
+        if (indices.length > 0) {
+            // Claim fees for existing slot and reset dFeesAcc
+            _processFeeShare(listingAddress, depositor, indices[0], isTokenA);
+            ICCLiquidity.Slot memory slot = isTokenA ? liquidityContract.getXSlotView(indices[0]) : liquidityContract.getYSlotView(indices[0]);
+            context.index = indices[0];
+            context = _executeTokenTransfer(context);
+            context.normalizedAmount += slot.allocation; // Add to existing allocation
+            ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
+            updates[0] = ICCLiquidity.UpdateType(isTokenA ? 2 : 3, context.index, context.normalizedAmount, context.depositor, address(0));
+            try liquidityContract.update(context.depositor, updates) {
+            } catch (bytes memory reason) {
+                emit DepositFailed(context.depositor, context.tokenAddress, context.receivedAmount, string(reason));
+                revert(string(abi.encodePacked("Deposit update failed: ", reason)));
+            }
+            emit DepositReceived(context.depositor, context.tokenAddress, context.receivedAmount, context.normalizedAmount);
+        } else {
+            context = _executeTokenTransfer(context);
+            _updateDeposit(context);
+        }
         return context.receivedAmount;
     }
 
     function _depositNative(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal {
+        // Handles ETH deposit, claims fees and updates existing slot or creates new
         DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
-        context = _executeNativeTransfer(context);
-        _updateDeposit(context);
+        ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+        uint256[] memory indices = isTokenA ? liquidityContract.userXIndexView(depositor) : liquidityContract.userYIndexView(depositor);
+        if (indices.length > 0) {
+            // Claim fees for existing slot and reset dFeesAcc
+            _processFeeShare(listingAddress, depositor, indices[0], isTokenA);
+            ICCLiquidity.Slot memory slot = isTokenA ? liquidityContract.getXSlotView(indices[0]) : liquidityContract.getYSlotView(indices[0]);
+            context.index = indices[0];
+            context = _executeNativeTransfer(context);
+            context.normalizedAmount += slot.allocation; // Add to existing allocation
+            ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
+            updates[0] = ICCLiquidity.UpdateType(isTokenA ? 2 : 3, context.index, context.normalizedAmount, context.depositor, address(0));
+            try liquidityContract.update(context.depositor, updates) {
+            } catch (bytes memory reason) {
+                emit DepositFailed(context.depositor, context.tokenAddress, context.receivedAmount, string(reason));
+                revert(string(abi.encodePacked("Deposit update failed: ", reason)));
+            }
+            emit DepositReceived(context.depositor, context.tokenAddress, context.receivedAmount, context.normalizedAmount);
+        } else {
+            context = _executeNativeTransfer(context);
+            _updateDeposit(context);
+        }
     }
 
     function _prepWithdrawal(address listingAddress, address depositor, uint256 inputAmount, uint256 index, bool isX) internal returns (ICCLiquidity.PreparedWithdrawal memory) {
+        // Prepares withdrawal, calls xPrepOut or yPrepOut
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
@@ -161,6 +214,7 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _executeWithdrawal(address listingAddress, address depositor, uint256 index, bool isX, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
+        // Executes withdrawal, calls xExecuteOut or yExecuteOut
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
@@ -178,6 +232,7 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _validateFeeClaim(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal view returns (FeeClaimContext memory) {
+        // Validates fee claim parameters
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
@@ -210,6 +265,7 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _calculateFeeShare(FeeClaimContext memory context) internal pure returns (FeeClaimContext memory) {
+        // Calculates fee share based on allocation and liquidity
         uint256 contributedFees = context.fees > context.dFeesAcc ? context.fees - context.dFeesAcc : 0;
         uint256 liquidityContribution = context.liquid > 0 ? (context.allocation * 1e18) / context.liquid : 0;
         context.feeShare = (contributedFees * liquidityContribution) / 1e18;
@@ -218,6 +274,7 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _executeFeeClaim(FeeClaimContext memory context) internal {
+        // Executes fee claim, updates fees and slot
         if (context.feeShare == 0) revert("No fees to claim");
         ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
         ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](2);
@@ -244,12 +301,14 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _processFeeShare(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal {
+        // Processes fee share claim
         FeeClaimContext memory context = _validateFeeClaim(listingAddress, depositor, liquidityIndex, isX);
         context = _calculateFeeShare(context);
         _executeFeeClaim(context);
     }
 
     function _changeDepositor(address listingAddress, address depositor, bool isX, uint256 slotIndex, address newDepositor) internal {
+        // Changes slot depositor
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
@@ -259,5 +318,12 @@ contract CCLiquidityPartial is CCMainPartial {
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Depositor change failed: ", reason)));
         }
+    }
+
+    function queryDepositorFees(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) external view onlyValidListing(listingAddress) returns (uint256 feeShare) {
+        // Queries pending fees for a depositor
+        FeeClaimContext memory context = _validateFeeClaim(listingAddress, depositor, liquidityIndex, isX);
+        context = _calculateFeeShare(context);
+        return context.feeShare;
     }
 }

@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.1
 // Changes:
-// - v0.1.0: Updated globalizeUpdate to call globalizeLiquidity on globalizer contract, fetched via ICCListingTemplate.globalizerAddressView.
-// Added placeholder globalizeUpdate function to fetch globalizer address from listingAddress via ICCListingTemplate.globalizerAddressView.
-// Updated ICCAgent interface to remove globalizeLiquidity, retaining only registryAddress. Fixed update function to call registryAddress on ICCAgent(agent) instead of ITokenRegistry(agent).
-// Removed ICCAgent.globalizeLiquidity calls from transactToken and transactNative, added comment that order globalization will be handled by a new globalizer contract. Updated getActiveXLiquiditySlots and getActiveYLiquiditySlots to use maxIterations and manage slot population/depopulation. Removed getListingAddress, liquidityDetailsView, routerAddressesView. Added userXIndexView and userYIndexView. Hid userIndex mapping, using view functions instead.
-// Compatible with CCListingTemplate.sol (v0.1.0), CCLiquidityRouter.sol (v0.1.0),  CCGlobalizer.sol (v0.1.0).
+// - v0.1.1: Added nextXSlotID and nextYSlotID counters to track next available slot IDs for xLiquiditySlots and yLiquiditySlots. Modified update function to use and increment these counters when creating new slots, removing reliance on activeXLiquiditySlots.length and activeYLiquiditySlots.length for new slot IDs.
+// - v0.1.0: Updated globalizeUpdate to call globalizeLiquidity on globalizer contract, fetched via ICCListingTemplate.globalizerAddressView. Added placeholder globalizeUpdate function. Updated ICCAgent interface to remove globalizeLiquidity. Removed ICCAgent.globalizeLiquidity calls from transactToken and transactNative. Updated getActiveXLiquiditySlots and getActiveYLiquiditySlots to use maxIterations. Removed getListingAddress, liquidityDetailsView, routerAddressesView. Added userXIndexView and userYIndexView. Hid userIndex mapping.
+// Compatible with CCListingTemplate.sol (v0.1.0), CCLiquidityRouter.sol (v0.0.26), CCGlobalizer.sol (v0.1.0), CCLiquidityPartial.sol (v0.0.20), CCMainPartial.sol (v0.0.12).
 
 import "../imports/IERC20.sol";
 
@@ -41,6 +39,8 @@ contract CCLiquidityTemplate {
     address public tokenB;
     uint256 public listingId;
     address public agent;
+    uint256 public nextXSlotID; // Tracks next available x slot ID
+    uint256 public nextYSlotID; // Tracks next available y slot ID
 
     struct LiquidityDetails {
         uint256 xLiquid;
@@ -180,8 +180,11 @@ contract CCLiquidityTemplate {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
                     slot.dFeesAcc = details.yFeesAcc;
-                    activeXLiquiditySlots.push(u.index);
-                    userIndex[u.addr].push(u.index);
+                    activeXLiquiditySlots.push(nextXSlotID);
+                    userIndex[u.addr].push(nextXSlotID);
+                    slot.allocation = u.value;
+                    details.xLiquid += u.value;
+                    nextXSlotID = nextXSlotID + 1; // Increment for new x slot
                 } else if (u.addr == address(0)) {
                     slot.depositor = address(0);
                     slot.allocation = 0;
@@ -200,17 +203,21 @@ contract CCLiquidityTemplate {
                             break;
                         }
                     }
+                } else {
+                    slot.allocation = u.value;
+                    details.xLiquid += u.value;
                 }
-                slot.allocation = u.value;
-                details.xLiquid += u.value;
             } else if (u.updateType == 3) {
                 Slot storage slot = yLiquiditySlots[u.index];
                 if (slot.depositor == address(0) && u.addr != address(0)) {
                     slot.depositor = u.addr;
                     slot.timestamp = block.timestamp;
                     slot.dFeesAcc = details.xFeesAcc;
-                    activeYLiquiditySlots.push(u.index);
-                    userIndex[u.addr].push(u.index);
+                    activeYLiquiditySlots.push(nextYSlotID);
+                    userIndex[u.addr].push(nextYSlotID);
+                    slot.allocation = u.value;
+                    details.yLiquid += u.value;
+                    nextYSlotID = nextYSlotID + 1; // Increment for new y slot
                 } else if (u.addr == address(0)) {
                     slot.depositor = address(0);
                     slot.allocation = 0;
@@ -229,9 +236,10 @@ contract CCLiquidityTemplate {
                             break;
                         }
                     }
+                } else {
+                    slot.allocation = u.value;
+                    details.yLiquid += u.value;
                 }
-                slot.allocation = u.value;
-                details.yLiquid += u.value;
             } else revert("Invalid update type");
         }
         if (agent != address(0)) {
