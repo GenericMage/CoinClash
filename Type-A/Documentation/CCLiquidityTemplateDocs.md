@@ -5,13 +5,14 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.0 (Updated 2025-08-02)
+**Version**: 0.1.1 (Updated 2025-08-03)
 
 **Compatibility**:
 - CCListingTemplate.sol (v0.1.0)
-- CCLiquidityRouter.sol (v0.1.0)
-- CCMainPartial.sol (v0.1.0)
+- CCLiquidityRouter.sol (v0.0.26)
+- CCMainPartial.sol (v0.0.12)
 - CCGlobalizer.sol (v0.1.0)
+- CCLiquidityPartial.sol (v0.0.20)
 
 ## Interfaces
 - **IERC20**: Provides `decimals()` for normalization, `transfer(address, uint256)` for token transfers.
@@ -28,6 +29,8 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **`tokenB`**: `address public` - Token B address (ETH if zero).
 - **`listingId`**: `uint256 public` - Listing identifier.
 - **`agent`**: `address public` - Agent contract address.
+- **`nextXSlotID`**: `uint256 public` - Next available x slot ID.
+- **`nextYSlotID`**: `uint256 public` - Next available y slot ID.
 - **`liquidityDetail`**: `LiquidityDetails public` - Stores `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`.
 - **`activeXLiquiditySlots`**: `uint256[] public` - Active xSlot indices.
 - **`activeYLiquiditySlots`**: `uint256[] public` - Active ySlot indices.
@@ -109,8 +112,8 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Gas**: Single write.
 
 ### update(address depositor, UpdateType[] memory updates)
-- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, calls `ITokenRegistry.initializeBalances`, `globalizeUpdate`, emits `LiquidityUpdated`.
-- **Internal**: Processes `updates` for balances, fees, or slots. Adds/removes slot indices. Calls `globalizeUpdate` for globalizer integration.
+- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, increments `nextXSlotID`/`nextYSlotID` for new slots, calls `ITokenRegistry.initializeBalances`, `globalizeUpdate`, emits `LiquidityUpdated`.
+- **Internal**: Processes `updates` for balances, fees, or slots. Uses `nextXSlotID`/`nextYSlotID` for new slot indices, increments after assignment. Removes slot indices on withdrawal. Calls `globalizeUpdate`.
 - **Restrictions**: Router-only (`routers[msg.sender]`).
 - **Gas**: Loop over `updates`, array resizing, external calls (`ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`, `ICCGlobalizer.globalizeLiquidity`, 1,000,000 gas for registry).
 
@@ -196,6 +199,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Reentrancy Protection**: Handled by routers (`CCLiquidityRouter`).
 - **Gas Optimization**: Dynamic arrays, minimal external calls, explicit gas limits (1,000,000 for registry calls).
 - **Token Usage**: xSlots provide token A, claim yFees; ySlots provide token B, claim xFees.
+- **Slot ID Assignment**: `nextXSlotID`/`nextYSlotID` increment for new slots, avoiding array length dependency for overflow resistance.
 - **Events**: `LiquidityUpdated`, `FeesUpdated`, `SlotDepositorChanged`, `UpdateRegistryFailed`, `TransactFailed`.
 - **Safety**:
   - Explicit casting for interfaces.
@@ -207,4 +211,3 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Router Security**: Only `routers[msg.sender]` can call restricted functions.
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
 - **Globalization**: `globalizeUpdate` integrates with `CCGlobalizer.sol` for cross-pool liquidity tracking.
-
