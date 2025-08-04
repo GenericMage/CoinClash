@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.13
+// Version: 0.0.14
 // Changes:
-// - v0.0.13: Added nextXSlotIDView and nextYSlotIDView to ICCLiquidity interface for CCLiquidityTemplate.sol v0.1.1 compatibility. Updated compatibility comments.
+// - v0.0.14: Updated onlyValidListing modifier to use try-catch for ICCAgent.isValidListing, explicitly destructure ListingDetails, and validate non-zero addresses. Added detailed revert reason for debugging. Updated compatibility comments.
+// - v0.0.13: Added nextXSlotIDView and nextYSlotIDView to ICCLiquidity interface for CCLiquidityTemplate.sol v0.1.1 compatibility.
 // - v0.0.12: Added userXIndexView and userYIndexView to ICCLiquidity interface.
 // - v0.0.11: Modified onlyValidListing modifier to use CCAgent.isValidListing.
 // Compatible with CCListingTemplate.sol (v0.1.0), CCOrderRouter.sol (v0.0.11), CCUniPartial.sol (v0.0.7), ICCLiquidity.sol (v0.0.5), CCLiquidityRouter.sol (v0.0.27), CCAgent.sol (v0.1.2), CCLiquidityTemplate.sol (v0.1.1).
@@ -205,10 +206,20 @@ contract CCMainPartial is ReentrancyGuard {
     }
 
     modifier onlyValidListing(address listing) {
-        // Validates listing using CCAgent.isValidListing
+        // Validates listing using ICCAgent.isValidListing with try-catch and detailed validation
         require(agent != address(0), "Contract agent not set");
-        (bool isValid, ) = ICCAgent(agent).isValidListing(listing);
-        require(isValid, "Invalid listing");
+        bool isValid;
+        ICCAgent.ListingDetails memory details;
+        try ICCAgent(agent).isValidListing(listing) returns (bool _isValid, ICCAgent.ListingDetails memory _details) {
+            isValid = _isValid;
+            details = _details;
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Listing validation failed: ", reason)));
+        }
+        require(isValid, "Listing not found in agent registry");
+        require(details.listingAddress == listing, "Listing address mismatch");
+        require(details.liquidityAddress != address(0), "Invalid liquidity address");
+        require(details.tokenA != details.tokenB, "Identical tokens in pair");
         _;
     }
 
