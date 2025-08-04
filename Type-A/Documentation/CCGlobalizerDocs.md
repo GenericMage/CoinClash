@@ -1,11 +1,11 @@
 # CCGlobalizer Documentation
 
 ## Overview
-The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and maker orders across tokens and liquidity pools. It integrates with `CCLiquidityTemplate`, `ICCListingTemplate`, and `ICCAgent` for verification, slot, and order data. It uses `Ownable` for agent setting, employs explicit casting, and ensures gas safety for array operations. Amounts are normalized to 1e18. View functions for makers and tokens return data directly for stack efficiency, while liquidity functions use `maxIterations` and `step` for gas control.
+The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and maker orders across tokens and liquidity pools. It integrates with `CCLiquidityTemplate`, `ICCListingTemplate`, and `ICCAgent` for verification, slot, and order data. It uses `Ownable` for agent setting, employs explicit casting, and ensures gas safety for array operations. Amounts are normalized to 1e18. View functions for makers and tokens return data directly for stack efficiency, while liquidity functions use `maxIterations` and `step` for gas control. Depopulation ensures zeroed-out liquidity entries are removed from mappings and arrays, maintaining efficiency by clearing outdated user-token and user-pool associations.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.5 (Updated 2025-08-03)
+**Version**: 0.1.6 (Updated 2025-08-04)
 
 **Compatibility**:
 - CCLiquidityTemplate.sol (v0.1.0)
@@ -25,23 +25,23 @@ The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and 
 - **`userLiquidityByToken`**: `mapping(address => mapping(address => uint256)) public`  
   - **Parameters**: `token` (address), `user` (address)  
   - **Returns**: `uint256` (liquidity amount for user’s token)  
-  - **Usage**: Tracks liquidity per user for a token across pools.
+  - **Usage**: Tracks liquidity per user for a token across pools, depopulated when liquidity is zero.
 - **`userLiquidityByPool`**: `mapping(address => mapping(address => uint256)) public`  
   - **Parameters**: `user` (address), `liquidityTemplate` (address)  
   - **Returns**: `uint256` (total liquidity in pool for user)  
-  - **Usage**: Tracks user’s total liquidity (tokenA + tokenB) in a pool.
+  - **Usage**: Tracks user’s total liquidity (tokenA + tokenB) in a pool, depopulated when zero.
 - **`userTokens`**: `mapping(address => address[]) public`  
   - **Parameters**: `user` (address)  
   - **Returns**: `address[]` (tokens user provides liquidity for)  
-  - **Usage**: Lists all tokens for a user.
+  - **Usage**: Lists all tokens for a user, depopulated via `removeUserToken` when liquidity is zero.
 - **`userPools`**: `mapping(address => address[]) public`  
   - **Parameters**: `user` (address)  
   - **Returns**: `address[]` (liquidity templates for user)  
-  - **Usage**: Lists all pools for a user.
+  - **Usage**: Lists all pools for a user, depopulated via `removeUserPool` when liquidity is zero.
 - **`usersToToken`**: `mapping(address => address[]) public`  
   - **Parameters**: `token` (address)  
   - **Returns**: `address[]` (users providing liquidity for token)  
-  - **Usage**: Lists users for a token.
+  - **Usage**: Lists users for a token, depopulated via `removeUserFromToken` when liquidity is zero.
 - **`poolsToToken`**: `mapping(address => address[]) public`  
   - **Parameters**: `token` (address)  
   - **Returns**: `address[]` (liquidity templates for token)  
@@ -137,13 +137,13 @@ The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and 
 - **Gas**: Single state write.
 
 ### globalizeLiquidity(address user, address liquidityTemplate)
-- **Behavior**: Verifies `liquidityTemplate` via `ICCLiquidityTemplate.listingAddress`, `ICCListingTemplate.liquidityAddressView`, and `ICCAgent.isValidListing`. Fetches x/y slot indices, aggregates allocations, updates mappings/arrays, emits `LiquidityGlobalized`.
+- **Behavior**: Verifies `liquidityTemplate` via `ICCLiquidityTemplate.listingAddress`, `ICCListingTemplate.liquidityAddressView`, and `ICCAgent.isValidListing`. Fetches x/y slot indices, aggregates allocations, updates mappings/arrays, depopulates zeroed-out entries, emits `LiquidityGlobalized`.
 - **Parameters**: `user` (address), `liquidityTemplate` (address).
 - **Restrictions**: Reverts if `agent` unset, invalid template, or external calls fail (returns decoded error string).
 - **Gas**: Multiple external calls, array resizing, gas check (<10% initial gas).
 
 ### globalizeOrders(address maker, address listing)
-- **Behavior**: Verifies listing via `ICCAgent.isValidListing` and `ICCListingTemplate.globalizerAddressView`. Fetches pending buy/sell orders, updates order mappings/arrays, emits `OrdersGlobalized`. Clears outdated data using `clearOrderData`.
+- **Behavior**: Verifies listing via `ICCAgent.isValidListing` and `ICCListingTemplate.globalizerAddressView`. Fetches pending buy/sell orders, updates order mappings/arrays, clears outdated data using `clearOrderData`, emits `OrdersGlobalized`.
 - **Parameters**: `maker` (address), `listing` (address).
 - **Restrictions**: Reverts if `agent` unset, invalid listing, unauthorized globalizer, or external calls fail (decoded error string).
 - **Gas**: External calls, array resizing, gas check (<10% initial gas).
@@ -195,7 +195,7 @@ The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and 
 
 ## Internal Functions
 ### updateLiquidityMappings(address user, address liquidityTemplate, address tokenA, address tokenB, uint256 totalX, uint256 totalY)
-- **Behavior**: Updates liquidity mappings/arrays, removes zeroed-out entries, emits `LiquidityGlobalized`.
+- **Behavior**: Updates liquidity mappings/arrays, removes zeroed-out entries via `removeUserToken`, `removeUserFromToken`, `removeUserPool`, emits `LiquidityGlobalized`.
 - **Parameters**: `user`, `liquidityTemplate`, `tokenA`, `tokenB` (address), `totalX`, `totalY` (uint256).
 - **Gas**: Array resizing, gas check.
 
@@ -278,15 +278,15 @@ The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and 
 - **Returns**: `bool`.
 
 ### removeUserToken(address user, address token)
-- **Behavior**: Removes a token from `userTokens`.
+- **Behavior**: Removes a token from `userTokens` for depopulation when liquidity is zero.
 - **Parameters**: `user`, `token` (address).
 
 ### removeUserFromToken(address token, address user)
-- **Behavior**: Removes a user from `usersToToken`.
+- **Behavior**: Removes a user from `usersToToken` for depopulation when liquidity is zero.
 - **Parameters**: `token`, `user` (address).
 
 ### removeUserPool(address user, address pool)
-- **Behavior**: Removes a pool from `userPools`.
+- **Behavior**: Removes a pool from `userPools` for depopulation when liquidity is zero.
 - **Parameters**: `user`, `pool` (address).
 
 ### removeMakerFromActiveTokens(address maker, address token)
@@ -303,6 +303,7 @@ The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and 
 
 ## Additional Details
 - **Decimal Handling**: Relies on `CCLiquidityTemplate` for normalization to 1e18.
+- **Depopulation**: Ensures efficiency by removing zeroed-out liquidity entries from `userLiquidityByToken`, `userLiquidityByPool`, `userTokens`, `userPools`, and `usersToToken` via `removeUserToken`, `removeUserFromToken`, and `removeUserPool` in `updateLiquidityMappings`. This prevents stale data accumulation when users withdraw liquidity.
 - **Gas Optimization**: Uses `maxIterations` and `step` for liquidity functions; removed from maker/token view functions for stack efficiency.
 - **Events**: `LiquidityGlobalized(address user, address token, address pool, uint256 amount)`, `AgentSet(address agent)`, `OrdersGlobalized(address maker, address listing, address token, uint256[] orderIds, bool isBuy)`.
 - **Safety**:
