@@ -191,3 +191,16 @@ View functions are pure or view, avoiding state changes and naming conflicts, wi
 
 ## Maker Orders Clarification
 - **_makerPendingOrders**: Stores all order IDs (buy or sell) created by a maker, including cancelled (`status=0`), pending (`status=1`), partially filled (`status=2`), or filled (`status=3`) orders. Added in `update` when created (`structId=0`, `status=1`) and removed via `removePendingOrder` when cancelled (`value=0`, `status=0`) or fully filled (`pending=0`, `status=3`). Persists historical orders for auditing, accessible via `makerOrdersView`. `makerPendingBuyOrdersView` and `makerPendingSellOrdersView` filter for `status=1`.
+
+## LastDay Initialization
+- **Deployment**: `_lastDayFee` is a private state variable (`LastDayFee private _lastDayFee`) initialized implicitly on contract deployment with default values: `lastDayXFeesAcc = 0`, `lastDayYFeesAcc = 0`, `timestamp = 0`.
+- **No Explicit Setup**: No constructor or setup function explicitly initializes `_lastDayFee`. It remains zeroed until updated via the `update` function.
+
+### Updates
+- **Function**: Updates occur in the `update` function, restricted to authorized routers (`_routers[msg.sender]`), when volume changes (e.g., `updateType=0` for balance/volume updates, or `updateType=1,2` with non-zero `value` for orders).
+- **Condition**: Updates trigger if `_lastDayFee.timestamp` is 0 or not on the same day as `block.timestamp` (checked via `_isSameDay`, using 86400-second days).
+- **Process**:
+  - Fetches `xFeesAcc`, `yFeesAcc` from `ICCLiquidityTemplate(_liquidityAddress).liquidityDetail()` using try-catch.
+  - On success, sets `_lastDayFee = LastDayFee(xFeesAcc, yFeesAcc, _floorToMidnight(block.timestamp))`, where `_floorToMidnight` rounds to midnight.
+  - On failure, retains existing `lastDayXFeesAcc`, `lastDayYFeesAcc`, and sets `timestamp` to midnight.
+- **Usage**: `_lastDayFee` is used in `queryYield` to calculate daily fee changes (`xFeesAcc - lastDayXFeesAcc` or `yFeesAcc - lastDayYFeesAcc`) for annualized yield based on deposit contribution.
