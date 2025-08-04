@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.28
+// Version: 0.0.30
 // Changes:
-// - v0.0.28: Removed redundant queryDepositorFees function to use inherited implementation from CCLiquidityPartial.sol, resolving TypeError due to override conflict. Updated compatibility comments.
+// - v0.0.30: Removed redundant ICCLiquidity interface to use inherited definition from CCMainPartial.sol, resolving DeclarationError for PreparedWithdrawal, _prepWithdrawal, and _executeWithdrawal. Updated compatibility comments to align with CCLiquidityPartial.sol v0.0.22.
+// - v0.0.29: Added ICCLiquidity interface import (incorrectly), updated compatibility comments.
+// - v0.0.28: Removed redundant queryDepositorFees function to use inherited implementation from CCLiquidityPartial.sol, resolving TypeError due to override conflict.
 // - v0.0.27: Updated compatibility comments to align with CCLiquidityPartial.sol v0.0.21 and CCLiquidityTemplate.sol v0.1.1.
 // - v0.0.26: Modified depositNativeToken and depositToken to update existing slot if depositor has one, claiming fees first and resetting dFeesAcc. Added depositor parameter for third-party deposits.
-// - v0.0.25: Removed invalid try-catch in depositNativeToken and depositToken. Updated compatibility comments.
-// Compatible with CCListingTemplate.sol (v0.1.0), CCMainPartial.sol (v0.0.12), CCLiquidityPartial.sol (v0.0.21), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.1.1).
+// Compatible with CCListingTemplate.sol (v0.1.0), CCMainPartial.sol (v0.0.14), CCLiquidityPartial.sol (v0.0.22), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.1.1).
 
 import "./utils/CCLiquidityPartial.sol";
 
