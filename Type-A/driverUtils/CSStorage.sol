@@ -2,19 +2,15 @@
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
  Recent Changes:
- - 2025-07-18: Refactored CSUpdate to use hyphen-delimited string parameters for paired data, parsed by new helper functions (parseCoreParams, parsePriceParams, parseMarginParams, parseExitAndInterest, parseMakerMargin, parsePositionArrays) to resolve stack too deep error. Version updated to 0.0.8.
- - 2025-07-18: Refactored CSUpdate function to use internal helper functions (updateCore, updatePriceParams, updateMarginParams, updateExitAndInterest, updateMakerMargin, updatePositionArrays) to resolve stack too deep error by reducing parameter count and using a call tree. Version updated to 0.0.7.
- - 2025-07-18: Reverted getListing in ISSAgent interface to function(address,address) view returns(address) from mapping to resolve TypeError for indexed expression. Updated AggregateMarginByToken to use function call. Version updated to 0.0.6.
- - 2025-07-18: Added public visibility to getListing mapping in ISSAgent interface to resolve TypeError for member access. Version updated to 0.0.5.
- - 2025-07-18: Replaced getListing function in ISSAgent interface with public mapping(address => mapping(address => address)) to match provided snippet and resolve TypeError. Version updated to 0.0.4.
- - 2025-07-18: Added ISSListing interface from CSDUtilityPartial.sol to resolve undeclared identifier errors for tokenA, tokenB, and prices functions. Version updated to 0.0.3.
- - 2025-07-18: Added ListingDetails struct to ISSAgent interface to resolve undeclared identifier error. Version updated to 0.0.2.
- - 2025-07-18: Created CSStorage contract by extracting position storage and view functions from CSDUtilityPartial.sol, SSCrossDriver.sol, and CSDExecutionPartial.sol. Added CSUpdate function for direct position updates by muxes. Version set to 0.0.1.
+ - 2025-08-05: Removed caller parameter from ISSListing.update to match ICCListingTemplate signature. Version updated to 0.0.11.
+ - 2025-08-05: Corrected ISSListing interface to match ICCListingTemplate: updated UpdateType struct to include structId, maxPrice, minPrice, amountSent; fixed prices and volumeBalances to take uint256 parameter; removed address parameter from liquidityAddressView. Adjusted function calls in PositionHealthView and LiquidationRiskCount to use prices(0). Version updated to 0.0.10.
+ - 2025-08-05: Replaced hyphen-delimited string parameters in CSUpdate with structured arrays and updated parsing functions to handle arrays, removing abi.decode. Added error logging events (UpdateFailed, RemovalFailed) and restructured CSUpdate for early error checking. Removed SafeERC20, imported IERC20, and used direct calls. Version updated to 0.0.9.
+ - 2025-07-18: Refactored CSUpdate to use hyphen-delimited string parameters for paired data, parsed by new helper functions to resolve stack too deep error. Version updated to 0.0.8.
 */
 
 pragma solidity ^0.8.2;
 
-import "../imports/SafeERC20.sol";
+import "../imports/IERC20.sol";
 import "../imports/Ownable.sol";
 
 interface ISSAgent {
@@ -31,9 +27,9 @@ interface ISSAgent {
 }
 
 interface ISSListing {
-    function prices(address) external view returns (uint256);
-    function volumeBalances(address) external view returns (uint256 xBalance, uint256 yBalance);
-    function liquidityAddressView(address) external view returns (address);
+    function prices(uint256) external view returns (uint256);
+    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
+    function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
     function ssUpdate(address caller, PayoutUpdate[] calldata updates) external;
@@ -46,17 +42,19 @@ interface ISSListing {
     function decimalsB() external view returns (uint8);
     struct UpdateType {
         uint8 updateType;
+        uint8 structId;
         uint256 index;
         uint256 value;
         address addr;
         address recipient;
+        uint256 maxPrice;
+        uint256 minPrice;
+        uint256 amountSent;
     }
-    function update(address caller, UpdateType[] calldata updates) external;
+    function update(UpdateType[] calldata updates) external;
 }
 
 contract CSStorage is Ownable {
-    using SafeERC20 for IERC20;
-
     uint256 public constant DECIMAL_PRECISION = 1e18;
     address public agentAddress;
 
@@ -110,6 +108,61 @@ contract CSStorage is Ownable {
         uint256 timestamp;
     }
 
+    // Update parameter structs
+    struct CoreParams {
+        uint256 positionId;
+        address listingAddress;
+        address makerAddress;
+        uint8 positionType;
+        bool status1;
+        uint8 status2;
+    }
+
+    struct PriceParams {
+        uint256 minEntryPrice;
+        uint256 maxEntryPrice;
+        uint256 minPrice;
+        uint256 priceAtEntry;
+        uint8 leverage;
+        uint256 liquidationPrice;
+    }
+
+    struct MarginParams {
+        uint256 initialMargin;
+        uint256 taxedMargin;
+        uint256 excessMargin;
+        uint256 fee;
+        uint256 initialLoan;
+    }
+
+    struct ExitAndInterestParams {
+        uint256 stopLossPrice;
+        uint256 takeProfitPrice;
+        uint256 exitPrice;
+        uint256 leverageAmount;
+        uint256 timestamp;
+    }
+
+    struct MakerMarginParams {
+        address token;
+        address maker;
+        address marginToken;
+        uint256 marginAmount;
+    }
+
+    struct PositionArrayParams {
+        address listingAddress;
+        uint8 positionType;
+        bool addToPending;
+        bool addToActive;
+    }
+
+    struct HistoricalInterestParams {
+        uint256 longIO;
+        uint256 shortIO;
+        uint256 timestamp;
+    }
+
     // Storage mappings
     mapping(address => mapping(address => uint256)) public makerTokenMargin;
     mapping(address => address[]) public makerMarginTokens;
@@ -133,6 +186,8 @@ contract CSStorage is Ownable {
     event PositionClosed(uint256 indexed positionId, address indexed maker, uint256 payout);
     event MuxAdded(address indexed mux);
     event MuxRemoved(address indexed mux);
+    event UpdateFailed(uint256 positionId, string reason);
+    event RemovalFailed(uint256 positionId, string reason);
 
     // Modifier to restrict functions to authorized muxes
     modifier onlyMux() {
@@ -156,232 +211,254 @@ contract CSStorage is Ownable {
     }
 
     // View function to return all authorized muxes
-    function getMuxesView() external view returns (address[] memory) {
+    function getMuxesView() external view returns (address[] memory muxList) {
         uint256 count = 0;
-        // Count authorized muxes (limit to 1000 for gas safety)
         for (uint256 i = 0; i < 1000; i++) {
             if (muxes[address(uint160(i))]) {
                 count++;
             }
         }
-        address[] memory result = new address[](count);
+        muxList = new address[](count);
         uint256 index = 0;
-        // Populate result array
         for (uint256 i = 0; i < 1000; i++) {
             if (muxes[address(uint160(i))]) {
-                result[index] = address(uint160(i));
+                muxList[index] = address(uint160(i));
                 index++;
             }
         }
-        return result;
     }
 
-    // Internal helper to parse and update core position data
-    function parseCoreParams(uint256 positionId, string memory coreParams) internal {
-        // Parse coreParams: "positionId-listingAddress-makerAddress-positionType-status1-status2"
-        bytes memory params = bytes(coreParams);
-        if (params.length == 0) return;
-
-        (uint256 corePositionId, address listingAddress, address makerAddress, uint8 positionType, bool status1, uint8 status2) = 
-            abi.decode(abi.encodePacked(params), (uint256, address, address, uint8, bool, uint8));
-
-        if (corePositionId != 0) {
-            positionCore1[positionId] = PositionCore1({
-                positionId: corePositionId,
-                listingAddress: listingAddress,
-                makerAddress: makerAddress,
-                positionType: positionType
-            });
+    // Internal helper to update core position data
+    function updateCoreParams(uint256 positionId, CoreParams memory params) internal {
+        if (params.positionId == 0 || params.listingAddress == address(0) || params.makerAddress == address(0)) {
+            emit UpdateFailed(positionId, "Invalid core parameters");
+            return;
         }
-        if (status2 != type(uint8).max) {
+        positionCore1[positionId] = PositionCore1({
+            positionId: params.positionId,
+            listingAddress: params.listingAddress,
+            makerAddress: params.makerAddress,
+            positionType: params.positionType
+        });
+        if (params.status2 != type(uint8).max) {
             positionCore2[positionId] = PositionCore2({
-                status1: status1,
-                status2: status2
+                status1: params.status1,
+                status2: params.status2
             });
         }
     }
 
-    // Internal helper to parse and update price parameters
-    function parsePriceParams(uint256 positionId, string memory priceParams) internal {
-        // Parse priceParams: "minEntryPrice-maxEntryPrice-minPrice-priceAtEntry-leverage-liquidationPrice"
-        bytes memory params = bytes(priceParams);
-        if (params.length == 0) return;
-
-        (uint256 minEntryPrice, uint256 maxEntryPrice, uint256 minPrice, uint256 priceAtEntry, uint8 leverage, uint256 liquidationPrice) = 
-            abi.decode(abi.encodePacked(params), (uint256, uint256, uint256, uint256, uint8, uint256));
-
-        if (minEntryPrice != 0 || maxEntryPrice != 0 || minPrice != 0 || priceAtEntry != 0) {
-            priceParams1[positionId] = PriceParams1({
-                minEntryPrice: minEntryPrice,
-                maxEntryPrice: maxEntryPrice,
-                minPrice: minPrice,
-                priceAtEntry: priceAtEntry,
-                leverage: leverage
-            });
+    // Internal helper to update price parameters
+    function updatePriceParams(uint256 positionId, PriceParams memory params) internal {
+        if (params.minEntryPrice == 0 && params.maxEntryPrice == 0 && params.minPrice == 0 && params.priceAtEntry == 0 && params.liquidationPrice == 0) {
+            emit UpdateFailed(positionId, "Invalid price parameters");
+            return;
         }
-        if (liquidationPrice != 0) {
-            priceParams2[positionId] = PriceParams2({
-                liquidationPrice: liquidationPrice
-            });
-        }
+        priceParams1[positionId] = PriceParams1({
+            minEntryPrice: params.minEntryPrice,
+            maxEntryPrice: params.maxEntryPrice,
+            minPrice: params.minPrice,
+            priceAtEntry: params.priceAtEntry,
+            leverage: params.leverage
+        });
+        priceParams2[positionId] = PriceParams2({
+            liquidationPrice: params.liquidationPrice
+        });
     }
 
-    // Internal helper to parse and update margin parameters
-    function parseMarginParams(uint256 positionId, string memory marginParams) internal {
-        // Parse marginParams: "initialMargin-taxedMargin-excessMargin-fee-initialLoan"
-        bytes memory params = bytes(marginParams);
-        if (params.length == 0) return;
-
-        (uint256 initialMargin, uint256 taxedMargin, uint256 excessMargin, uint256 fee, uint256 initialLoan) = 
-            abi.decode(abi.encodePacked(params), (uint256, uint256, uint256, uint256, uint256));
-
-        if (initialMargin != 0 || taxedMargin != 0 || excessMargin != 0 || fee != 0) {
-            marginParams1[positionId] = MarginParams1({
-                initialMargin: initialMargin,
-                taxedMargin: taxedMargin,
-                excessMargin: excessMargin,
-                fee: fee
-            });
+    // Internal helper to update margin parameters
+    function updateMarginParams(uint256 positionId, MarginParams memory params) internal {
+        if (params.initialMargin == 0 && params.taxedMargin == 0 && params.excessMargin == 0 && params.fee == 0 && params.initialLoan == 0) {
+            emit UpdateFailed(positionId, "Invalid margin parameters");
+            return;
         }
-        if (initialLoan != 0) {
-            marginParams2[positionId] = MarginParams2({
-                initialLoan: initialLoan
-            });
-        }
+        marginParams1[positionId] = MarginParams1({
+            initialMargin: params.initialMargin,
+            taxedMargin: params.taxedMargin,
+            excessMargin: params.excessMargin,
+            fee: params.fee
+        });
+        marginParams2[positionId] = MarginParams2({
+            initialLoan: params.initialLoan
+        });
     }
 
-    // Internal helper to parse and update exit parameters and open interest
-    function parseExitAndInterest(uint256 positionId, string memory exitAndInterestParams) internal {
-        // Parse exitAndInterestParams: "stopLossPrice-takeProfitPrice-exitPrice-leverageAmount-timestamp"
-        bytes memory params = bytes(exitAndInterestParams);
-        if (params.length == 0) return;
-
-        (uint256 stopLossPrice, uint256 takeProfitPrice, uint256 exitPrice, uint256 leverageAmount, uint256 timestamp) = 
-            abi.decode(abi.encodePacked(params), (uint256, uint256, uint256, uint256, uint256));
-
-        if (stopLossPrice != 0 || takeProfitPrice != 0 || exitPrice != 0) {
-            exitParams[positionId] = ExitParams({
-                stopLossPrice: stopLossPrice,
-                takeProfitPrice: takeProfitPrice,
-                exitPrice: exitPrice
-            });
+    // Internal helper to update exit parameters and open interest
+    function updateExitAndInterest(uint256 positionId, ExitAndInterestParams memory params) internal {
+        if (params.stopLossPrice == 0 && params.takeProfitPrice == 0 && params.exitPrice == 0 && params.leverageAmount == 0 && params.timestamp == 0) {
+            emit UpdateFailed(positionId, "Invalid exit or interest parameters");
+            return;
         }
-        if (leverageAmount != 0 || timestamp != 0) {
-            openInterest[positionId] = OpenInterest({
-                leverageAmount: leverageAmount,
-                timestamp: timestamp
-            });
-        }
+        exitParams[positionId] = ExitParams({
+            stopLossPrice: params.stopLossPrice,
+            takeProfitPrice: params.takeProfitPrice,
+            exitPrice: params.exitPrice
+        });
+        openInterest[positionId] = OpenInterest({
+            leverageAmount: params.leverageAmount,
+            timestamp: params.timestamp
+        });
     }
 
-    // Internal helper to parse and update maker margin and position token
-    function parseMakerMargin(uint256 positionId, string memory makerMarginParams) internal {
-        // Parse makerMarginParams: "token-maker-marginToken-marginAmount"
-        bytes memory params = bytes(makerMarginParams);
-        if (params.length == 0) return;
-
-        (address token, address maker, address marginToken, uint256 marginAmount) = 
-            abi.decode(abi.encodePacked(params), (address, address, address, uint256));
-
-        if (token != address(0)) {
-            positionToken[positionId] = token;
+    // Internal helper to update maker margin and position token
+    function updateMakerMargin(uint256 positionId, MakerMarginParams memory params) internal {
+        if (params.token == address(0) && params.maker == address(0) && params.marginToken == address(0) && params.marginAmount == 0) {
+            emit UpdateFailed(positionId, "Invalid maker margin parameters");
+            return;
         }
-        if (maker != address(0) && marginToken != address(0) && marginAmount != 0) {
-            makerTokenMargin[maker][marginToken] = marginAmount;
+        if (params.token != address(0)) {
+            positionToken[positionId] = params.token;
+        }
+        if (params.maker != address(0) && params.marginToken != address(0) && params.marginAmount != 0) {
+            makerTokenMargin[params.maker][params.marginToken] = params.marginAmount;
             bool tokenExists = false;
-            for (uint256 i = 0; i < makerMarginTokens[maker].length; i++) {
-                if (makerMarginTokens[maker][i] == marginToken) {
+            for (uint256 i = 0; i < makerMarginTokens[params.maker].length; i++) {
+                if (makerMarginTokens[params.maker][i] == params.marginToken) {
                     tokenExists = true;
                     break;
                 }
             }
             if (!tokenExists) {
-                makerMarginTokens[maker].push(marginToken);
+                makerMarginTokens[params.maker].push(params.marginToken);
             }
         }
     }
 
-    // Internal helper to parse and update position arrays and count
-    function parsePositionArrays(uint256 positionId, string memory positionArrayParams) internal {
-        // Parse positionArrayParams: "listingAddress-positionType-addToPending-addToActive"
-        bytes memory params = bytes(positionArrayParams);
-        if (params.length == 0) return;
-
-        (address listingAddress, uint8 positionType, bool addToPending, bool addToActive) = 
-            abi.decode(abi.encodePacked(params), (address, uint8, bool, bool));
-
-        if (addToPending && listingAddress != address(0)) {
-            pendingPositions[listingAddress][positionType].push(positionId);
+    // Internal helper to update position arrays and count
+    function updatePositionArrays(uint256 positionId, PositionArrayParams memory params) internal {
+        if (params.listingAddress == address(0)) {
+            emit UpdateFailed(positionId, "Invalid listing address in position arrays");
+            return;
         }
-        if (addToActive) {
-            positionsByType[positionType].push(positionId);
+        if (params.addToPending) {
+            pendingPositions[params.listingAddress][params.positionType].push(positionId);
+        }
+        if (params.addToActive) {
+            positionsByType[params.positionType].push(positionId);
         }
         if (positionId > positionCount) {
             positionCount = positionId;
         }
     }
 
-    // Updates position data directly without validation
+    // Updates position data with validation
     function CSUpdate(
         uint256 positionId,
-        string memory coreParams,
-        string memory priceParams,
-        string memory marginParams,
-        string memory exitAndInterestParams,
-        string memory makerMarginParams,
-        string memory positionArrayParams,
-        string memory historicalInterestParams
+        CoreParams memory coreParams,
+        PriceParams memory priceParams,
+        MarginParams memory marginParams,
+        ExitAndInterestParams memory exitAndInterestParams,
+        MakerMarginParams memory makerMarginParams,
+        PositionArrayParams memory positionArrayParams,
+        HistoricalInterestParams memory historicalInterestParams
     ) external onlyMux {
-        // Parse historicalInterestParams: "longIO-shortIO-timestamp"
-        bytes memory histParams = bytes(historicalInterestParams);
-        if (histParams.length != 0) {
-            (uint256 longIO, uint256 shortIO, uint256 timestamp) = 
-                abi.decode(abi.encodePacked(histParams), (uint256, uint256, uint256));
-            uint256 height = block.number;
-            if (longIO != 0) longIOByHeight[height] = longIO;
-            if (shortIO != 0) shortIOByHeight[height] = shortIO;
-            if (timestamp != 0) historicalInterestTimestamps[height] = timestamp;
+        if (positionId == 0) {
+            emit UpdateFailed(positionId, "Invalid position ID");
+            return;
         }
+        try this.CSUpdateInternal(
+            positionId,
+            coreParams,
+            priceParams,
+            marginParams,
+            exitAndInterestParams,
+            makerMarginParams,
+            positionArrayParams,
+            historicalInterestParams
+        ) {
+        } catch Error(string memory reason) {
+            emit UpdateFailed(positionId, reason);
+        } catch {
+            emit UpdateFailed(positionId, "Unknown error during update");
+        }
+    }
 
-        // Call internal helpers to parse and update state
-        parseCoreParams(positionId, coreParams);
-        parsePriceParams(positionId, priceParams);
-        parseMarginParams(positionId, marginParams);
-        parseExitAndInterest(positionId, exitAndInterestParams);
-        parseMakerMargin(positionId, makerMarginParams);
-        parsePositionArrays(positionId, positionArrayParams);
+    // Internal function to handle CSUpdate logic
+    function CSUpdateInternal(
+        uint256 positionId,
+        CoreParams memory coreParams,
+        PriceParams memory priceParams,
+        MarginParams memory marginParams,
+        ExitAndInterestParams memory exitAndInterestParams,
+        MakerMarginParams memory makerMarginParams,
+        PositionArrayParams memory positionArrayParams,
+        HistoricalInterestParams memory historicalInterestParams
+    ) external {
+        require(msg.sender == address(this), "Only callable by this contract");
+        uint256 height = block.number;
+        if (historicalInterestParams.longIO != 0) longIOByHeight[height] = historicalInterestParams.longIO;
+        if (historicalInterestParams.shortIO != 0) shortIOByHeight[height] = historicalInterestParams.shortIO;
+        if (historicalInterestParams.timestamp != 0) historicalInterestTimestamps[height] = historicalInterestParams.timestamp;
+
+        updateCoreParams(positionId, coreParams);
+        updatePriceParams(positionId, priceParams);
+        updateMarginParams(positionId, marginParams);
+        updateExitAndInterest(positionId, exitAndInterestParams);
+        updateMakerMargin(positionId, makerMarginParams);
+        updatePositionArrays(positionId, positionArrayParams);
     }
 
     // Removes position from pending or active arrays
     function removePositionIndex(uint256 positionId, uint8 positionType, address listingAddress) external onlyMux {
+        try this.removePositionIndexInternal(positionId, positionType, listingAddress) {
+        } catch Error(string memory reason) {
+            emit RemovalFailed(positionId, reason);
+        } catch {
+            emit RemovalFailed(positionId, "Unknown error during position removal");
+        }
+    }
+
+    // Internal function to handle position removal
+    function removePositionIndexInternal(uint256 positionId, uint8 positionType, address listingAddress) external {
+        require(msg.sender == address(this), "Only callable by this contract");
         uint256[] storage pending = pendingPositions[listingAddress][positionType];
+        bool found = false;
         for (uint256 i = 0; i < pending.length; i++) {
             if (pending[i] == positionId) {
                 pending[i] = pending[pending.length - 1];
                 pending.pop();
+                found = true;
                 break;
             }
         }
-        uint256[] storage active = positionsByType[positionType];
-        for (uint256 i = 0; i < active.length; i++) {
-            if (active[i] == positionId) {
-                active[i] = active[active.length - 1];
-                active.pop();
-                break;
+        if (!found) {
+            uint256[] storage active = positionsByType[positionType];
+            for (uint256 i = 0; i < active.length; i++) {
+                if (active[i] == positionId) {
+                    active[i] = active[active.length - 1];
+                    active.pop();
+                    found = true;
+                    break;
+                }
             }
+        }
+        if (!found) {
+            revert("Position not found in arrays");
         }
     }
 
     // Removes token from maker's margin token list
     function removeToken(address maker, address token) external onlyMux {
+        try this.removeTokenInternal(maker, token) {
+        } catch Error(string memory reason) {
+            emit RemovalFailed(0, reason);
+        } catch {
+            emit RemovalFailed(0, "Unknown error during token removal");
+        }
+    }
+
+    // Internal function to handle token removal
+    function removeTokenInternal(address maker, address token) external {
+        require(msg.sender == address(this), "Only callable by this contract");
         address[] storage tokens = makerMarginTokens[maker];
         for (uint256 i = 0; i < tokens.length; i++) {
             if (tokens[i] == token) {
                 tokens[i] = tokens[tokens.length - 1];
                 tokens.pop();
-                break;
+                return;
             }
         }
+        revert("Token not found in maker's list");
     }
 
     // View function to retrieve position details
@@ -497,7 +574,7 @@ contract CSStorage is Ownable {
         PriceParams1 memory price1 = priceParams1[positionId];
         PriceParams2 memory price2 = priceParams2[positionId];
         address token = core1.positionType == 0 ? ISSListing(core1.listingAddress).tokenB() : ISSListing(core1.listingAddress).tokenA();
-        uint256 currentPrice = normalizePrice(token, ISSListing(core1.listingAddress).prices(core1.listingAddress));
+        uint256 currentPrice = normalizePrice(token, ISSListing(core1.listingAddress).prices(0));
         require(currentPrice > 0, "Invalid price");
 
         address marginToken = core1.positionType == 0 ? ISSListing(core1.listingAddress).tokenA() : ISSListing(core1.listingAddress).tokenB();
@@ -586,7 +663,7 @@ contract CSStorage is Ownable {
             PositionCore2 memory core2 = positionCore2[positionId];
             if (core1.listingAddress != listingAddress || core2.status2 != 0) continue;
             address token = core1.positionType == 0 ? ISSListing(listingAddress).tokenB() : ISSListing(listingAddress).tokenA();
-            uint256 currentPrice = normalizePrice(token, ISSListing(listingAddress).prices(token));
+            uint256 currentPrice = normalizePrice(token, ISSListing(listingAddress).prices(0));
             uint256 liquidationPrice = priceParams2[positionId].liquidationPrice;
             uint256 threshold = liquidationPrice * 5 / 100;
 
@@ -600,7 +677,7 @@ contract CSStorage is Ownable {
     }
 
     // Normalizes price based on token decimals
-    function normalizePrice(address token, uint256 price) internal view returns (uint256) {
+    function normalizePrice(address token, uint256 price) internal view returns (uint256 normalizedPrice) {
         uint8 decimals = IERC20(token).decimals();
         if (decimals < 18) return price * (10 ** (18 - decimals));
         if (decimals > 18) return price / (10 ** (decimals - 18));

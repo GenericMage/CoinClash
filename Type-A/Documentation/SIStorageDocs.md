@@ -1,11 +1,15 @@
 # SIStorage Contract Documentation
 
 ## Overview
-The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage layer for trading positions in the isolated margin strategy system, extracting and managing position-related state variables and view functions from `SSIsolatedDriver.sol`, `SSDPositionPartial.sol`, and `SSDUtilityPartial.sol`. It integrates with external interfaces (`ISSListing`, `ISSAgent`, `ISSLiquidityTemplate`) and uses `IERC20` for token operations and `Ownable` for administrative control, focusing on storing position data, tracking open interest, and providing view functions without handling execution logic like position creation, closure, or margin transfers.
+The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage layer for trading positions in the isolated margin strategy system. It extracts and manages position-related state variables and view functions from `SSIsolatedDriver.sol`, `SSDPositionPartial.sol`, and `SSDUtilityPartial.sol`. The contract integrates with external interfaces (`ISSListing`, `ISSAgent`, `ISSLiquidityTemplate`) and uses `IERC20` for token operations and `Ownable` for administrative control. It focuses on storing position data, tracking open interest, and providing view functions without handling execution logic like position creation, closure, or margin transfers.
 
 **SPDX License:** BSL-1.1 - Peng Protocol 2025
 
-**Version:** 0.0.3 (last updated 2025-07-20)
+**Version:** 0.0.4 (last updated 2025-08-07)
+
+**Recent Changes:**
+- **2025-08-07**: Replaced hyphen-delimited strings in `SIUpdate` with structured arrays (`CoreParams`, `PriceParams`, `MarginParams`, `LeverageParams`, `RiskParams`, `TokenAndInterestParams`, `PositionArrayParams`). Added `ErrorLogged` event and detailed error messages for better debugging. Restructured `SIUpdate` for early input validation. Removed `SafeERC20`, imported `IERC20`. Added try-catch for external calls in `PositionHealthView`, `AggregateMarginByToken`, `LiquidationRiskCount`, and `normalizePrice` for graceful degradation.
+
 
 ## State Variables
 - **DECIMAL_PRECISION** (uint256, constant, public): Set to 1e18 for normalizing amounts and prices across token decimals.
@@ -35,95 +39,81 @@ The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
 - **MarginParams**: Holds `marginInitial` (uint256), `marginTaxed` (uint256), `marginExcess` (uint256), all normalized to 1e18.
 - **LeverageParams**: Contains `leverageVal` (uint8), `leverageAmount` (uint256), `loanInitial` (uint256), with amounts normalized to 1e18.
 - **RiskParams**: Stores `priceLiquidation` (uint256), `priceStopLoss` (uint256), `priceTakeProfit` (uint256), all normalized to 1e18.
+- **CoreParams**: Used in `SIUpdate` for core position data: `makerAddress` (address), `listingAddress` (address), `corePositionId` (uint256), `positionType` (uint8), `status1` (bool), `status2` (uint8).
+- **TokenAndInterestParams**: Used in `SIUpdate` for token and interest: `token` (address), `longIO` (uint256), `shortIO` (uint256), `timestamp` (uint256).
+- **PositionArrayParams**: Used in `SIUpdate` for array updates: `listingAddress` (address), `positionType` (uint8), `addToPending` (bool), `addToActive` (bool).
 
 ## External Functions
 
 ### setAgent(address newAgentAddress)
 - **Parameters**:
   - `newAgentAddress` (address): New ISSAgent address.
-- **Behavior**: Updates the `agent` state variable for listing validation.
+- **Behavior**: Updates the `agent` state variable for listing validation. Emits `ErrorLogged` if invalid.
 - **Internal Call Flow**: Directly updates `agent`. No internal or external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **agent** (state variable): Stores the ISSAgent address.
-- **Restrictions**:
-  - Restricted to `onlyOwner`.
-  - Reverts if `newAgentAddress` is zero ("Invalid agent address").
+- **Mappings/Structs Used**: `agent` (state variable).
+- **Restrictions**: Restricted to `onlyOwner`. Reverts if `newAgentAddress` is zero ("setAgent: invalid agent address - zero address").
 - **Gas Usage Controls**: Minimal gas due to single state write.
 
 ### addMux(address mux)
 - **Parameters**:
   - `mux` (address): Address of the mux contract to authorize.
-- **Behavior**: Adds a mux contract to the authorized list, enabling it to call `SIUpdate` or `removePositionIndex`. Emits `MuxAdded`.
-- **Internal Call Flow**: Validates `mux != address(0)` and `!muxes[mux]`. Sets `muxes[mux] = true`. Emits `MuxAdded`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `muxes`.
-- **Restrictions**:
-  - Restricted to `onlyOwner`.
-  - Reverts if `mux` is zero ("Invalid mux address") or already authorized ("Mux already exists").
+- **Behavior**: Adds a mux to the authorized list, enabling `SIUpdate` and `removePositionIndex` calls. Emits `MuxAdded` or `ErrorLogged` if invalid.
+- **Internal Call Flow**: Validates `mux != address(0)` and `!muxes[mux]`. Sets `muxes[mux] = true`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `muxes`.
+- **Restrictions**: Restricted to `onlyOwner`. Reverts if `mux` is zero ("Invalid mux address: zero address") or already authorized ("Mux already authorized").
 - **Gas Usage Controls**: Minimal gas due to single mapping update.
 
 ### removeMux(address mux)
 - **Parameters**:
   - `mux` (address): Address of the mux contract to deauthorize.
-- **Behavior**: Removes a mux contract from the authorized list. Emits `MuxRemoved`.
-- **Internal Call Flow**: Validates `muxes[mux]`. Sets `muxes[mux] = false`. Emits `MuxRemoved`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `muxes`.
-- **Restrictions**:
-  - Restricted to `onlyOwner`.
-  - Reverts if `mux` is not authorized ("Mux does not exist").
+- **Behavior**: Removes a mux from the authorized list. Emits `MuxRemoved` or `ErrorLogged` if invalid.
+- **Internal Call Flow**: Validates `muxes[mux]`. Sets `muxes[mux] = false`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `muxes`.
+- **Restrictions**: Restricted to `onlyOwner`. Reverts if `mux` is not authorized ("Mux not authorized").
 - **Gas Usage Controls**: Minimal gas due to single mapping update.
 
 ### getMuxesView()
 - **Parameters**: None.
 - **Behavior**: Returns an array of authorized mux addresses.
 - **Internal Call Flow**: Iterates over a fixed range (0 to 999) to count and collect addresses where `muxes[address] == true`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `muxes`.
+- **Mappings/Structs Used**: `muxes`.
 - **Restrictions**: None.
 - **Gas Usage Controls**: View function, fixed iteration limit (1000) for gas safety.
 
-### SIUpdate(uint256 positionId, string coreParams, string priceData, string marginData, string leverageAndRiskParams, string tokenAndInterestParams, string positionArrayParams)
+### SIUpdate(uint256 positionId, CoreParams coreData, PriceParams priceData, MarginParams marginData, LeverageParams leverageData, RiskParams riskData, TokenAndInterestParams tokenData, PositionArrayParams arrayData)
 - **Parameters**:
   - `positionId` (uint256): Position ID to update.
-  - `coreParams` (string): Encoded core position data (makerAddress, listingAddress, positionId, positionType, status1, status2).
-  - `priceData` (string): Encoded price parameters (priceMin, priceMax, priceAtEntry, priceClose).
-  - `marginData` (string): Encoded margin parameters (marginInitial, marginTaxed, marginExcess).
-  - `leverageAndRiskParams` (string): Encoded leverage and risk parameters (leverageVal, leverageAmount, loanInitial, priceLiquidation, priceStopLoss, priceTakeProfit).
-  - `tokenAndInterestParams` (string): Encoded token and interest data (token, longIO, shortIO, timestamp).
-  - `positionArrayParams` (string): Encoded array updates (listingAddress, positionType, addToPending, addToActive).
-- **Behavior**: Updates position data for an authorized mux without validation, parsing encoded strings to update respective mappings. Does not handle transfers or execution logic.
-- **Internal Call Flow**: Restricted by `onlyMux`. Calls `parseCoreParams`, `parsePriceParams`, `parseMarginParams`, `parseLeverageAndRiskParams`, `parseTokenAndInterest`, and `parsePositionArrays` to decode and store data in respective mappings. Increments `historicalInterestHeight` and updates `positionCount` if needed. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `positionCoreStatus`, `priceParams`, `marginParams`, `leverageParams`, `riskParams`, `positionToken`, `pendingPositions`, `positionsByType`, `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps`, `positionCount`, `historicalInterestHeight`.
-  - **Structs**: `PositionCoreBase`, `PositionCoreStatus`, `PriceParams`, `MarginParams`, `LeverageParams`, `RiskParams`.
-- **Restrictions**:
-  - Restricted to `onlyMux`.
-  - No validation; assumes valid input from authorized muxes.
-- **Gas Usage Controls**: Minimal gas with single mapping updates per parameter set; array operations use push.
+  - `coreData` (CoreParams): Core position data (makerAddress, listingAddress, corePositionId, positionType, status1, status2).
+  - `priceData` (PriceParams): Price parameters (priceMin, priceMax, priceAtEntry, priceClose).
+  - `marginData` (MarginParams): Margin parameters (marginInitial, marginTaxed, marginExcess).
+  - `leverageData` (LeverageParams): Leverage parameters (leverageVal, leverageAmount, loanInitial).
+  - `riskData` (RiskParams): Risk parameters (priceLiquidation, priceStopLoss, priceTakeProfit).
+  - `tokenData` (TokenAndInterestParams): Token and interest data (token, longIO, shortIO, timestamp).
+  - `arrayData` (PositionArrayParams): Array updates (listingAddress, positionType, addToPending, addToActive).
+- **Behavior**: Updates position data for an authorized mux without validation, using structured arrays. Emits `ErrorLogged` for invalid inputs.
+- **Internal Call Flow**: Restricted by `onlyMux`. Validates `positionId != 0` and `coreData` addresses. Calls `parseCoreParams`, `parsePriceParams`, `parseMarginParams`, `parseLeverageAndRiskParams`, `parseTokenAndInterest`, `parsePositionArrays`. Increments `historicalInterestHeight` and updates `positionCount` if needed. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: All mappings and structs.
+- **Restrictions**: Restricted to `onlyMux`. Reverts if `positionId` is zero ("SIUpdate: position ID cannot be zero") or core data addresses are invalid ("SIUpdate: invalid maker or listing address").
+- **Gas Usage Controls**: Minimal gas with single mapping updates; array operations use push.
 
 ### removePositionIndex(uint256 positionId, uint8 positionType, address listingAddress)
 - **Parameters**:
   - `positionId` (uint256): Position ID to remove.
   - `positionType` (uint8): 0 for long, 1 for short.
   - `listingAddress` (address): Listing contract address.
-- **Behavior**: Removes a position from `pendingPositions` or `positionsByType` arrays for an authorized mux, typically after closure or cancellation.
-- **Internal Call Flow**: Restricted by `onlyMux`. Iterates `pendingPositions[listingAddress][positionType]` and `positionsByType[positionType]`, using pop-and-swap to remove `positionId`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `pendingPositions`, `positionsByType`.
-- **Restrictions**:
-  - Restricted to `onlyMux`.
-- **Gas Usage Controls**: Pop-and-swap minimizes gas for array operations.
+- **Behavior**: Removes a position from `pendingPositions` or `positionsByType` arrays. Emits `ErrorLogged` for invalid inputs.
+- **Internal Call Flow**: Restricted by `onlyMux`. Validates `positionId != 0` and `listingAddress != address(0)`. Uses pop-and-swap to remove `positionId`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `pendingPositions`, `positionsByType`.
+- **Restrictions**: Reverts if `positionId` is zero ("removePositionIndex: position ID cannot be zero") or `listingAddress` is zero ("removePositionIndex: listing address cannot be zero").
+- **Gas Usage Controls**: Pop-and-swap minimizes gas.
 
 ### positionByIndex(uint256 positionId)
 - **Parameters**:
   - `positionId` (uint256): Position ID.
-- **Behavior**: Returns all position data (core, status, price, margin, leverage, risk, token) for the given `positionId`.
-- **Internal Call Flow**: Retrieves data from `positionCoreBase`, `positionCoreStatus`, `priceParams`, `marginParams`, `leverageParams`, `riskParams`, `positionToken`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `positionCoreStatus`, `priceParams`, `marginParams`, `leverageParams`, `riskParams`, `positionToken`.
-  - **Structs**: `PositionCoreBase`, `PositionCoreStatus`, `PriceParams`, `MarginParams`, `LeverageParams`, `RiskParams`.
-- **Restrictions**: Reverts if `positionId` is invalid ("Invalid position").
+- **Behavior**: Returns all position data (core, status, price, margin, leverage, risk, token).
+- **Internal Call Flow**: Retrieves data from all mappings. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: All mappings and structs except `pendingPositions`, `positionsByType`, `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps`.
+- **Restrictions**: Reverts if `positionId` is invalid ("positionByIndex: invalid position ID").
 - **Gas Usage Controls**: Minimal gas, view function.
 
 ### PositionsByTypeView(uint8 positionType, uint256 startIndex, uint256 maxIterations)
@@ -132,10 +122,9 @@ The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
   - `startIndex` (uint256): Starting index in `positionsByType`.
   - `maxIterations` (uint256): Maximum positions to return.
 - **Behavior**: Returns active position IDs from `positionsByType` starting at `startIndex`, up to `maxIterations`.
-- **Internal Call Flow**: Iterates `positionsByType[positionType]` from `startIndex` up to `maxIterations`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionsByType`.
-- **Restrictions**: Reverts if `positionType > 1` ("Invalid position type").
+- **Internal Call Flow**: Validates `positionType <= 1`. Iterates `positionsByType[positionType]`. Returns empty array if `startIndex` exceeds length. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `positionsByType`.
+- **Restrictions**: Reverts if `positionType > 1` ("PositionsByTypeView: invalid position type").
 - **Gas Usage Controls**: View function, `maxIterations` limits gas.
 
 ### PositionsByAddressView(address maker, uint256 startIndex, uint256 maxIterations)
@@ -143,19 +132,17 @@ The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
   - `maker` (address): Position owner.
   - `startIndex` (uint256): Starting index.
   - `maxIterations` (uint256): Maximum positions to return.
-- **Behavior**: Returns pending position IDs for `maker` from all positions, starting at `startIndex`, up to `maxIterations`.
-- **Internal Call Flow**: Iterates positions from `startIndex` to `positionCount`, collecting IDs where `positionCoreBase.makerAddress == maker` and `status1 == false`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `positionCoreStatus`, `positionCount`.
-- **Restrictions**: None.
+- **Behavior**: Returns pending position IDs for `maker` starting at `startIndex`, up to `maxIterations`.
+- **Internal Call Flow**: Validates `maker != address(0)`. Iterates positions from `startIndex` to `positionCount`, collecting IDs where `makerAddress == maker` and `status1 == false`. Returns empty array if `startIndex` exceeds `positionCount`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `positionCoreBase`, `positionCoreStatus`, `positionCount`.
+- **Restrictions**: Reverts if `maker` is zero ("PositionsByAddressView: invalid maker address").
 - **Gas Usage Controls**: View function, `maxIterations` limits gas.
 
 ### TotalActivePositionsView()
 - **Parameters**: None.
-- **Behavior**: Returns the count of active positions (`status1 == true`, `status2 == 0`) across all positions.
-- **Internal Call Flow**: Iterates `positionCoreBase` up to `positionCount`, counting valid active positions. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `positionCoreStatus`, `positionCount`.
+- **Behavior**: Returns count of active positions (`status1 == true`, `status2 == 0`).
+- **Internal Call Flow**: Iterates `positionCoreBase` up to `positionCount`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `positionCoreBase`, `positionCoreStatus`, `positionCount`.
 - **Restrictions**: None.
 - **Gas Usage Controls**: View function, bounded by `positionCount`.
 
@@ -163,22 +150,19 @@ The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
 - **Parameters**:
   - `startIndex` (uint256): Starting block height.
   - `maxIterations` (uint256): Maximum entries to return.
-- **Behavior**: Returns open interest (`longIOByHeight`, `shortIOByHeight`) and `historicalInterestTimestamps` from `startIndex` up to `maxIterations`.
-- **Internal Call Flow**: Iterates `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps` from `startIndex` up to `maxIterations`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps`.
+- **Behavior**: Returns `longIOByHeight`, `shortIOByHeight`, and `historicalInterestTimestamps` from `startIndex` up to `maxIterations`.
+- **Internal Call Flow**: Returns empty arrays if `startIndex` exceeds `positionCount`. Iterates mappings up to `maxIterations`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps`.
 - **Restrictions**: None.
 - **Gas Usage Controls**: View function, `maxIterations` limits gas.
 
 ### PositionHealthView(uint256 positionId)
 - **Parameters**:
   - `positionId` (uint256): Position ID.
-- **Behavior**: Returns `marginRatio`, `distanceToLiquidation`, and `estimatedProfitLoss` for the position, calculated using current price and position parameters.
-- **Internal Call Flow**: Retrieves position data from `positionCoreBase`, `marginParams`, `priceParams`, `leverageParams`, `riskParams`, `positionToken`. Calls `ISSListing.prices` (input: `listingAddress`, returns: `uint256`) and `ISSListing.tokenA`/`tokenB` (returns: `address`) for token and price. Normalizes price with `normalizePrice` using `IERC20.decimals`. Calculates `marginRatio` as `(marginTaxed + marginExcess) / (marginInitial * leverageVal)`, `distanceToLiquidation` as the difference from `priceLiquidation`, and `estimatedProfitLoss` using payout formulas (long: `(taxedMargin + excessMargin + leverageVal * marginInitial) / currentPrice - loanInitial`; short: `(priceAtEntry - currentPrice) * marginInitial * leverageVal + (taxedMargin + excessMargin) * currentPrice / DECIMAL_PRECISION`). No transfers or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `marginParams`, `priceParams`, `leverageParams`, `riskParams`, `positionToken`.
-  - **Structs**: `PositionCoreBase`, `MarginParams`, `PriceParams`, `LeverageParams`, `RiskParams`.
-- **Restrictions**: Reverts if `positionId` is invalid ("Invalid position") or price is zero ("Invalid price").
+- **Behavior**: Returns `marginRatio`, `distanceToLiquidation`, and `estimatedProfitLoss` using current price and position parameters.
+- **Internal Call Flow**: Validates `positionId`. Retrieves data from mappings. Calls `ISSListing.prices` and `ISSListing.tokenA`/`tokenB` with try-catch. Normalizes price with `normalizePrice` using `IERC20.decimals`. Calculates `marginRatio` as `(marginTaxed + marginExcess) / (marginInitial * leverageVal)`, `distanceToLiquidation` as difference from `priceLiquidation`, and `estimatedProfitLoss` (long: `(taxedMargin + excessMargin + leverageVal * marginInitial) / currentPrice - loanInitial`; short: `(priceAtEntry - currentPrice) * marginInitial * leverageVal + (taxedMargin + excessMargin) * currentPrice / DECIMAL_PRECISION`). No transfers or balance checks.
+- **Mappings/Structs Used**: `positionCoreBase`, `marginParams`, `priceParams`, `leverageParams`, `riskParams`, `positionToken`.
+- **Restrictions**: Reverts if `positionId` is invalid ("PositionHealthView: invalid position ID") or price is zero ("PositionHealthView: invalid price returned").
 - **Gas Usage Controls**: View function, minimal gas with single external call.
 
 ### AggregateMarginByToken(address tokenA, address tokenB, uint256 startIndex, uint256 maxIterations)
@@ -187,11 +171,10 @@ The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
   - `tokenB` (address): Second token in the pair.
   - `startIndex` (uint256): Starting index.
   - `maxIterations` (uint256): Maximum positions to process.
-- **Behavior**: Returns arrays of maker addresses and their initial margins for positions associated with the token pair, starting at `startIndex`, up to `maxIterations`.
-- **Internal Call Flow**: Calls `ISSAgent.getListing` (input: `tokenA`, `tokenB`, returns: `listingAddress`). Iterates `positionsByType[0]` and `positionsByType[1]` up to `maxIterations`, collecting `makerAddress` and `marginInitial` from `positionCoreBase` and `marginParams`. No transfers or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `marginParams`, `positionsByType`.
-- **Restrictions**: Reverts if `listingAddress` is zero ("Invalid listing").
+- **Behavior**: Returns maker addresses and initial margins for positions of the token pair, starting at `startIndex`, up to `maxIterations`.
+- **Internal Call Flow**: Calls `ISSAgent.getListing` with try-catch. Iterates `positionsByType[0]` and `positionsByType[1]` up to `maxIterations`, collecting `makerAddress` and `marginInitial`. Returns empty arrays if `startIndex` exceeds total positions. No transfers or balance checks.
+- **Mappings/Structs Used**: `positionCoreBase`, `marginParams`, `positionsByType`.
+- **Restrictions**: Reverts if `listingAddress` is zero ("AggregateMarginByToken: invalid listing address").
 - **Gas Usage Controls**: View function, `maxIterations` limits gas.
 
 ### OpenInterestTrend(address listingAddress, uint256 startIndex, uint256 maxIterations)
@@ -199,31 +182,29 @@ The `SIStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
   - `listingAddress` (address): Listing contract address.
   - `startIndex` (uint256): Starting index.
   - `maxIterations` (uint256): Maximum positions to process.
-- **Behavior**: Returns arrays of leverage amounts and timestamps for open positions associated with `listingAddress`, starting at `startIndex`, up to `maxIterations`.
-- **Internal Call Flow**: Iterates positions up to `positionCount`, collecting `leverageAmount` from `leverageParams` and `historicalInterestTimestamps` for positions with `status2 == 0` and matching `listingAddress`. No external calls, transfers, or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `positionCoreStatus`, `leverageParams`, `historicalInterestTimestamps`, `positionCount`.
-- **Restrictions**: None.
+- **Behavior**: Returns leverage amounts and timestamps for open positions of `listingAddress`, starting at `startIndex`, up to `maxIterations`.
+- **Internal Call Flow**: Validates `listingAddress != address(0)`. Iterates positions up to `positionCount`, collecting `leverageAmount` and `historicalInterestTimestamps` for `status2 == 0`. Returns empty arrays if `startIndex` exceeds `positionCount`. No external calls, transfers, or balance checks.
+- **Mappings/Structs Used**: `positionCoreBase`, `positionCoreStatus`, `leverageParams`, `historicalInterestTimestamps`, `positionCount`.
+- **Restrictions**: Reverts if `listingAddress` is zero ("OpenInterestTrend: invalid listing address").
 - **Gas Usage Controls**: View function, `maxIterations` limits gas.
 
 ### LiquidationRiskCount(address listingAddress, uint256 maxIterations)
 - **Parameters**:
   - `listingAddress` (address): Listing contract address.
   - `maxIterations` (uint256): Maximum positions to process.
-- **Behavior**: Returns the count of positions at liquidation risk (within 5% of `priceLiquidation`) for the given `listingAddress`.
-- **Internal Call Flow**: Iterates positions up to `positionCount` and `maxIterations`, checking `status2 == 0` and `listingAddress`. Fetches `currentPrice` via `ISSListing.prices` (input: `token`, returns: `uint256`) and `tokenA`/`tokenB` via `ISSListing`. Normalizes price with `normalizePrice`. Counts positions where `currentPrice` is within 5% of `riskParams.priceLiquidation` (long: `currentPrice <= priceLiquidation + threshold`; short: `currentPrice >= priceLiquidation - threshold`). No transfers or balance checks.
-- **Mappings/Structs Used**:
-  - **Mappings**: `positionCoreBase`, `positionCoreStatus`, `riskParams`, `positionToken`, `positionCount`.
-- **Restrictions**: None.
+- **Behavior**: Returns count of positions at liquidation risk (within 5% of `priceLiquidation`) for `listingAddress`.
+- **Internal Call Flow**: Validates `listingAddress != address(0)`. Iterates positions up to `positionCount` and `maxIterations`, checking `status2 == 0`. Fetches `currentPrice` via `ISSListing.prices` and `tokenA`/`tokenB` with try-catch. Normalizes price with `normalizePrice`. Counts positions within 5% of `priceLiquidation` (long: `currentPrice <= priceLiquidation + threshold`; short: `currentPrice >= priceLiquidation - threshold`). No transfers or balance checks.
+- **Mappings/Structs Used**: `positionCoreBase`, `positionCoreStatus`, `riskParams`, `positionToken`, `positionCount`.
+- **Restrictions**: Reverts if `listingAddress` is zero ("LiquidationRiskCount: invalid listing address").
 - **Gas Usage Controls**: View function, `maxIterations` limits gas.
 
 ## Additional Details
-- **Decimal Handling**: Uses `DECIMAL_PRECISION` (1e18) for normalization across token decimals, with `IERC20.decimals()` for token-specific precision (assumes `decimals <= 18`).
-- **Execution Deferral**: Unlike `SSIsolatedDriver`, `SIStorage` does not handle position creation (`enterLong`, `enterShort`, `drive`), closure (`closeLongPosition`, `closeShortPosition`, `drift`), cancellation (`cancelPosition`), or margin/risk updates (`addExcessMargin`, `updateSL`, `updateTP`). These are deferred to other contracts, with `SIUpdate` and `removePositionIndex` allowing muxes to update storage directly.
-- **Mux Integration**: `muxes` mapping authorizes external contracts to call `SIUpdate` and `removePositionIndex`. `SIUpdate` uses encoded strings to update position data without validation, assuming trusted mux input.
-- **Position Lifecycle**: Supports pending (`status1 == false`, `status2 == 0`), executable (`status1 == true`, `status2 == 0`), closed (`status2 == 1`), or cancelled (`status2 == 2`) states, updated via `SIUpdate`.
-- **Events**: Emits `MuxAdded`, `MuxRemoved`, and `PositionClosed` (for `SIUpdate` closures).
-- **Gas Optimization**: Uses `maxIterations` for view functions, pop-and-swap for array operations in `removePositionIndex`, and fixed iteration limit (1000) in `getMuxesView` for gas safety.
-- **Safety**: Employs explicit casting, no inline assembly, and modular parsing functions (`parseCoreParams`, `parsePriceParams`, etc.) for robust updates. No reentrancy protection as state-changing functions (`SIUpdate`, `removePositionIndex`) are restricted to `onlyMux`, and view functions are safe.
-- **Listing Validation**: Relies on `ISSAgent.getListing` for token pair validation in view functions like `AggregateMarginByToken`.
-- **Token Usage**: Supports tokenA margins for long positions and tokenB margins for short positions, tracked in `positionToken`.
+- **Decimal Handling**: Uses `DECIMAL_PRECISION` (1e18) for normalization, with `IERC20.decimals()` for token-specific precision (handles `decimals <= 18` or `> 18`).
+- **Execution Deferral**: Defers execution logic (position creation, closure, margin/risk updates) to other contracts. `SIUpdate` and `removePositionIndex` allow muxes to update storage.
+- **Mux Integration**: `muxes` authorizes contracts for `SIUpdate` and `removePositionIndex`. `SIUpdate` uses structured arrays for robust updates.
+- **Position Lifecycle**: Supports pending (`status1 == false`, `status2 == 0`), executable (`status1 == true`, `status2 == 0`), closed (`status2 == 1`), or cancelled (`status2 == 2`) states.
+- **Events**: Emits `MuxAdded`, `MuxRemoved`, `PositionClosed`, and `ErrorLogged` for debugging.
+- **Gas Optimization**: Uses `maxIterations`, pop-and-swap in `removePositionIndex`, and fixed iteration (1000) in `getMuxesView`.
+- **Safety**: Employs explicit casting, no inline assembly, try-catch for external calls, and modular parsing functions. No reentrancy protection needed due to `onlyMux` restrictions.
+- **Listing Validation**: Uses `ISSAgent.getListing` with try-catch for token pair validation.
+- **Token Usage**: Tracks tokenA (long) and tokenB (short) margins in `positionToken`.
