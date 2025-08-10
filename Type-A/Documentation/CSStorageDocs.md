@@ -1,13 +1,13 @@
 # CSStorage Contract Documentation
 
 ## Overview
-The `CSStorage` contract, implemented in Solidity (^0.8.2), serves as a storage and view layer for trading position data, derived from `SSCrossDriver` but focused solely on position storage and retrieval. It integrates with external interfaces (`ISSListing`, `ISSAgent`) and uses `IERC20` for token operations and `Ownable` for administrative control. The contract manages position data updates by authorized mux contracts via `CSUpdate`, supports view functions for querying position and margin details, and ensures decimal precision across tokens. State variables are hidden, accessed via view functions, and all operations adhere to gas optimization and safety mechanisms.
+The `CSStorage` contract, implemented in Solidity (^0.8.2), serves as a storage and view layer for trading position data, derived from `SSCrossDriver` but focused solely on position storage and retrieval. It integrates with external interfaces (`ISSListing`, `ISSAgent`) and uses `IERC20` for token operations and `Ownable` for administrative control. The contract manages position data updates by authorized mux contracts via `CSUpdate`, supports view functions for querying position and margin details, and ensures decimal precision across tokens. State variables and mappings are accessed directly as public, with no additional view functions, and operations adhere to gas optimization and safety mechanisms.
 
 **Inheritance Tree:** `CSStorage` → `Ownable`
 
 **SPDX License:** BSL-1.1 - Peng Protocol 2025
 
-**Version:** 0.0.8 (last updated 2025-07-18)
+**Version:** 0.0.11 (last updated 2025-08-05)
 
 ## State Variables
 - **DECIMAL_PRECISION** (uint256, constant, public): Set to 1e18 for normalizing amounts and prices across token decimals.
@@ -42,6 +42,13 @@ The `CSStorage` contract, implemented in Solidity (^0.8.2), serves as a storage 
 - **MarginParams2**: Stores `initialLoan` (uint256, normalized).
 - **ExitParams**: Includes `stopLossPrice`, `takeProfitPrice`, `exitPrice` (uint256, normalized).
 - **OpenInterest**: Contains `leverageAmount` (uint256, normalized), `timestamp` (uint256).
+- **CoreParams**: Defines `positionId` (uint256), `listingAddress` (address), `makerAddress` (address), `positionType` (uint8), `status1` (bool), `status2` (uint8) for `CSUpdate`.
+- **PriceParams**: Includes `minEntryPrice`, `maxEntryPrice`, `minPrice`, `priceAtEntry`, `leverage`, `liquidationPrice` (uint256, uint8) for `CSUpdate`.
+- **MarginParams**: Tracks `initialMargin`, `taxedMargin`, `excessMargin`, `fee`, `initialLoan` (uint256) for `CSUpdate`.
+- **ExitAndInterestParams**: Stores `stopLossPrice`, `takeProfitPrice`, `exitPrice`, `leverageAmount`, `timestamp` (uint256) for `CSUpdate`.
+- **MakerMarginParams**: Contains `token`, `maker`, `marginToken` (address), `marginAmount` (uint256) for `CSUpdate`.
+- **PositionArrayParams**: Includes `listingAddress` (address), `positionType` (uint8), `addToPending`, `addToActive` (bool) for `CSUpdate`.
+- **HistoricalInterestParams**: Stores `longIO`, `shortIO`, `timestamp` (uint256) for `CSUpdate`.
 
 ## External Functions
 Each function details its parameters, behavior, internal call flow (including external call inputs/returns), restrictions, and gas controls. Mappings and structs are explained in context.
@@ -61,7 +68,7 @@ Each function details its parameters, behavior, internal call flow (including ex
 ### addMux(address mux)
 - **Parameters**:
   - `mux` (address): Address of the mux contract to authorize.
-- **Behavior**: Authorizes a mux contract to call `CSUpdate` and `removePositionIndex`. Emits `MuxAdded`.
+- **Behavior**: Authorizes a mux contract to call `CSUpdate`, `removePositionIndex`, and `removeToken`. Emits `MuxAdded`.
 - **Internal Call Flow**: Validates `mux` is non-zero and not already authorized, sets `muxes[mux] = true`. No external calls or transfers.
 - **Mappings/Structs Used**:
   - **Mappings**: `muxes`.
@@ -73,7 +80,7 @@ Each function details its parameters, behavior, internal call flow (including ex
 ### removeMux(address mux)
 - **Parameters**:
   - `mux` (address): Address of the mux contract to remove.
-- **Behavior**: Revokes mux authorization, disabling access to `CSUpdate` and `removePositionIndex`. Emits `MuxRemoved`.
+- **Behavior**: Revokes mux authorization, disabling access to `CSUpdate`, `removePositionIndex`, and `removeToken`. Emits `MuxRemoved`.
 - **Internal Call Flow**: Validates `mux` is authorized, sets `muxes[mux] = false`. No external calls or transfers.
 - **Mappings/Structs Used**:
   - **Mappings**: `muxes`.
@@ -91,69 +98,67 @@ Each function details its parameters, behavior, internal call flow (including ex
 - **Restrictions**: None.
 - **Gas Usage Controls**: View function, fixed iteration limit (1000) for gas safety.
 
-### CSUpdate(uint256 positionId, string memory coreParams, string memory priceParams, string memory marginParams, string memory exitAndInterestParams, string memory makerMarginParams, string memory positionArrayParams, string memory historicalInterestParams)
+### CSUpdate(uint256 positionId, CoreParams memory coreParams, PriceParams memory priceParams, MarginParams memory marginParams, ExitAndInterestParams memory exitAndInterestParams, MakerMarginParams memory makerMarginParams, PositionArrayParams memory positionArrayParams, HistoricalInterestParams memory historicalInterestParams)
 - **Parameters**:
   - `positionId` (uint256): Position ID to update.
-  - `coreParams` (string): Hyphen-delimited string for core data (positionId-listingAddress-makerAddress-positionType-status1-status2).
-  - `priceParams` (string): Hyphen-delimited string for price data (minEntryPrice-maxEntryPrice-minPrice-priceAtEntry-leverage-liquidationPrice).
-  - `marginParams` (string): Hyphen-delimited string for margin data (initialMargin-taxedMargin-excessMargin-fee-initialLoan).
-  - `exitAndInterestParams` (string): Hyphen-delimited string for exit and interest data (stopLossPrice-takeProfitPrice-exitPrice-leverageAmount-timestamp).
-  - `makerMarginParams` (string): Hyphen-delimited string for margin and token data (token-maker-marginToken-marginAmount).
-  - `positionArrayParams` (string): Hyphen-delimited string for position arrays (listingAddress-positionType-addToPending-addToActive).
-  - `historicalInterestParams` (string): Hyphen-delimited string for interest data (longIO-shortIO-timestamp).
-- **Behavior**: Updates position data without validation, parsing hyphen-delimited strings to update mappings for authorized muxes. Emits no events.
+  - `coreParams` (CoreParams): Core data (positionId, listingAddress, makerAddress, positionType, status1, status2).
+  - `priceParams` (PriceParams): Price data (minEntryPrice, maxEntryPrice, minPrice, priceAtEntry, leverage, liquidationPrice).
+  - `marginParams` (MarginParams): Margin data (initialMargin, taxedMargin, excessMargin, fee, initialLoan).
+  - `exitAndInterestParams` (ExitAndInterestParams): Exit and interest data (stopLossPrice, takeProfitPrice, exitPrice, leverageAmount, timestamp).
+  - `makerMarginParams` (MakerMarginParams): Margin and token data (token, maker, marginToken, marginAmount).
+  - `positionArrayParams` (PositionArrayParams): Position array data (listingAddress, positionType, addToPending, addToActive).
+  - `historicalInterestParams` (HistoricalInterestParams): Interest data (longIO, shortIO, timestamp).
+- **Behavior**: Updates position data with validation, using structured parameters. Emits `UpdateFailed` on errors.
 - **Internal Call Flow**:
-  - Parses `historicalInterestParams` to update `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps` if non-empty.
-  - Calls internal helpers:
-    - `parseCoreParams`: Updates `positionCore1`, `positionCore2` if `corePositionId != 0` or `status2 != type(uint8).max`.
-    - `parsePriceParams`: Updates `priceParams1`, `priceParams2` if price fields are non-zero.
-    - `parseMarginParams`: Updates `marginParams1`, `marginParams2` if margin fields are non-zero.
-    - `parseExitAndInterest`: Updates `exitParams`, `openInterest` if exit or interest fields are non-zero.
-    - `parseMakerMargin`: Updates `positionToken`, `makerTokenMargin`, `makerMarginTokens` if token or margin fields are non-zero.
-    - `parsePositionArrays`: Updates `pendingPositions`, `positionsByType`, `positionCount` if applicable.
+  - Validates `positionId` non-zero.
+  - Calls `CSUpdateInternal` with try-catch, emitting `UpdateFailed` with reason on failure.
+  - `CSUpdateInternal`:
+    - Updates `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps` if non-zero.
+    - Calls helpers: `updateCoreParams`, `updatePriceParams`, `updateMarginParams`, `updateExitAndInterest`, `updateMakerMargin`, `updatePositionArrays`.
+    - Each helper validates inputs, emits `UpdateFailed` if invalid.
   - No external calls or transfers.
 - **Mappings/Structs Used**:
   - **Mappings**: `positionCore1`, `positionCore2`, `priceParams1`, `priceParams2`, `marginParams1`, `marginParams2`, `exitParams`, `openInterest`, `pendingPositions`, `positionToken`, `makerTokenMargin`, `makerMarginTokens`, `longIOByHeight`, `shortIOByHeight`, `historicalInterestTimestamps`, `positionCount`.
-  - **Structs**: `PositionCore1`, `PositionCore2`, `PriceParams1`, `PriceParams2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`.
+  - **Structs**: `PositionCore1`, `PositionCore2`, `PriceParams1`, `PriceParams2`, `MarginParams1`, `MarginParams2`, `ExitParams`, `OpenInterest`, `CoreParams`, `PriceParams`, `MarginParams`, `ExitAndInterestParams`, `MakerMarginParams`, `PositionArrayParams`, `HistoricalInterestParams`.
 - **Restrictions**:
   - Restricted to `onlyMux`.
-  - No reentrancy protection, as it’s a storage function with no external calls.
-  - Reverts if called by unauthorized mux (`"Caller is not a mux"`).
-- **Gas Usage Controls**: Uses string parsing to reduce stack usage, single-element updates, and pop-and-swap for arrays.
+  - Reverts if called by unauthorized mux (`"Caller is not a mux"`) or `positionId` is zero.
+- **Gas Usage Controls**: Uses structured parameters, pop-and-swap for arrays, try-catch for graceful degradation.
 
 ### removePositionIndex(uint256 positionId, uint8 positionType, address listingAddress)
 - **Parameters**:
   - `positionId` (uint256): Position ID to remove.
   - `positionType` (uint8): 0 for long, 1 for short.
   - `listingAddress` (address): Listing contract address.
-- **Behavior**: Removes a position from `pendingPositions` or `positionsByType` using pop-and-swap. Emits no events.
+- **Behavior**: Removes a position from `pendingPositions` or `positionsByType` using pop-and-swap. Emits `RemovalFailed` on errors.
 - **Internal Call Flow**:
-  - Iterates `pendingPositions[listingAddress][positionType]` to find and remove `positionId`.
-  - Iterates `positionsByType[positionType]` to find and remove `positionId`.
-  - Uses pop-and-swap to optimize array updates.
+  - Calls `removePositionIndexInternal` with try-catch, emitting `RemovalFailed` with reason.
+  - `removePositionIndexInternal`:
+    - Iterates `pendingPositions[listingAddress][positionType]` or `positionsByType[positionType]` to find and remove `positionId`.
+    - Uses pop-and-swap to optimize array updates.
   - No external calls or transfers.
 - **Mappings/Structs Used**:
   - **Mappings**: `pendingPositions`, `positionsByType`.
 - **Restrictions**:
   - Restricted to `onlyMux`.
-  - No reentrancy protection, as it’s a storage function.
-  - Reverts if called by unauthorized mux (`"Caller is not a mux"`).
+  - Reverts if called by unauthorized mux or position not found (`"Position not found in arrays"`).
 - **Gas Usage Controls**: Pop-and-swap minimizes gas, single iteration per array.
 
 ### removeToken(address maker, address token)
 - **Parameters**:
   - `maker` (address): Margin owner.
   - `token` (address): Token to remove from margin list.
-- **Behavior**: Removes a token from `makerMarginTokens` if its balance is zero, using pop-and-swap. Emits no events.
+- **Behavior**: Removes a token from `makerMarginTokens` if its balance is zero, using pop-and-swap. Emits `RemovalFailed` on errors.
 - **Internal Call Flow**:
-  - Iterates `makerMarginTokens[maker]` to find and remove `token`.
+  - Calls `removeTokenInternal` with try-catch, emitting `RemovalFailed` with reason.
+  - `removeTokenInternal`:
+    - Iterates `makerMarginTokens[maker]` to find and remove `token`.
   - No external calls or transfers.
 - **Mappings/Structs Used**:
   - **Mappings**: `makerMarginTokens`.
 - **Restrictions**:
   - Restricted to `onlyMux`.
-  - No reentrancy protection, as it’s a storage function.
-  - Reverts if called by unauthorized mux (`"Caller is not a mux"`).
+  - Reverts if called by unauthorized mux or token not found (`"Token not found in maker's list"`).
 - **Gas Usage Controls**: Pop-and-swap minimizes gas, single iteration.
 
 ### positionByIndex(uint256 positionId)
@@ -228,11 +233,12 @@ Each function details its parameters, behavior, internal call flow (including ex
 ### PositionHealthView(uint256 positionId)
 - **Parameters**:
   - `positionId` (uint256): Position ID.
-- **Behavior**: Returns margin ratio, liquidation distance, and estimated profit/loss using formulas from `SSCrossDriver`.
+- **Behavior**: Returns margin ratio, liquidation distance, and estimated profit/loss.
 - **Internal Call Flow**:
   - Retrieves data from `positionCore1`, `marginParams1`, `priceParams1`, `priceParams2`, `positionToken`, `makerTokenMargin`.
   - Calls `ISSListing.tokenA()` or `tokenB()` based on `positionType` to select margin token.
-  - Uses `normalizePrice` and `ISSListing.prices` (input: `listingAddress`, returns: `currentPrice`) to compute:
+  - Calls `ISSListing.prices(0)` (returns: `currentPrice`) and `normalizePrice` to adjust for token decimals.
+  - Computes:
     - `marginRatio = totalMargin * DECIMAL_PRECISION / (initialMargin * leverage)`.
     - `distanceToLiquidation`: `currentPrice - liquidationPrice` (long) or `liquidationPrice - currentPrice` (short), zero if invalid.
     - `estimatedProfitLoss` for long: `(taxedMargin + totalMargin + leverage * initialMargin) / currentPrice - initialLoan`.
@@ -281,8 +287,8 @@ Each function details its parameters, behavior, internal call flow (including ex
 - **Behavior**: Counts positions within 5% of liquidation price for a given listing.
 - **Internal Call Flow**:
   - Iterates `positionCount` up to `maxIterations`, filtering by `positionCore1.listingAddress` and `positionCore2.status2 == 0`.
-  - Uses `ISSListing.tokenA()` or `tokenB()` based on `positionType`.
-  - Calls `normalizePrice` and `ISSListing.prices` (input: `token`, returns: `currentPrice`) to compare `currentPrice` with `priceParams2.liquidationPrice ± 5%`.
+  - Calls `ISSListing.tokenA()` or `tokenB()` based on `positionType`.
+  - Calls `ISSListing.prices(0)` (returns: `currentPrice`) and `normalizePrice` to compare `currentPrice` with `priceParams2.liquidationPrice ± 5%`.
   - Increments count for positions at risk.
   - No transfers.
 - **Mappings/Structs Used**:
@@ -293,11 +299,11 @@ Each function details its parameters, behavior, internal call flow (including ex
 
 ## Additional Details
 - **Decimal Handling**: Uses `DECIMAL_PRECISION` (1e18) for normalization via `normalizePrice`, which adjusts prices based on `IERC20.decimals`.
-- **Gas Optimization**: Employs `maxIterations` for iteration control, pop-and-swap for array updates, and string parsing in `CSUpdate` to reduce stack usage.
+- **Gas Optimization**: Employs `maxIterations` for iteration control, pop-and-swap for array updates, and structured parameters in `CSUpdate` to reduce stack usage.
 - **Listing Validation**: Uses `ISSAgent.getListing` in `AggregateMarginByToken` for listing validation.
 - **Token Usage**: Long positions use `tokenA` margins, short positions use `tokenB` margins, as retrieved via `ISSListing.tokenA()` or `tokenB()`.
 - **Position Lifecycle**: Managed externally by muxes via `CSUpdate`, with `status1` (active) and `status2` (closed) flags.
-- **Safety**: Explicit casting, no inline assembly, and string-based parameter parsing ensure robustness and stack safety.
-- **Mux Functionality**: Authorized muxes (via `muxes` mapping) update position data through `CSUpdate` and manage position arrays via `removePositionIndex`.
-- **No Transfers**: Unlike `SSCrossDriver`, `CSStorage` does not handle token transfers or payouts, focusing solely on storage and retrieval.
-- **Events**: Only `MuxAdded` and `MuxRemoved` are emitted, as position-related events are handled by other contracts.
+- **Safety**: Explicit casting, no inline assembly, try-catch for external calls, and structured parameters ensure robustness.
+- **Mux Functionality**: Authorized muxes (via `muxes` mapping) update position data through `CSUpdate` and manage position arrays via `removePositionIndex` and `removeToken`.
+- **No Transfers**: Unlike `SSCrossDriver`, `CSStorage` focuses solely on storage and retrieval, with no token transfers or payouts.
+- **Events**: `MuxAdded`, `MuxRemoved`, `UpdateFailed`, `RemovalFailed` are emitted for administrative and error logging purposes.
