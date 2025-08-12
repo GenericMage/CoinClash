@@ -1,12 +1,9 @@
-// SPDX-License-License-Identifier: BSL 1.1 - Peng Protocol 2025
+// SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.47
+// Version: 0.0.48
 // Change Log:
-// - 2025-08-11: Created MultiController with continueHop, execution, and control functions.
-// - 2025-08-11: Added MultiStorage state variable with owner-only setter.
-// - 2025-08-11: Updated to use MultiStorage.MHUpdate for hop data updates.
-// - 2025-08-11: Ensured no reserved keywords, proper error handling, and external calls to MultiStorage.
+// - 2025-08-12: Updated _createHopOrderNative and _createHopOrderToken to use received amount from MultiInitializer.
 
 import "./imports/ReentrancyGuard.sol";
 import "./imports/IERC20.sol";
@@ -169,18 +166,22 @@ contract MultiController is ReentrancyGuard {
     }
 
     function _createHopOrderNative(MultiStorage.OrderUpdateData memory orderData, address sender) internal returns (uint256 orderId) {
-        // Creates a native order on the listing
+        // Creates a native order on the listing using received amount
         require(orderData.listing != address(0), "Listing address cannot be zero");
         require(orderData.recipient != address(0), "Recipient address cannot be zero");
         require(orderData.inputAmount > 0, "Input amount must be positive");
         ISSListing listingContract = ISSListing(orderData.listing);
         orderId = listingContract.getNextOrderId();
         uint256 rawAmount = orderData.inputAmount;
-        uint256 transferredAmount = _checkTransferNative(orderData.listing, rawAmount);
+        uint256 balanceBefore = address(orderData.listing).balance;
+        (bool success, ) = payable(orderData.listing).call{value: rawAmount}("");
+        require(success, "Native transfer failed");
+        uint256 balanceAfter = address(orderData.listing).balance;
+        uint256 transferredAmount = balanceAfter - balanceBefore;
         require(transferredAmount == rawAmount, "Native transferred amount mismatch");
         MultiStorage.HopUpdateType[] memory hopUpdates = new MultiStorage.HopUpdateType[](4);
         setOrderStatus(hopUpdates, 0);
-        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", orderData.inputAmount);
+        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", transferredAmount);
         setOrderPrice(hopUpdates, 2, orderData.inputToken == listingContract.tokenB() ? "buyPrice" : "sellPrice", orderData.priceLimit);
         setOrderRecipient(hopUpdates, 3, orderData.recipient);
         ISSListing.UpdateType[] memory updates = new ISSListing.UpdateType[](hopUpdates.length);
@@ -195,7 +196,7 @@ contract MultiController is ReentrancyGuard {
     }
 
     function _createHopOrderToken(MultiStorage.OrderUpdateData memory orderData, address sender) internal returns (uint256 orderId) {
-        // Creates a token order on the listing
+        // Creates a token order on the listing using received amount
         require(orderData.listing != address(0), "Listing address cannot be zero");
         require(orderData.recipient != address(0), "Recipient address cannot be zero");
         require(orderData.inputAmount > 0, "Input amount must be positive");
@@ -203,15 +204,17 @@ contract MultiController is ReentrancyGuard {
         ISSListing listingContract = ISSListing(orderData.listing);
         orderId = listingContract.getNextOrderId();
         uint256 rawAmount = denormalizeForToken(orderData.inputAmount, orderData.inputToken);
-        bool success = IERC20(orderData.inputToken).transferFrom(sender, address(this), rawAmount);
-        require(success, "Token transfer from sender failed");
-        success = IERC20(orderData.inputToken).approve(orderData.listing, rawAmount);
+        uint256 balanceBefore = IERC20(orderData.inputToken).balanceOf(orderData.listing);
+        bool success = IERC20(orderData.inputToken).approve(orderData.listing, rawAmount);
         require(success, "Token approval for listing failed");
-        uint256 transferredAmount = _checkTransferToken(orderData.inputToken, address(this), orderData.listing, rawAmount);
+        success = IERC20(orderData.inputToken).transferFrom(address(this), orderData.listing, rawAmount);
+        require(success, "Token transfer from controller failed");
+        uint256 balanceAfter = IERC20(orderData.inputToken).balanceOf(orderData.listing);
+        uint256 transferredAmount = balanceAfter - balanceBefore;
         require(transferredAmount == rawAmount, "Token transferred amount mismatch");
         MultiStorage.HopUpdateType[] memory hopUpdates = new MultiStorage.HopUpdateType[](4);
         setOrderStatus(hopUpdates, 0);
-        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", orderData.inputAmount);
+        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", transferredAmount);
         setOrderPrice(hopUpdates, 2, orderData.inputToken == listingContract.tokenB() ? "buyPrice" : "sellPrice", orderData.priceLimit);
         setOrderRecipient(hopUpdates, 3, orderData.recipient);
         ISSListing.UpdateType[] memory updates = new ISSListing.UpdateType[](hopUpdates.length);
@@ -289,7 +292,7 @@ contract MultiController is ReentrancyGuard {
             principal: params.principal,
             inputToken: listing.tokenA(),
             settleType: params.settleType,
-            maxIterations: params.maxIterations,
+           maxIterations: params.maxIterations,
             updates: updates
         });
     }
@@ -505,7 +508,7 @@ contract MultiController is ReentrancyGuard {
                 listing: stalledHop.currentListing,
                 orderId: stalledHop.orderID,
                 isBuy: stalledHop.maxPrice > 0,
-                pending: pending,
+  pending: pending,
                 filled: filled,
                 status: status,
                 amountSent: amountSent,

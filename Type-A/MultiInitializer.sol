@@ -1,14 +1,11 @@
-// SPDX-License-License-Identifier: BSL 1.1 - Peng Protocol 2025
+// SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.52
+// Version: 0.0.53
 // Change Log:
-// - 2025-08-11: Removed cancellation functions (cancelHop, cancelAll, etc.) to MultiStorage.sol to reduce contract size below 24.576kb.
-// - 2025-08-11: Updated MultiStorage interface to include new cancellation functions.
-// - 2025-08-11: Refactored prepHop into call tree with HopPrepState struct to fix stack too deep error.
-// - 2025-08-11: Moved OrderUpdateData struct to contract scope to fix DeclarationError.
-// - 2025-08-11: Updated MultiStorage interface to match MultiStorage.sol structs.
-// - 2025-08-11: Modified prepHop to select first router with routerType 1 or 2.
+// - 2025-08-12: Added multiController state variable with owner-only setter.
+// - 2025-08-12: Modified _createHopOrderNative and _createHopOrderToken to transfer principal to MultiController.
+// - 2025-08-12: Updated pre/post balance checks to use received amount for hop creation.
 
 import "./imports/ReentrancyGuard.sol";
 import "./imports/IERC20.sol";
@@ -111,6 +108,7 @@ interface MultiStorage {
 
 contract MultiInitializer is ReentrancyGuard {
     MultiStorage public multiStorage;
+    address public multiController;
 
     struct OrderUpdateData {
         address listing;
@@ -143,6 +141,12 @@ contract MultiInitializer is ReentrancyGuard {
         multiStorage = MultiStorage(storageAddress);
     }
 
+    function setMultiController(address controllerAddress) external onlyOwner {
+        // Sets MultiController contract address
+        require(controllerAddress != address(0), "Invalid controller address");
+        multiController = controllerAddress;
+    }
+
     function getTokenDecimals(address token) internal view returns (uint8 decimals) {
         // Returns token decimals, defaults to 18 for native
         if (token == address(0)) return 18;
@@ -167,18 +171,23 @@ contract MultiInitializer is ReentrancyGuard {
     }
 
     function _createHopOrderNative(OrderUpdateData memory orderData, address sender) internal returns (uint256 orderId) {
-        // Creates a native order on the listing
+        // Creates a native order on the listing, transfers to MultiController
         require(orderData.listing != address(0), "Listing address cannot be zero");
         require(orderData.recipient != address(0), "Recipient address cannot be zero");
         require(orderData.inputAmount > 0, "Input amount must be positive");
+        require(multiController != address(0), "Controller not set");
         ISSListing listingContract = ISSListing(orderData.listing);
         orderId = listingContract.getNextOrderId();
         uint256 rawAmount = orderData.inputAmount;
-        uint256 transferredAmount = _checkTransferNative(orderData.listing, rawAmount);
+        uint256 balanceBefore = address(multiController).balance;
+        (bool success, ) = payable(multiController).call{value: rawAmount}("");
+        require(success, "Native transfer to controller failed");
+        uint256 balanceAfter = address(multiController).balance;
+        uint256 transferredAmount = balanceAfter - balanceBefore;
         require(transferredAmount == rawAmount, "Native transferred amount mismatch");
         MultiStorage.HopUpdateType[] memory hopUpdates = new MultiStorage.HopUpdateType[](4);
         setOrderStatus(hopUpdates, 0);
-        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", orderData.inputAmount);
+        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", transferredAmount);
         setOrderPrice(hopUpdates, 2, orderData.inputToken == listingContract.tokenB() ? "buyPrice" : "sellPrice", orderData.priceLimit);
         setOrderRecipient(hopUpdates, 3, orderData.recipient);
         ISSListing.UpdateType[] memory updates = new ISSListing.UpdateType[](hopUpdates.length);
@@ -193,23 +202,28 @@ contract MultiInitializer is ReentrancyGuard {
     }
 
     function _createHopOrderToken(OrderUpdateData memory orderData, address sender) internal returns (uint256 orderId) {
-        // Creates a token order on the listing
+        // Creates a token order on the listing, transfers to MultiController
         require(orderData.listing != address(0), "Listing address cannot be zero");
         require(orderData.recipient != address(0), "Recipient address cannot be zero");
         require(orderData.inputAmount > 0, "Input amount must be positive");
         require(orderData.inputToken != address(0), "Invalid token address");
+        require(multiController != address(0), "Controller not set");
         ISSListing listingContract = ISSListing(orderData.listing);
         orderId = listingContract.getNextOrderId();
         uint256 rawAmount = denormalizeForToken(orderData.inputAmount, orderData.inputToken);
-        bool success = IERC20(orderData.inputToken).transferFrom(sender, address(this), rawAmount);
-        require(success, "Token transfer from sender failed");
+        bool success = IERC20(orderData.inputToken).transferFrom(sender, multiController, rawAmount);
+        require(success, "Token transfer to controller failed");
+        uint256 balanceBefore = IERC20(orderData.inputToken).balanceOf(multiController);
         success = IERC20(orderData.inputToken).approve(orderData.listing, rawAmount);
         require(success, "Token approval for listing failed");
-        uint256 transferredAmount = _checkTransferToken(orderData.inputToken, address(this), orderData.listing, rawAmount);
+        success = IERC20(orderData.inputToken).transferFrom(multiController, orderData.listing, rawAmount);
+        require(success, "Token transfer from controller failed");
+        uint256 balanceAfter = IERC20(orderData.inputToken).balanceOf(orderData.listing);
+        uint256 transferredAmount = balanceAfter - balanceBefore;
         require(transferredAmount == rawAmount, "Token transferred amount mismatch");
         MultiStorage.HopUpdateType[] memory hopUpdates = new MultiStorage.HopUpdateType[](4);
         setOrderStatus(hopUpdates, 0);
-        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", orderData.inputAmount);
+        setOrderAmount(hopUpdates, 1, orderData.inputToken == listingContract.tokenB() ? "buyAmount" : "sellAmount", transferredAmount);
         setOrderPrice(hopUpdates, 2, orderData.inputToken == listingContract.tokenB() ? "buyPrice" : "sellPrice", orderData.priceLimit);
         setOrderRecipient(hopUpdates, 3, orderData.recipient);
         ISSListing.UpdateType[] memory updates = new ISSListing.UpdateType[](hopUpdates.length);
@@ -340,6 +354,7 @@ contract MultiInitializer is ReentrancyGuard {
         uint256 hopId,
         address maker
     ) internal {
+        
         // Initializes hop data in MultiStorage
         uint256 numListings = 1;
         if (listing2 != address(0)) numListings++;
