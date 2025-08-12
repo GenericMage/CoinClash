@@ -159,3 +159,6 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Security**: `nonReentrant`, try-catch with revert strings, explicit casting, no inline assembly.
 - **Gas Optimization**: `maxIterations`, dynamic array resizing, helper functions (`_prepPayoutContext`, `_checkLiquidityBalance`).
 - **Limitations**: No liquidity management or fee updates; `uniswapV2Router` settable but unused.
+- **Balance Checks**: The contract uses pre/post balance checks to determine the exact amount of tokens or native cryptocurrency (ETH) it receives during a transaction. 
+When a user calls a function like `createTokenBuyOrder` or `createNativeSellOrder`, the contract first checks the current balance of the `listingAddress` for the relevant token or ETH before the transfer happens. Then, it executes the transfer from the user to the `listingAddress`.
+Finally, it checks the balance of the `listingAddress` again after the transfer. The difference between the post-transfer balance and the pre-transfer balance is the actual amount received. This received amount is then used to create the order.  
