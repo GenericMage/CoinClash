@@ -189,7 +189,7 @@ The `Multihopper` system, implemented in Solidity (^0.8.2), facilitates multi-st
 - **Internal Call Tree**:
   - Validates `maxIterations > 0`.
   - Calls `prepStalls`:
-    - Iterates `totalHops` (capped at 20).
+    - Iterates `totalHops` (up to `mmaxIterations`).
     - Calls `checkOrderStatus` for each hop.
     - Returns `StallData[]`.
   - Iterates `StallData[]` (up to `maxIterations`):
@@ -198,7 +198,7 @@ The `Multihopper` system, implemented in Solidity (^0.8.2), facilitates multi-st
   - Calls `MHUpdate` for state updates.
 - **Return Values**: None.
 - **Balance Checks**: Same as `continueHop`.
-- **Gas Controls**: `maxIterations` for hops, 20-stall cap in `prepStalls`, `StalledHop.maxIterations` for settlements.
+- **Gas Controls**: `maxIterations` for hops and `prepStalls`, `StalledHop.maxIterations` for settlements.
 - **Error Handling**:
   - Reverts if `maxIterations == 0` ("Max iterations must be positive").
   - Reverts on transfer or order failures.
@@ -206,7 +206,7 @@ The `Multihopper` system, implemented in Solidity (^0.8.2), facilitates multi-st
 ## Additional Details
 - **Decimal Handling**: Uses `normalizeForToken` and `denormalizeForToken` for tokens with decimals ≤ 18.
 - **Reentrancy Protection**: `nonReentrant` on state-changing functions.
-- **Gas Optimization**: Uses `maxIterations`, pop-and-swap, 20-stall cap.
+- **Gas Optimization**: Uses `maxIterations`, pop-and-swap.
 - **Listing Validation**: Via `validateHopRequest` and `onlyValidListing`.
 - **Token Flow**: Buy: `tokenB → tokenA`; sell: `tokenA → tokenB`. From `startToken` to `endToken` via `amountSent` in `MultiController.sol`.
 - **Hop Lifecycle**: Stalled (`hopStatus = 1`), cancelled/completed (`hopStatus = 2`).

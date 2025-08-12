@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.48
+// Version: 0.0.49
 // Change Log:
+// - 2025-08-12: Removed hard cap of 20 in prepStalls, using maxIterations instead.
 // - 2025-08-12: Updated _createHopOrderNative and _createHopOrderToken to use received amount from MultiInitializer.
 
 import "./imports/ReentrancyGuard.sol";
@@ -236,8 +237,8 @@ contract MultiController is ReentrancyGuard {
         (bool success, ) = payable(to).call{value: amount}("");
         require(success, "Native transfer failed");
         uint256 balanceAfter = address(to).balance;
-        require(balanceAfter > balanceBefore, "Native transfer did not increase balance");
         transferredAmount = balanceAfter - balanceBefore;
+        require(transferredAmount == amount, "Native transfer amount mismatch");
     }
 
     function _checkTransferToken(address token, address from, address to, uint256 amount) internal returns (uint256 transferredAmount) {
@@ -247,80 +248,105 @@ contract MultiController is ReentrancyGuard {
         require(amount > 0, "Transfer amount must be positive");
         uint256 balanceBefore = IERC20(token).balanceOf(to);
         bool success = IERC20(token).transferFrom(from, to, amount);
-        require(success, "ERC20 transfer failed");
+        require(success, "Token transfer failed");
         uint256 balanceAfter = IERC20(token).balanceOf(to);
-        require(balanceAfter > balanceBefore, "Token transfer did not increase balance");
         transferredAmount = balanceAfter - balanceBefore;
+        require(transferredAmount == amount, "Token transfer amount mismatch");
+    }
+
+    function _validatePriceImpact(address listing, bool isBuy, uint256 inputAmount, uint256 impactPercent) internal view returns (uint256 priceLimit) {
+        // Validates price impact for the order
+        ISSListing listingContract = ISSListing(listing);
+        (uint256 xBalance, uint256 yBalance,,) = listingContract.listingVolumeBalancesView();
+        uint256 currentPrice = listingContract.listingPriceView();
+        uint256 newXBalance = isBuy ? xBalance : xBalance + inputAmount;
+        uint256 newYBalance = isBuy ? yBalance + inputAmount : yBalance;
+        uint256 impactPrice = (newXBalance * 1e18) / newYBalance;
+        uint256 upperBound = (currentPrice * (10000 + impactPercent)) / 10000;
+        uint256 lowerBound = (currentPrice * (10000 - impactPercent)) / 10000;
+        require(impactPrice >= lowerBound && impactPrice <= upperBound, "Price impact out of bounds");
+        priceLimit = isBuy ? upperBound : lowerBound;
     }
 
     function computeBuyOrderParams(MultiStorage.OrderParams memory params, address maker) internal view returns (MultiStorage.HopExecutionData memory execData) {
         // Computes parameters for a buy order
-        ISSListing listing = ISSListing(params.listing);
-        uint256 priceLimit = _validatePriceImpact(params.listing, params.principal, true, params.impactPercent);
-        MultiStorage.HopUpdateType[] memory updates = new MultiStorage.HopUpdateType[](4);
-        setOrderStatus(updates, 0);
-        setOrderAmount(updates, 1, "buyAmount", params.principal);
-        setOrderPrice(updates, 2, "buyPrice", priceLimit);
-        setOrderRecipient(updates, 3, maker);
+        ISSListing listingContract = ISSListing(params.listing);
+        address inputToken = listingContract.tokenB();
+        uint256 priceLimit = _validatePriceImpact(params.listing, true, params.principal, params.impactPercent);
         execData = MultiStorage.HopExecutionData({
             listing: params.listing,
             isBuy: true,
             recipient: maker,
             priceLimit: priceLimit,
             principal: params.principal,
-            inputToken: listing.tokenB(),
+            inputToken: inputToken,
             settleType: params.settleType,
             maxIterations: params.maxIterations,
-            updates: updates
+            updates: new MultiStorage.HopUpdateType[](4)
         });
     }
 
     function computeSellOrderParams(MultiStorage.OrderParams memory params, address maker) internal view returns (MultiStorage.HopExecutionData memory execData) {
         // Computes parameters for a sell order
-        ISSListing listing = ISSListing(params.listing);
-        uint256 priceLimit = _validatePriceImpact(params.listing, params.principal, false, params.impactPercent);
-        MultiStorage.HopUpdateType[] memory updates = new MultiStorage.HopUpdateType[](4);
-        setOrderStatus(updates, 0);
-        setOrderAmount(updates, 1, "sellAmount", params.principal);
-        setOrderPrice(updates, 2, "sellPrice", priceLimit);
-        setOrderRecipient(updates, 3, maker);
+        ISSListing listingContract = ISSListing(params.listing);
+        address inputToken = listingContract.tokenA();
+        uint256 priceLimit = _validatePriceImpact(params.listing, false, params.principal, params.impactPercent);
         execData = MultiStorage.HopExecutionData({
             listing: params.listing,
             isBuy: false,
             recipient: maker,
             priceLimit: priceLimit,
             principal: params.principal,
-            inputToken: listing.tokenA(),
+            inputToken: inputToken,
             settleType: params.settleType,
-           maxIterations: params.maxIterations,
-            updates: updates
+            maxIterations: params.maxIterations,
+            updates: new MultiStorage.HopUpdateType[](4)
         });
     }
 
-    function _validatePriceImpact(address listing, uint256 inputAmount, bool isBuy, uint256 impactPercent)
-        internal view returns (uint256 impactPrice)
-    {
-        // Validates price impact for an order
-        require(listing != address(0), "Listing address cannot be zero");
-        ISSListing listingContract = ISSListing(listing);
-        (uint256 xBalance, uint256 yBalance, , ) = listingContract.listingVolumeBalancesView();
-        require(xBalance > 0 && yBalance > 0, "Invalid listing balances");
-        uint256 amountOut = isBuy ? (inputAmount * xBalance) / yBalance : (inputAmount * yBalance) / xBalance;
-        uint256 newXBalance = isBuy ? xBalance - amountOut : xBalance + inputAmount;
-        uint256 newYBalance = isBuy ? yBalance + inputAmount : yBalance - amountOut;
-        require(newYBalance > 0, "Resulting yBalance cannot be zero");
-        impactPrice = (newXBalance * 1e18) / newYBalance;
-        uint256 currentPrice = listingContract.listingPriceView();
-        require(currentPrice > 0, "Current listing price is zero");
-        uint256 limitPrice = isBuy ? (currentPrice * (10000 + impactPercent)) / 10000 : (currentPrice * (10000 - impactPercent)) / 10000;
-        require(isBuy ? impactPrice <= limitPrice : impactPrice >= limitPrice, "Price impact exceeds limit");
+    function safeSettle(address listing, bool isBuy, uint8 settleType, uint256 maxIterations) internal {
+        // Safely settles orders via routers
+        require(listing != address(0), "Invalid listing address");
+        if (settleType == 0) {
+            MultiStorage.SettlementRouter[] memory routers = multiStorage.settlementRouters();
+            for (uint256 i = 0; i < routers.length; i++) {
+                if (routers[i].routerType != 1) continue;
+                try ICCSettlementRouter(routers[i].router).settleBuyOrders(listing, maxIterations) {
+                    // Buy settlement successful
+                } catch Error(string memory reason) {
+                    emit SettlementFailed(listing, reason);
+                }
+                try ICCSettlementRouter(routers[i].router).settleSellOrders(listing, maxIterations) {
+                    // Sell settlement successful
+                } catch Error(string memory reason) {
+                    emit SettlementFailed(listing, reason);
+                }
+            }
+        } else if (settleType == 1) {
+            MultiStorage.LiquidRouter[] memory routers = multiStorage.liquidRouters();
+            for (uint256 i = 0; i < routers.length; i++) {
+                if (routers[i].routerType != 2) continue;
+                try ICCLiquidRouter(routers[i].router).settleBuyLiquid(listing, maxIterations) {
+                    // Buy liquid settlement successful
+                } catch Error(string memory reason) {
+                    emit SettlementFailed(listing, reason);
+                }
+                try ICCLiquidRouter(routers[i].router).settleSellLiquid(listing, maxIterations) {
+                    // Sell liquid settlement successful
+                } catch Error(string memory reason) {
+                    emit SettlementFailed(listing, reason);
+                }
+            }
+        } else {
+            revert("Invalid settle type");
+        }
     }
 
-    function checkOrderStatus(address listing, uint256 orderId, bool isBuy)
-        internal view returns (uint256 pending, uint256 filled, uint8 status, uint256 amountSent)
-    {
-        // Checks the status of an order
-        require(listing != address(0), "Listing address cannot be zero");
+    event SettlementFailed(address indexed listing, string reason);
+
+    function checkOrderStatus(address listing, uint256 orderId, bool isBuy) internal view returns (uint256 pending, uint256 filled, uint8 status, uint256 amountSent) {
+        // Checks order status and amounts
+        require(listing != address(0), "Invalid listing address");
         ISSListing listingContract = ISSListing(listing);
         if (isBuy) {
             (, , status) = listingContract.getBuyOrderCore(orderId);
@@ -328,45 +354,6 @@ contract MultiController is ReentrancyGuard {
         } else {
             (, , status) = listingContract.getSellOrderCore(orderId);
             (pending, filled, amountSent) = listingContract.getSellOrderAmounts(orderId);
-        }
-        require(status <= 3, "Invalid order status");
-    }
-
-    function safeSettle(address listing, bool isBuy, uint8 settleType, uint256 maxIterations)
-        internal
-    {
-        // Safely settles orders using routers
-        require(listing != address(0), "Listing address cannot be zero");
-        require(maxIterations > 0, "Max iterations must be positive");
-        require(settleType <= 1, "Invalid settle type");
-        if (settleType == 0) {
-            MultiStorage.SettlementRouter[] memory routers = multiStorage.settlementRouters();
-            require(routers.length > 0, "No settlement routers configured");
-            for (uint256 i = 0; i < routers.length; i++) {
-                if (routers[i].routerType != 1) continue;
-                ICCSettlementRouter router = ICCSettlementRouter(routers[i].router);
-                try router.settleBuyOrders(listing, maxIterations) {
-                    if (!isBuy) try router.settleSellOrders(listing, maxIterations) {} catch Error(string memory reason) {
-                        revert(string(abi.encodePacked("Settlement router sell failed: ", reason)));
-                    }
-                } catch Error(string memory reason) {
-                    revert(string(abi.encodePacked("Settlement router buy failed: ", reason)));
-                }
-            }
-        } else {
-            MultiStorage.LiquidRouter[] memory routers = multiStorage.liquidRouters();
-            require(routers.length > 0, "No liquid routers configured");
-            for (uint256 i = 0; i < routers.length; i++) {
-                if (routers[i].routerType != 2) continue;
-                ICCLiquidRouter router = ICCLiquidRouter(routers[i].router);
-                try router.settleBuyLiquid(listing, maxIterations) {
-                    if (!isBuy) try router.settleSellLiquid(listing, maxIterations) {} catch Error(string memory reason) {
-                        revert(string(abi.encodePacked("Liquid router sell failed: ", reason)));
-                    }
-                } catch Error(string memory reason) {
-                    revert(string(abi.encodePacked("Liquid router buy failed: ", reason)));
-                }
-            }
         }
     }
 
@@ -376,12 +363,10 @@ contract MultiController is ReentrancyGuard {
         bool isNative
     ) internal returns (bool completed, uint256 orderId, uint256 amountSent) {
         // Processes a single hop step
-        require(execData.listing != address(0), "Invalid listing in execution data");
-        require(execData.recipient != address(0), "Invalid recipient in execution data");
         MultiStorage.OrderUpdateData memory orderData = MultiStorage.OrderUpdateData({
             listing: execData.listing,
             recipient: execData.recipient,
-            inputAmount: normalizeForToken(execData.principal, execData.inputToken),
+            inputAmount: execData.principal,
             priceLimit: execData.priceLimit,
             inputToken: execData.inputToken
         });
@@ -492,12 +477,13 @@ contract MultiController is ReentrancyGuard {
         executeHopSteps(params, prepData);
     }
 
-    function prepStalls() internal returns (MultiStorage.StallData[] memory stalls) {
-        // Prepares stalled hop data
+    function prepStalls(uint256 maxIterations) internal returns (MultiStorage.StallData[] memory stalls) {
+        // Prepares stalled hop data up to maxIterations
+        require(maxIterations > 0, "Max iterations must be positive");
         uint256[] memory totalHopsList = multiStorage.totalHops();
         stalls = new MultiStorage.StallData[](totalHopsList.length);
         uint256 count = 0;
-        for (uint256 i = 0; i < totalHopsList.length && count < 20; i++) {
+        for (uint256 i = 0; i < totalHopsList.length && count < maxIterations; i++) {
             MultiStorage.StalledHop memory stalledHop = multiStorage.hopID(totalHopsList[i]);
             if (stalledHop.hopStatus != 1) continue;
             (uint256 pending, uint256 filled, uint8 status, uint256 amountSent) = checkOrderStatus(
@@ -508,7 +494,7 @@ contract MultiController is ReentrancyGuard {
                 listing: stalledHop.currentListing,
                 orderId: stalledHop.orderID,
                 isBuy: stalledHop.maxPrice > 0,
-  pending: pending,
+                pending: pending,
                 filled: filled,
                 status: status,
                 amountSent: amountSent,
@@ -527,7 +513,7 @@ contract MultiController is ReentrancyGuard {
     function executeStalls(uint256 maxIterations) external nonReentrant {
         // Executes stalled hops
         require(maxIterations > 0, "Max iterations must be positive");
-        MultiStorage.StallData[] memory stalls = prepStalls();
+        MultiStorage.StallData[] memory stalls = prepStalls(maxIterations);
         uint256 count = 0;
         for (uint256 i = 0; i < stalls.length && count < maxIterations; i++) {
             if (stalls[i].hopId == 0) continue;
