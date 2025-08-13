@@ -1,7 +1,10 @@
-// SPDX-License-License-Identifier: BSL 1.1 - Peng Protocol 2025
+// SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version 0.0.75: Consolidated cancellation functions, added maker restrictions
+// Version 0.0.77: Added executeEntryStalls function
+// - Added executeEntryStalls to globally continue stalled hops without maker restriction
+// - Updated multiStorage state variable and setter (0.0.76)
+// - Consolidated cancellation functions, added maker restrictions (0.0.75)
 // - Removed cancelCrossEntryHop, cancelIsolatedEntryHop; replaced with cancelEntryHopByMaker
 // - Updated _cancelEntryHop to ensure maker-only cancellation
 // - Verified continueCrossEntryHops, continueIsolatedEntryHops restrict to maker
@@ -97,6 +100,7 @@ contract ShockEntry is ReentrancyGuard {
     address public cisExecutionDriver;
     address public multiInitializer;
     address public multiController;
+    address public multiStorage;
     uint256 public hopCount;
     mapping(address => uint256[]) public userHops;
     mapping(uint256 => EntryHopCore) public entryHopsCore;
@@ -127,6 +131,14 @@ contract ShockEntry is ReentrancyGuard {
         uint256 maxEntryPrice;
     }
 
+    struct HopContext {
+        address maker;
+        uint256 hopId;
+        address startToken;
+        uint256 totalAmount;
+        bool isCrossDriver;
+    }
+
     struct HopParams {
         address[] listings;
         uint256 impactPercent;
@@ -146,14 +158,6 @@ contract ShockEntry is ReentrancyGuard {
         uint256 stopLossPrice;
         uint256 takeProfitPrice;
         uint8 positionType;
-    }
-
-    struct HopContext {
-        address maker;
-        uint256 hopId;
-        address startToken;
-        uint256 totalAmount;
-        bool isCrossDriver;
     }
 
     event EntryHopStarted(address indexed maker, uint256 indexed entryHopId, uint256 hopId, bool isCrossDriver);
@@ -271,6 +275,7 @@ contract ShockEntry is ReentrancyGuard {
         if (hopMaker == address(0)) revert("Invalid maker address");
         if (multiInitializer == address(0)) revert("MultiInitializer not set");
         if (multiController == address(0)) revert("MultiController not set");
+        if (multiStorage == address(0)) revert("MultiStorage not set");
         if (isCrossDriver && (ccsEntryDriver == address(0) || ccsExecutionDriver == address(0))) revert("Cross drivers not set");
         if (!isCrossDriver && (cisEntryDriver == address(0) || cisExecutionDriver == address(0))) revert("Isolated drivers not set");
         _validatePositionToken(posParams.listingAddress, hopParams.endToken, posParams.positionType);
@@ -299,6 +304,38 @@ contract ShockEntry is ReentrancyGuard {
                     } else {
                         ICISEntryDriver(entryDriver).executePositions(core.listingAddress);
                         ICISExecutionDriver(executionDriver).executeEntries(core.listingAddress, maxIterations);
+                    }
+                } catch Error(string memory reason) {
+                    margin.status = 3;
+                    emit EntryHopCancelled(entryHopId, 0, reason);
+                }
+                processed++;
+            }
+        }
+    }
+
+    // Attempts to globally continue stalled hops without maker restriction
+    function _executeEntryStalls(uint256 maxIterations, bool isCrossDriver) private {
+        if (multiStorage == address(0)) revert("MultiStorage not set");
+        uint256[] memory totalHopsList = IMultiStorage(multiStorage).totalHops();
+        uint256 processed = 0;
+        for (uint256 i = 0; i < totalHopsList.length && processed < maxIterations; i++) {
+            uint256 entryHopId = totalHopsList[i];
+            EntryHopMargin storage margin = entryHopsMargin[entryHopId];
+            EntryHopParams storage params = entryHopsParams[entryHopId];
+            if (margin.status == 1 && params.isCrossDriver == isCrossDriver) {
+                try IMultiController(multiController).continueHop(entryHopId, maxIterations) {
+                    margin.status = 2;
+                    address entryDriver = isCrossDriver ? ccsEntryDriver : cisEntryDriver;
+                    address executionDriver = isCrossDriver ? ccsExecutionDriver : cisExecutionDriver;
+                    if (entryDriver == address(0)) revert("Entry driver not set");
+                    if (executionDriver == address(0)) revert("Execution driver not set");
+                    if (isCrossDriver) {
+                        ICCSEntryDriver(entryDriver).executePositions(entryHopsCore[entryHopId].listingAddress);
+                        ICCSExecutionDriver(executionDriver).executeEntries(entryHopsCore[entryHopId].listingAddress, maxIterations);
+                    } else {
+                        ICISEntryDriver(entryDriver).executePositions(entryHopsCore[entryHopId].listingAddress);
+                        ICISExecutionDriver(executionDriver).executeEntries(entryHopsCore[entryHopId].listingAddress, maxIterations);
                     }
                 } catch Error(string memory reason) {
                     margin.status = 3;
@@ -391,6 +428,11 @@ contract ShockEntry is ReentrancyGuard {
         multiController = _multiController;
     }
 
+    function setMultiStorage(address _multiStorage) external onlyOwner {
+        if (_multiStorage == address(0)) revert("Invalid MultiStorage address");
+        multiStorage = _multiStorage;
+    }
+
     function setCCSEntryDriver(address _ccsEntryDriver) external onlyOwner {
         if (_ccsEntryDriver == address(0)) revert("Invalid CCSEntryDriver address");
         ccsEntryDriver = _ccsEntryDriver;
@@ -476,6 +518,10 @@ contract ShockEntry is ReentrancyGuard {
         _continueEntryHops(1, isCrossDriver);
     }
 
+    function executeEntryStalls(uint256 maxIterations, bool isCrossDriver) external nonReentrant {
+        _executeEntryStalls(maxIterations, isCrossDriver);
+    }
+
     function cancelEntryHop(uint256 entryHopId, bool isCrossDriver) external nonReentrant {
         _cancelEntryHop(entryHopId, isCrossDriver);
     }
@@ -497,6 +543,10 @@ contract ShockEntry is ReentrancyGuard {
 
     function multiControllerView() external view returns (address) {
         return multiController;
+    }
+
+    function multiStorageView() external view returns (address) {
+        return multiStorage;
     }
 
     function ccsEntryDriverView() external view returns (address) {

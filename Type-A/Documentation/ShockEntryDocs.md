@@ -1,13 +1,20 @@
+
 # ShockEntry Contract Documentation
 
 ## Overview
 The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-hop token swaps via `MultiInitializer`, followed by position creation using `CCSEntryDriver` or `CISEntryDriver`, finalized by `ICCSExecutionDriver` or `ICISExecutionDriver`. It supports up to four listings per hop, handles ERC20 and native tokens, normalizes amounts/prices to 1e18 precision, and ensures secure position creation with leverage, stop-loss, and take-profit settings. It uses `ReentrancyGuard` for security and `Ownable` for administrative control, avoiding `SafeERC20`, inline assembly, and reserved keywords. Public state variables are accessed directly, with mappings tracking user hops and entry details.
 
 - **SPDX License**: BSL 1.1 - Peng Protocol 2025
-- **Version**: 0.0.75 (updated 2025-08-12)
+- **Version**: 0.0.78 (updated 2025-08-13)
+- **Change Log**:
+  - 2025-08-13: Clarified `executeEntryStalls`, `_continueEntryHops`, and `continueEntryHop` documentation to state that failed `IMultiController.continueHop` calls leave `status = 1`, requiring manual cancellation via `cancelEntryHop`.
+  - 2025-08-13: Added `executeEntryStalls` function to globally continue stalled hops without maker restriction.
+  - 2025-08-13: Added `multiStorage` state variable and `setMultiStorage` function, corrected cancellation flow to reflect `MultiStorage` handling.
+  - 2025-08-12: Consolidated cancellation functions, added maker restrictions.
 - **Compatible Contracts**:
   - `MultiInitializer` v0.0.44
   - `MultiController` v0.0.44
+  - `MultiStorage` v0.0.49
   - `CCSEntryDriver` v0.0.61
   - `CISEntryDriver` v0.0.61
   - `ICCSExecutionDriver`
@@ -15,11 +22,11 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
   - `ISSListingTemplate` v0.0.10
 
 ## Clarifications
-- **Token Flow**: ERC20 tokens are transferred from `msg.sender` to `ShockEntry` via `IERC20.transferFrom`, approved for `MultiInitializer`, swapped to `endToken`, and used for position creation. Native tokens are sent via `msg.value` and forwarded to `MultiInitializer`. Refunds on cancellation are processed from `MultiController` to `ShockEntry` and then to the `maker` via `_refundMaker`.
+- **Token Flow**: ERC20 tokens are transferred from `msg.sender` to `ShockEntry` via `IERC20.transferFrom`, approved for `MultiInitializer`, swapped to `endToken`, and used for position creation. Native tokens are sent via `msg.value` and forwarded to `MultiInitializer`. Refunds on cancellation are processed via `MultiStorage.cancelHop`, called by `MultiController.cancelHop`, with funds returned to `ShockEntry` and then to the `maker` via `_refundMaker`.
 - **Hop Execution**: `_executeEntryHopToken`/`_executeEntryHopNative` initiate hops via `MultiInitializer.hopToken`/`hopNative`, store details in split `EntryHop` structs, call `IMultiController.executeStalls` to process stalled hops, and attempt continuation via `_attemptContinuation`. If `executeStalls` completes the hop (`MultiStorage.hopID.hopStatus = 2`), `continueHop` may revert, but `try-catch` ensures graceful degradation.
 - **Position Creation**: On successful hop (`hopStatus = 2`), `_attemptContinuation` calls `executePositions` on the entry driver (`CCSEntryDriver`/`CISEntryDriver`) and `executeEntries` on the execution driver (`ICCSExecutionDriver`/`ICISExecutionDriver`).
-- **Continuation**: `continueEntryHop` and `continueCrossEntryHops`/`continueIsolatedEntryHops` process stalled hops (`entryHopsMargin.status = 1`, `maker = msg.sender`), calling `IMultiController.continueHop` and triggering position creation.
-- **Cancellation**: `cancelEntryHop` cancels a hop, restricted to the `maker`, calling `IMultiController.cancelHop`, refunding via `_refundMaker`, and updating `status = 3`.
+- **Continuation**: `continueEntryHop` and `continueCrossEntryHops`/`continueIsolatedEntryHops` process stalled hops (`entryHopsMargin.status = 1`, `maker = msg.sender`), calling `IMultiController.continueHop` and triggering position creation. `executeEntryStalls` processes stalled hops globally without maker restriction, using `IMultiStorage.totalHops`.
+- **Cancellation**: `cancelEntryHop` cancels a hop, restricted to the `maker`, calling `IMultiController.cancelHop`, which uses `MultiStorage.cancelHop` to process refunds, returned to `ShockEntry` and sent to the `maker` via `_refundMaker`, updating `status = 3`.
 - **Maker Flexibility**: `crossEntryHopToken`/`Native` and `isolatedEntryHopToken`/`Native` allow a `maker` address, defaulting to `msg.sender` if `address(0)`.
 - **Decimal Handling**: Amounts/prices are normalized to 1e18 using `IERC20.decimals` for ERC20 tokens; native tokens use raw values.
 - **Hop Lifecycle**: Hops are pending (1), completed (2), or cancelled (3) in `entryHopsMargin.status`, with `MultiStorage.hopID.hopStatus` indicating stalled (1) or completed (2).
@@ -37,6 +44,7 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 - `cisExecutionDriver` (address): Address of `ICISExecutionDriver`, set via `setCISExecutionDriver`.
 - `multiInitializer` (address): Address of `MultiInitializer`, set via `setMultiInitializer`.
 - `multiController` (address): Address of `MultiController`, set via `setMultiController`.
+- `multiStorage` (address): Address of `MultiStorage`, set via `setMultiStorage`.
 - `hopCount` (uint256): Tracks total hops, incremented per hop.
 - `userHops` (mapping(address => uint256[])): Maps user addresses to their hop IDs.
 - `entryHopsCore` (mapping(uint256 => EntryHopCore)): Stores core hop data (maker, hopId, listingAddress, positionType).
@@ -87,6 +95,36 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 
 ## Functions
 
+### executeEntryStalls(uint256 maxIterations, bool isCrossDriver)
+- **Parameters**:
+  - `maxIterations` (uint256): Maximum hops to process.
+  - `isCrossDriver` (bool): True for `CCSEntryDriver`, false for `CISEntryDriver`.
+- **Behavior**: Globally continues stalled hops (`entryHopsMargin.status = 1`, matching `isCrossDriver`) using `IMultiStorage.totalHops`, up to `maxIterations`, without maker restriction. Calls `_executeEntryStalls` to process hops, invoking `IMultiController.continueHop`, `executePositions`, and `executeEntries`. If `continueHop` fails (e.g., due to liquidity issues), the hop remains pending (`status = 1`), requiring manual cancellation via `cancelEntryHop`.
+- **Internal Call Flow**:
+  - Calls `_executeEntryStalls(maxIterations, isCrossDriver)`:
+    - Validates `multiStorage` is set.
+    - Retrieves `totalHopsList` from `IMultiStorage.totalHops`.
+    - Iterates up to `maxIterations`, checks `entryHopsMargin.status == 1` and `entryHopsParams.isCrossDriver`.
+    - Calls `IMultiController.continueHop(entryHopId, maxIterations)` to progress the hop.
+    - On success, sets `entryHopsMargin.status = 2`, calls `ICCSEntryDriver`/`CISEntryDriver.executePositions` and `ICCSExecutionDriver`/`ICISExecutionDriver.executeEntries` based on `isCrossDriver`.
+    - On failure, leaves `status = 1`, requiring user-initiated cancellation.
+- **Balance Checks**: None directly; handled by `IMultiController.continueHop`.
+- **Mappings/Structs Used**:
+  - **Mappings**: `entryHopsCore`, `entryHopsMargin`, `entryHopsParams`.
+  - **Structs**: `EntryHopCore`, `EntryHopMargin`, `EntryHopParams`.
+- **Restrictions**: `nonReentrant`, reverts if `multiStorage` or drivers are not set.
+- **Gas Usage Controls**: Bounded by `maxIterations`, minimal external calls (three per hop).
+
+### setMultiStorage(address _multiStorage)
+- **Parameters**:
+  - `_multiStorage` (address): Address of `MultiStorage`.
+- **Behavior**: Sets `multiStorage`, validates non-zero address, restricted to owner.
+- **Internal Call Flow**: None.
+- **Balance Checks**: None.
+- **Mappings/Structs Used**: None.
+- **Restrictions**: `onlyOwner`, non-zero address.
+- **Gas Usage Controls**: Minimal, single state update.
+
 ### crossEntryHopToken(address[] memory listings, uint256 impactPercent, address[] memory tokens, uint8 settleType, uint256 maxIterations, PositionParams memory posParams, address maker)
 - **Parameters**:
   - `listings` (address[]): Up to four listing addresses for the hop.
@@ -101,7 +139,7 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
   - Validates `tokens.length == 2`, sets `hopMaker` (`maker` or `msg.sender`).
   - Constructs `HopParams` from inputs.
   - Calls `_executeEntryHopToken(hopMaker, hopParams, posParams, true, maxIterations)`:
-    - `_validateAndSetupHop`: Ensures non-zero addresses (`hopMaker`, `multiInitializer`, `multiController`, `ccsEntryDriver`, `ccsExecutionDriver`) and validates `endToken` matches `positionType` via `_validatePositionToken`.
+    - `_validateAndSetupHop`: Ensures non-zero addresses (`hopMaker`, `multiInitializer`, `multiController`, `multiStorage`, `ccsEntryDriver`, `ccsExecutionDriver`) and validates `endToken` matches `positionType` via `_validatePositionToken`.
     - `_transferAndApproveTokens`: Transfers `totalAmount` (initialMargin + excessMargin) from `hopMaker` to `ShockEntry` via `IERC20.transferFrom` and approves `MultiInitializer` via `IERC20.approve`.
     - `_initHopContext`: Stores `HopContext` in `hopContexts` with `hopMaker`, `hopCount`, `startToken`, `totalAmount`, `isCrossDriver = true`.
     - `_executeMultihop`: Increments `hopCount`, calls `_storePositionCore`, `_storePositionMargin`, `_storePositionParams` to store hop data, returns `entryHopId`.
@@ -136,7 +174,7 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
   - Validates `tokens.length == 2`, sets `hopMaker`.
   - Constructs `HopParams` from inputs.
   - Calls `_executeEntryHopNative(hopMaker, hopParams, posParams, true, maxIterations)`:
-    - `_validateAndSetupHop`: Same as above, ensuring `ccsEntryDriver` and `ccsExecutionDriver` are set.
+    - `_validateAndSetupHop`: Same as above, ensuring `ccsEntryDriver`, `ccsExecutionDriver`, and `multiStorage` are set.
     - `_transferNative`: Validates `msg.value == totalAmount` and forwards to `MultiInitializer` via low-level call.
     - `_initHopContext`: Stores `HopContext` with `startToken = address(0)`.
     - `_executeMultihop`: Same as above, storing hop data.
@@ -163,7 +201,7 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 - **Parameters**:
   - `entryHopId` (uint256): Specific hop to continue.
   - `isCrossDriver` (bool): True for `CCSEntryDriver`, false for `CISEntryDriver`.
-- **Behavior**: Allows the `maker` to continue a specific stalled hop, restricted to `entryHopsCore.maker`, calling `_continueEntryHops` with `maxIterations = 1`.
+- **Behavior**: Allows the `maker` to continue a specific stalled hop, restricted to `entryHopsCore.maker`, calling `_continueEntryHops` with `maxIterations = 1`. If `IMultiController.continueHop` fails, the hop remains pending (`status = 1`), requiring manual cancellation via `cancelEntryHop`.
 - **Internal Call Flow**:
   - Checks `entryHopsCore[entryHopId].maker == msg.sender`.
   - Calls `_continueEntryHops(1, isCrossDriver)` to process the hop, validating `status == 1`, `isCrossDriver`, and `maker` match.
@@ -179,19 +217,19 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 - **Parameters**:
   - `entryHopId` (uint256): Specific hop to cancel.
   - `isCrossDriver` (bool): True for `CCSEntryDriver`, false for `CISEntryDriver`.
-- **Behavior**: Allows the `maker` to cancel a specific hop, restricted to `entryHopsCore.maker`, calling `_cancelEntryHop` to refund via `IMultiController.cancelHop` and `_refundMaker`.
+- **Behavior**: Allows the `maker` to cancel a specific hop, restricted to `entryHopsCore.maker`, calling `_cancelEntryHop` to refund via `IMultiController.cancelHop`, which uses `MultiStorage.cancelHop`, and `_refundMaker`.
 - **Internal Call Flow**:
   - Calls `_cancelEntryHop(entryHopId, isCrossDriver)`:
-    - Validates `entryHopsMargin.status == 1`, `entryHopsParams.isCrossDriver == isCrossDriver`, `entryHopsCore.maker == msg.sender`.
-    - Calls `IMultiController.cancelHop(entryHopId)` to refund to `ShockEntry`.
-    - Calls `_refundMaker` to transfer `refundedAmount` to `maker` (ERC20 via `IERC20.transfer` or native via low-level call).
+    - Validates `entryHopsMargin.status == 1`, `entryHopsParams.isCrossDriver`, and `entryHopsCore.maker == msg.sender`.
+    - Calls `IMultiController.cancelHop`, which triggers `MultiStorage.cancelHop` to process refunds.
+    - Refunds via `_refundMaker` using `context.startToken` and `refundedAmount`.
     - Sets `entryHopsMargin.status = 3`, emits `EntryHopCancelled`.
-- **Balance Checks**: Ensures `refundedAmount` is transferred via `_refundMaker`.
+- **Balance Checks**: Ensures `refundedAmount` transfer via `_refundMaker`.
 - **Mappings/Structs Used**:
   - **Mappings**: `entryHopsCore`, `entryHopsMargin`, `entryHopsParams`, `hopContexts`.
   - **Structs**: `EntryHopCore`, `EntryHopMargin`, `EntryHopParams`, `HopContext`.
-- **Restrictions**: `nonReentrant`, restricted to `maker`, `status == 1`, valid `isCrossDriver`.
-- **Gas Usage Controls**: Minimal external calls, single hop processing.
+- **Restrictions**: `nonReentrant`, restricted to `maker`, valid `status`, driver match.
+- **Gas Usage Controls**: Minimal, two external calls.
 
 ### setMultiInitializer(address _multiInitializer)
 - **Parameters**:
@@ -286,6 +324,14 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 
 ### multiControllerView()
 - **Behavior**: Returns `multiController` address.
+- **Internal Call Flow**: None.
+- **Balance Checks**: None.
+- **Mappings/Structs Used**: None.
+- **Restrictions**: None, view function.
+- **Gas Usage Controls**: Minimal, direct state access.
+
+### multiStorageView()
+- **Behavior**: Returns `multiStorage` address.
 - **Internal Call Flow**: None.
 - **Balance Checks**: None.
 - **Mappings/Structs Used**: None.
@@ -470,7 +516,7 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
   - `hopParams` (HopParams): Hop configuration.
   - `posParams` (PositionParams): Position parameters.
   - `isCrossDriver` (bool): Driver selection flag.
-- **Behavior**: Validates non-zero addresses and token compatibility via `_validatePositionToken`.
+- **Behavior**: Validates non-zero addresses (`hopMaker`, `multiInitializer`, `multiController`, `multiStorage`, drivers) and token compatibility via `_validatePositionToken`.
 - **Internal Call Flow**:
   - `_validatePositionToken`
 - **Balance Checks**: None.
@@ -518,7 +564,7 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 - **Parameters**:
   - `maxIterations` (uint256): Maximum hops to process.
   - `isCrossDriver` (bool): Driver selection flag.
-- **Behavior**: Iterates `userHops[msg.sender]` up to `maxIterations`, processes pending hops (`status == 1`, matching `isCrossDriver`, `maker == msg.sender`), calls `IMultiController.continueHop`, updates `status = 2`, triggers `executePositions` and `executeEntries`. On failure, sets `status = 3`, emits `EntryHopCancelled`.
+- **Behavior**: Iterates `userHops[msg.sender]` up to `maxIterations`, processes pending hops (`status = 1`, matching `isCrossDriver`, `maker = msg.sender`), calls `IMultiController.continueHop`, updates `status = 2` on success, triggers `executePositions` and `executeEntries`. On failure, leaves `status = 1`, requiring manual cancellation via `cancelEntryHop`.
 - **Internal Call Flow**: None.
 - **Balance Checks**: None.
 - **Mappings/Structs Used**:
@@ -527,11 +573,24 @@ The `ShockEntry` contract, implemented in Solidity (^0.8.2), facilitates multi-h
 - **Restrictions**: Private, reverts on invalid drivers.
 - **Gas Usage Controls**: Bounded by `maxIterations`, minimal external calls.
 
+### _executeEntryStalls(uint256 maxIterations, bool isCrossDriver)
+- **Parameters**:
+  - `maxIterations` (uint256): Maximum hops to process.
+  - `isCrossDriver` (bool): Driver selection flag.
+- **Behavior**: Iterates `IMultiStorage.totalHops` up to `maxIterations`, processes pending hops (`status = 1`, matching `isCrossDriver`), calls `IMultiController.continueHop`, updates `status = 2` on success, triggers `executePositions` and `executeEntries`. On failure, leaves `status = 1`, requiring manual cancellation via `cancelEntryHop`.
+- **Internal Call Flow**: None.
+- **Balance Checks**: None.
+- **Mappings/Structs Used**:
+  - **Mappings**: `entryHopsCore`, `entryHopsMargin`, `entryHopsParams`.
+  - **Structs**: `EntryHopCore`, `EntryHopMargin`, `EntryHopParams`.
+- **Restrictions**: Private, reverts on invalid `multiStorage` or drivers.
+- **Gas Usage Controls**: Bounded by `maxIterations`, minimal external calls (three per hop).
+
 ### _cancelEntryHop(uint256 entryHopId, bool isCrossDriver)
 - **Parameters**:
   - `entryHopId` (uint256): Hop to cancel.
   - `isCrossDriver` (bool): Driver selection flag.
-- **Behavior**: Validates `status == 1`, `isCrossDriver`, and `maker == msg.sender`, calls `IMultiController.cancelHop`, refunds via `_refundMaker`, sets `status = 3`, emits `EntryHopCancelled`.
+- **Behavior**: Validates `status = 1`, `isCrossDriver`, and `maker = msg.sender`, calls `IMultiController.cancelHop`, which uses `MultiStorage.cancelHop`, refunds via `_refundMaker`, sets `status = 3`, emits `EntryHopCancelled`.
 - **Internal Call Flow**:
   - `_refundMaker`
 - **Balance Checks**: Ensures `refundedAmount` transfer via `_refundMaker`.
