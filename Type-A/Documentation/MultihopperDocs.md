@@ -106,7 +106,7 @@ The `Multihopper` system, implemented in Solidity (^0.8.2), facilitates multi-st
 - **Parameters**:
   - `listingAddresses` (address[]): Array of listing addresses (up to 4). First must be non-zero and valid via `ICCAgent.isValidListing`.
   - `impactPercent` (uint256): Price impact tolerance (scaled to 1000, e.g., 500 = 5%). Must be ≤ 1000.
-  - `tokenPath` (address[]): Array of tokens for the swap path (start to end).
+  - `tokenPath` (address[]): Array of tokens for the swap path (start to end). First address must be "0". 
   - `settleType` (uint8): Settlement type (0 = market, 1 = liquid). Must be 0 or 1.
   - `maxIterations` (uint256): Max settlement iterations. Must be > 0.
 - **Behavior**: Initiates a native currency hop, transferring `msg.value` to `multiController`. Validates listings, token path, and stores hop in `hopID`, updates `hopsByAddress` and `totalHops`. Emits `HopStarted(hopId, msg.sender, numListings)`. Protected by `nonReentrant` and `onlyValidListing`.
@@ -132,7 +132,7 @@ The `Multihopper` system, implemented in Solidity (^0.8.2), facilitates multi-st
 
 ### hopToken(address[] listingAddresses, uint256 impactPercent, address[] tokenPath, uint8 settleType, uint256 maxIterations)
 - **File**: `MultiInitializer.sol`
-- **Parameters**: Same as `hopNative`, except `tokenPath[0]` is ERC20 (non-zero).
+- **Parameters**: Same as `hopNative`, except first address in `tokenPath` must be ERC20 (non-zero).
 - **Behavior**: Initiates an ERC20 token hop, transferring tokens from `msg.sender` to `multiController`. Validates listings, token path, and stores hop in `hopID`, updates `hopsByAddress` and `totalHops`. Emits `HopStarted(hopId, msg.sender, numListings)`. Protected by `nonReentrant` and `onlyValidListing`.
 - **Internal Call Tree**:
   - Same as `hopNative`, except `_createHopOrderToken`:
@@ -145,7 +145,7 @@ The `Multihopper` system, implemented in Solidity (^0.8.2), facilitates multi-st
 - **Gas Controls**: Same as `hopNative`.
 - **Error Handling**:
   - Same as `hopNative`, plus:
-  - Reverts if `tokenPath[0] == address(0)` ("Invalid token address").
+  - Reverts if first token in `tokenPath[0] == address(0)` ("Invalid token address").
   - Reverts if token transfer fails ("Token transfer to controller failed").
 
 ### continueHop(uint256 hopId, uint256 maxIterations)
