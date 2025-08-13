@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version 0.0.64: Resolved stack too deep in getExitHopDetails
-// - Split getExitHopDetails into helpers (_getExitHopCore, _getExitHopTokens, _getExitHopStatus)
-// - Each helper retrieves <=4 variables to reduce stack usage
-// - Preserved functionality from v0.0.63 (_validateInputs fix, split ExitHop, x64 refactor)
-// - Verified no SafeERC20, no virtuals/overrides, adhered to style guide
+// Version 0.0.73: Fixed TypeError in _validateHopParams
+// - Removed view modifier from _validateHopParams due to emit statements
+// - Aligned revert messages with ErrorLogged event strings
+// - Previous changes: Fixed TypeError by changing _validateHopParams to accept ExitHopCore memory
+// - Verified no typos, no SafeERC20, no virtuals/overrides, try-catch used
 
 import "./imports/ReentrancyGuard.sol";
 
@@ -14,6 +14,8 @@ interface IERC20 {
     function decimals() external view returns (uint8);
     function transfer(address recipient, uint256 amount) external returns (bool);
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 // Interface for MultiInitializer contract
@@ -140,40 +142,41 @@ contract ShockExit is ReentrancyGuard {
     uint256 public constant DECIMAL_PRECISION = 1e18;
 
     // State variables
-    address public ccsExitDriver; // Address of CCSExitDriver contract
-    address public cisExitDriver; // Address of CISExitDriver contract
-    address public ccsLiquidationDriver; // Address of CCSLiquidationDriver contract
-    address public cisLiquidationDriver; // Address of CISLiquidationDriver contract
-    address public multiInitializer; // Address of MultiInitializer contract
-    address public multiController; // Address of MultiController contract
-    address public multiStorage; // Address of MultiStorage contract
-    uint256 public hopCount; // Tracks total number of exit hops
-    mapping(address => uint256[]) public userHops; // Maps user to their exit hop IDs
-    mapping(uint256 => ExitHopCore) public exitHopsCore; // Core hop details
-    mapping(uint256 => ExitHopTokens) public exitHopsTokens; // Token-related hop details
-    mapping(uint256 => ExitHopStatus) public exitHopsStatus; // Status-related hop details
+    address public ccsExitDriver;
+    address public cisExitDriver;
+    address public ccsLiquidationDriver;
+    address public cisLiquidationDriver;
+    address public multiInitializer;
+    address public multiController;
+    address public multiStorage;
+    uint256 public hopCount;
+    mapping(address => uint256[]) public userHops;
+    mapping(uint256 => ExitHopCore) public exitHopsCore;
+    mapping(uint256 => ExitHopTokens) public exitHopsTokens;
+    mapping(uint256 => ExitHopStatus) public exitHopsStatus;
 
     // Struct for core exit hop details
     struct ExitHopCore {
-        address maker; // Hop initiator
-        uint256 multihopId; // Multihopper hop ID
-        uint256 positionId; // Position ID to close
-        address listingAddress; // Listing for position closure
+        address maker;
+        uint256 multihopId;
+        uint256 positionId;
+        address listingAddress;
     }
 
     // Struct for token-related exit hop details
     struct ExitHopTokens {
-        address startToken; // Token received from position closure
-        address endToken; // Expected end token from multihop
-        uint256 payoutOrderId; // Order ID of payout from drift
+        address startToken;
+        address endToken;
+        uint256 payoutOrderId;
+        uint256 actualAmount;
     }
 
     // Struct for status-related exit hop details
     struct ExitHopStatus {
-        uint8 positionType; // 0 for long, 1 for short
-        uint8 settleType; // 0 = market, 1 = liquid
-        uint8 status; // 0 = initializing, 1 = pending, 2 = completed, 3 = cancelled
-        bool isCrossDriver; // True for CCSExitDriver, false for CISExitDriver
+        uint8 positionType;
+        uint8 settleType;
+        uint8 status;
+        bool isCrossDriver;
     }
 
     // Struct for hop parameters
@@ -199,6 +202,35 @@ contract ShockExit is ReentrancyGuard {
         bool payoutSettled;
         uint256 multihopId;
         address listingAddress;
+        uint256 actualAmount;
+    }
+
+    // Struct for internal data passing in multihop functions
+    struct MultihopData {
+        uint256 multihopId;
+        uint256 actualAmount;
+        uint8 status;
+    }
+
+    // Struct for packed hop call data
+    struct HopCallData {
+        address listing1;
+        address listing2;
+        address listing3;
+        address listing4;
+        uint256 impactPercent;
+        address startToken;
+        address endToken;
+        uint8 settleType;
+        uint256 maxIterations;
+    }
+
+    // Struct for hop execution context
+    struct HopExecutionData {
+        address hopMaker;
+        uint256 exitHopId;
+        uint256 actualAmount;
+        bool isCrossDriver;
     }
 
     // Events
@@ -216,7 +248,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("MultiStorage address cannot be zero");
             revert("MultiStorage address cannot be zero");
         }
-        multiStorage = _multiStorage; // Updates MultiStorage address
+        multiStorage = _multiStorage;
     }
 
     // Sets MultiInitializer address
@@ -225,7 +257,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("MultiInitializer address cannot be zero");
             revert("MultiInitializer address cannot be zero");
         }
-        multiInitializer = _multiInitializer; // Updates MultiInitializer address
+        multiInitializer = _multiInitializer;
     }
 
     // Sets MultiController address
@@ -234,7 +266,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("MultiController address cannot be zero");
             revert("MultiController address cannot be zero");
         }
-        multiController = _multiController; // Updates MultiController address
+        multiController = _multiController;
     }
 
     // Sets CCSExitDriver address
@@ -243,7 +275,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("CCSExitDriver address cannot be zero");
             revert("CCSExitDriver address cannot be zero");
         }
-        ccsExitDriver = _ccsExitDriver; // Updates CCSExitDriver address
+        ccsExitDriver = _ccsExitDriver;
     }
 
     // Sets CISExitDriver address
@@ -252,7 +284,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("CISExitDriver address cannot be zero");
             revert("CISExitDriver address cannot be zero");
         }
-        cisExitDriver = _cisExitDriver; // Updates CISExitDriver address
+        cisExitDriver = _cisExitDriver;
     }
 
     // Sets CCSLiquidationDriver address
@@ -261,7 +293,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("CCSLiquidationDriver address cannot be zero");
             revert("CCSLiquidationDriver address cannot be zero");
         }
-        ccsLiquidationDriver = _ccsLiquidationDriver; // Updates CCSLiquidationDriver address
+        ccsLiquidationDriver = _ccsLiquidationDriver;
     }
 
     // Sets CISLiquidationDriver address
@@ -270,7 +302,7 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("CISLiquidationDriver address cannot be zero");
             revert("CISLiquidationDriver address cannot be zero");
         }
-        cisLiquidationDriver = _cisLiquidationDriver; // Updates CISLiquidationDriver address
+        cisLiquidationDriver = _cisLiquidationDriver;
     }
 
     // Initiates a position closure followed by CCSExitDriver multihop (ERC20)
@@ -541,17 +573,18 @@ contract ShockExit is ReentrancyGuard {
         _executeExitHop(hopMaker, hopParams, posParams, false, true);
     }
 
-    // Validates input parameters for exit hop
-    function _validateInputs(
+    // Validates hop parameters
+    function _validateHopParams(
         address hopMaker,
         HopParams memory hopParams,
-        PositionParams memory posParams
-    ) internal {
+        ExitHopCore memory coreParams,
+        bool isCrossDriver
+    ) private {
         if (hopMaker == address(0)) {
             emit ErrorLogged("Hop maker cannot be zero");
             revert("Hop maker cannot be zero");
         }
-        if (posParams.listingAddress == address(0)) {
+        if (coreParams.listingAddress == address(0)) {
             emit ErrorLogged("Listing address cannot be zero");
             revert("Listing address cannot be zero");
         }
@@ -559,12 +592,342 @@ contract ShockExit is ReentrancyGuard {
             emit ErrorLogged("Token addresses cannot be zero");
             revert("Token addresses cannot be zero");
         }
-        for (uint256 i = 0; i < hopParams.listingAddresses.length; i++) {
-            if (hopParams.listingAddresses[i] == address(0)) {
-                emit ErrorLogged("Listing address at index cannot be zero");
-                revert("Listing address at index cannot be zero");
+        if (hopParams.listingAddresses.length > 4) {
+            emit ErrorLogged("Too many listings, maximum 4");
+            revert("Too many listings, maximum 4");
+        }
+        if (hopParams.settleType > 1) {
+            emit ErrorLogged("Invalid settle type, must be 0 or 1");
+            revert("Invalid settle type, must be 0 or 1");
+        }
+        if (hopParams.maxIterations == 0) {
+            emit ErrorLogged("Max iterations cannot be zero");
+            revert("Max iterations cannot be zero");
+        }
+        if (multiInitializer == address(0)) {
+            emit ErrorLogged("MultiInitializer not set");
+            revert("MultiInitializer not set");
+        }
+        if (multiController == address(0)) {
+            emit ErrorLogged("MultiController not set");
+            revert("MultiController not set");
+        }
+        if (multiStorage == address(0)) {
+            emit ErrorLogged("MultiStorage not set");
+            revert("MultiStorage not set");
+        }
+        if (isCrossDriver && (ccsExitDriver == address(0) || ccsLiquidationDriver == address(0))) {
+            emit ErrorLogged("Cross drivers not set");
+            revert("Cross drivers not set");
+        }
+        if (!isCrossDriver && (cisExitDriver == address(0) || cisLiquidationDriver == address(0))) {
+            emit ErrorLogged("Isolated drivers not set");
+            revert("Isolated drivers not set");
+        }
+    }
+
+    // Transfers and approves tokens for hop
+    function _transferHopTokens(
+        address hopMaker,
+        address startToken,
+        uint256 actualAmount,
+        bool isNative
+    ) private returns (uint256) {
+        if (isNative) {
+            if (msg.value != actualAmount) {
+                emit ErrorLogged("Incorrect native token amount");
+                revert("Incorrect native token amount");
+            }
+            (bool success, ) = multiInitializer.call{value: actualAmount}("");
+            if (!success) {
+                emit ErrorLogged("Native token transfer failed");
+                revert("Native token transfer failed");
+            }
+            return actualAmount;
+        } else {
+            IERC20 token = IERC20(startToken);
+            uint256 balanceBefore = token.balanceOf(address(this));
+            if (!token.transferFrom(hopMaker, address(this), actualAmount)) {
+                emit ErrorLogged("Token transfer failed");
+                revert("Token transfer failed");
+            }
+            uint256 balanceAfter = token.balanceOf(address(this));
+            uint256 transferredAmount = balanceAfter - balanceBefore;
+            if (!token.approve(multiInitializer, transferredAmount)) {
+                emit ErrorLogged("Token approval failed");
+                revert("Token approval failed");
+            }
+            return transferredAmount;
+        }
+    }
+
+    // Initializes hop context
+    function _initHop(
+        address hopMaker,
+        address startToken,
+        uint256 actualAmount,
+        bool isCrossDriver
+    ) private returns (HopExecutionData memory) {
+        uint256 exitHopId = hopCount;
+        return HopExecutionData({
+            hopMaker: hopMaker,
+            exitHopId: exitHopId,
+            actualAmount: actualAmount,
+            isCrossDriver: isCrossDriver
+        });
+    }
+
+    // Executes multihop via MultiInitializer
+    function _executeHop(
+        HopExecutionData memory execData,
+        HopParams memory hopParams
+    ) private returns (uint256) {
+        HopCallData memory callData = HopCallData({
+            listing1: hopParams.listingAddresses.length > 0 ? hopParams.listingAddresses[0] : address(0),
+            listing2: hopParams.listingAddresses.length > 1 ? hopParams.listingAddresses[1] : address(0),
+            listing3: hopParams.listingAddresses.length > 2 ? hopParams.listingAddresses[2] : address(0),
+            listing4: hopParams.listingAddresses.length > 3 ? hopParams.listingAddresses[3] : address(0),
+            impactPercent: hopParams.impactPercent,
+            startToken: hopParams.startToken,
+            endToken: hopParams.endToken,
+            settleType: hopParams.settleType,
+            maxIterations: hopParams.maxIterations
+        });
+        MultihopData memory hopData;
+        if (execData.actualAmount > 0) {
+            if (hopParams.startToken == address(0)) {
+                hopData = _callHopNative(callData, execData.actualAmount, execData.hopMaker, execData.exitHopId);
+            } else {
+                hopData = _callHopToken(callData, execData.hopMaker, execData.exitHopId);
             }
         }
+        return hopData.multihopId;
+    }
+
+    // Continues hop via MultiController
+    function _continueHop(
+        HopExecutionData memory execData,
+        HopParams memory hopParams
+    ) private {
+        try IMultiController(multiController).continueHop(execData.exitHopId, hopParams.maxIterations) {
+            IMultiController.HopOrderDetails memory details = IMultiController(multiController).getHopOrderDetails(execData.exitHopId);
+            if (details.status == 2) {
+                exitHopsStatus[execData.exitHopId].status = 2;
+                emit ExitHopCompleted(execData.hopMaker, execData.exitHopId);
+            }
+        } catch Error(string memory reason) {
+            exitHopsStatus[execData.exitHopId].status = 3;
+            emit ErrorLogged(string(abi.encodePacked("Continue hop failed: ", reason)));
+            emit ExitHopCancelled(execData.hopMaker, execData.exitHopId);
+        }
+    }
+
+    // Calls hopToken on MultiInitializer
+    function _callHopToken(HopCallData memory callData, address hopMaker, uint256 exitHopId) private returns (MultihopData memory) {
+        IMultiInitializer initializer = IMultiInitializer(multiInitializer);
+        MultihopData memory hopData = MultihopData({
+            multihopId: 0,
+            actualAmount: 0,
+            status: 0
+        });
+        try initializer.hopToken(
+            callData.listing1,
+            callData.listing2,
+            callData.listing3,
+            callData.listing4,
+            callData.impactPercent,
+            callData.startToken,
+            callData.endToken,
+            callData.settleType,
+            callData.maxIterations
+        ) returns (uint256 multihopId) {
+            hopData.multihopId = multihopId;
+            hopData.status = 1;
+        } catch Error(string memory reason) {
+            hopData.status = 3;
+            emit ErrorLogged(string(abi.encodePacked("hopToken failed: ", reason)));
+            emit ExitHopCancelled(hopMaker, exitHopId);
+        }
+        return hopData;
+    }
+
+    // Calls hopNative on MultiInitializer
+    function _callHopNative(HopCallData memory callData, uint256 actualAmount, address hopMaker, uint256 exitHopId) private returns (MultihopData memory) {
+        IMultiInitializer initializer = IMultiInitializer(multiInitializer);
+        MultihopData memory hopData = MultihopData({
+            multihopId: 0,
+            actualAmount: actualAmount,
+            status: 0
+        });
+        try initializer.hopNative{value: actualAmount}(
+            callData.listing1,
+            callData.listing2,
+            callData.listing3,
+            callData.listing4,
+            callData.impactPercent,
+            callData.startToken,
+            callData.endToken,
+            callData.settleType,
+            callData.maxIterations
+        ) returns (uint256 multihopId) {
+            hopData.multihopId = multihopId;
+            hopData.status = 1;
+        } catch Error(string memory reason) {
+            hopData.status = 3;
+            emit ErrorLogged(string(abi.encodePacked("hopNative failed: ", reason)));
+            emit ExitHopCancelled(hopMaker, exitHopId);
+        }
+        return hopData;
+    }
+
+    // Initiates cross-driver native hop
+    function _initCrossHopNative(
+        HopParams memory hopParams,
+        uint256 actualAmount,
+        address hopMaker,
+        uint256 exitHopId
+    ) private returns (MultihopData memory) {
+        HopExecutionData memory execData = _initHop(hopMaker, hopParams.startToken, actualAmount, true);
+        uint256 multihopId = _executeHop(execData, hopParams);
+        _continueHop(execData, hopParams);
+        return MultihopData({
+            multihopId: multihopId,
+            actualAmount: actualAmount,
+            status: exitHopsStatus[exitHopId].status
+        });
+    }
+
+    // Initiates cross-driver token hop
+    function _initCrossHopToken(
+        HopParams memory hopParams,
+        uint256 actualAmount,
+        address hopMaker,
+        uint256 exitHopId
+    ) private returns (MultihopData memory) {
+        HopExecutionData memory execData = _initHop(hopMaker, hopParams.startToken, actualAmount, true);
+        uint256 multihopId = _executeHop(execData, hopParams);
+        _continueHop(execData, hopParams);
+        return MultihopData({
+            multihopId: multihopId,
+            actualAmount: actualAmount,
+            status: exitHopsStatus[exitHopId].status
+        });
+    }
+
+    // Initiates isolated-driver native hop
+    function _initIsolatedHopNative(
+        HopParams memory hopParams,
+        uint256 actualAmount,
+        address hopMaker,
+        uint256 exitHopId
+    ) private returns (MultihopData memory) {
+        HopExecutionData memory execData = _initHop(hopMaker, hopParams.startToken, actualAmount, false);
+        uint256 multihopId = _executeHop(execData, hopParams);
+        _continueHop(execData, hopParams);
+        return MultihopData({
+            multihopId: multihopId,
+            actualAmount: actualAmount,
+            status: exitHopsStatus[exitHopId].status
+        });
+    }
+
+    // Initiates isolated-driver token hop
+    function _initIsolatedHopToken(
+        HopParams memory hopParams,
+        uint256 actualAmount,
+        address hopMaker,
+        uint256 exitHopId
+    ) private returns (MultihopData memory) {
+        HopExecutionData memory execData = _initHop(hopMaker, hopParams.startToken, actualAmount, false);
+        uint256 multihopId = _executeHop(execData, hopParams);
+        _continueHop(execData, hopParams);
+        return MultihopData({
+            multihopId: multihopId,
+            actualAmount: actualAmount,
+            status: exitHopsStatus[exitHopId].status
+        });
+    }
+
+    // Updates hop status and emits events
+    function _updateHopStatus(
+        MultihopData memory hopData,
+        address hopMaker,
+        uint256 exitHopId,
+        bool isCrossDriver
+    ) private {
+        if (hopData.status == 3) {
+            exitHopsStatus[exitHopId].status = 3;
+            return;
+        }
+        exitHopsCore[exitHopId].multihopId = hopData.multihopId;
+        exitHopsStatus[exitHopId].status = hopData.status;
+        emit ExitHopStarted(hopMaker, exitHopId, hopData.multihopId, isCrossDriver);
+        IMultiController.HopOrderDetails memory details = IMultiController(multiController).getHopOrderDetails(hopData.multihopId);
+        if (details.status == 2) {
+            exitHopsStatus[exitHopId].status = 2;
+            emit ExitHopCompleted(hopMaker, exitHopId);
+        }
+    }
+
+    // Initiates multihop
+    function _initMultihop(
+        HopParams memory hopParams,
+        bool isNative,
+        address hopMaker,
+        uint256 exitHopId
+    ) internal {
+        ExitHopCore memory coreParams = exitHopsCore[exitHopId];
+        _validateHopParams(hopMaker, hopParams, coreParams, exitHopsStatus[exitHopId].isCrossDriver);
+        uint256 actualAmount = _transferHopTokens(hopMaker, hopParams.startToken, exitHopsTokens[exitHopId].actualAmount, isNative);
+        HopExecutionData memory execData = _initHop(hopMaker, hopParams.startToken, actualAmount, exitHopsStatus[exitHopId].isCrossDriver);
+        uint256 multihopId = _executeHop(execData, hopParams);
+        _continueHop(execData, hopParams);
+        MultihopData memory hopData = MultihopData({
+            multihopId: multihopId,
+            actualAmount: actualAmount,
+            status: exitHopsStatus[exitHopId].status
+        });
+        _updateHopStatus(hopData, hopMaker, exitHopId, execData.isCrossDriver);
+    }
+
+    // Internal function to execute exit hop
+    function _executeExitHop(
+        address hopMaker,
+        HopParams memory hopParams,
+        PositionParams memory posParams,
+        bool isCrossDriver,
+        bool isNative
+    ) internal {
+        // Validate inputs
+        _validateHopParams(hopMaker, hopParams, ExitHopCore({
+            maker: hopMaker,
+            multihopId: 0,
+            positionId: posParams.positionId,
+            listingAddress: posParams.listingAddress
+        }), isCrossDriver);
+
+        // Initialize hop
+        ExitHopData memory hopData = _initExitHop(hopMaker, hopParams, posParams, isCrossDriver);
+
+        // Call driver
+        hopData = _callDriver(hopMaker, posParams.positionId, isCrossDriver, hopData);
+        if (exitHopsStatus[hopData.exitHopId].status == 3) return;
+
+        // Check payout
+        (hopData.payoutSettled, hopData.actualAmount) = _checkPayout(hopData.exitHopId, hopData.listingAddress, posParams.positionType);
+        if (!hopData.payoutSettled) {
+            exitHopsStatus[hopData.exitHopId].status = 3;
+            emit ErrorLogged("Payout not settled");
+            emit ExitHopCancelled(hopMaker, hopData.exitHopId);
+            return;
+        }
+
+        // Call liquidation
+        _callLiquidation(hopData.listingAddress, hopParams.maxIterations, isCrossDriver, hopMaker, hopData.exitHopId);
+        if (exitHopsStatus[hopData.exitHopId].status == 3) return;
+
+        // Initiate multihop
+        _initMultihop(hopParams, isNative, hopMaker, hopData.exitHopId);
     }
 
     // Initializes exit hop data
@@ -584,7 +947,8 @@ contract ShockExit is ReentrancyGuard {
         exitHopsTokens[exitHopId] = ExitHopTokens({
             startToken: hopParams.startToken,
             endToken: hopParams.endToken,
-            payoutOrderId: 0
+            payoutOrderId: 0,
+            actualAmount: 0
         });
         exitHopsStatus[exitHopId] = ExitHopStatus({
             positionType: posParams.positionType,
@@ -597,7 +961,8 @@ contract ShockExit is ReentrancyGuard {
             exitHopId: exitHopId,
             payoutSettled: false,
             multihopId: 0,
-            listingAddress: posParams.listingAddress
+            listingAddress: posParams.listingAddress,
+            actualAmount: 0
         });
     }
 
@@ -632,20 +997,28 @@ contract ShockExit is ReentrancyGuard {
         return hopData;
     }
 
-    // Checks payout settlement
+    // Checks payout settlement and captures actual amount
     function _checkPayout(
         uint256 exitHopId,
         address listingAddress,
         uint8 positionType
-    ) internal view returns (bool) {
+    ) internal returns (bool, uint256) {
         ICCListingTemplate listing = ICCListingTemplate(listingAddress);
+        address token = positionType == 0 ? listing.tokenB() : listing.tokenA();
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
         if (positionType == 0) {
             ICCListingTemplate.LongPayoutStruct memory payout = listing.getLongPayout(exitHopsTokens[exitHopId].payoutOrderId);
-            return payout.status == 3; // 3 = Filled
+            if (payout.status != 3) return (false, 0);
+            listing.settleLongPayouts(listingAddress, 1);
         } else {
             ICCListingTemplate.ShortPayoutStruct memory payout = listing.getShortPayout(exitHopsTokens[exitHopId].payoutOrderId);
-            return payout.status == 3; // 3 = Filled
+            if (payout.status != 3) return (false, 0);
+            listing.settleShortPayouts(listingAddress, 1);
         }
+        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+        uint256 actualAmount = balanceAfter - balanceBefore;
+        exitHopsTokens[exitHopId].actualAmount = actualAmount;
+        return (true, actualAmount);
     }
 
     // Calls executeExits on liquidation driver
@@ -669,92 +1042,6 @@ contract ShockExit is ReentrancyGuard {
                 emit ExitHopCancelled(hopMaker, exitHopId);
             }
         }
-    }
-
-    // Initiates multihop
-    function _initMultihop(
-        HopParams memory hopParams,
-        bool isNative,
-        address hopMaker,
-        uint256 exitHopId
-    ) internal {
-        IMultiInitializer initializer = IMultiInitializer(multiInitializer);
-        if (isNative) {
-            try initializer.hopNative{value: msg.value}(
-                hopParams.listingAddresses.length > 0 ? hopParams.listingAddresses[0] : address(0),
-                hopParams.listingAddresses.length > 1 ? hopParams.listingAddresses[1] : address(0),
-                hopParams.listingAddresses.length > 2 ? hopParams.listingAddresses[2] : address(0),
-                hopParams.listingAddresses.length > 3 ? hopParams.listingAddresses[3] : address(0),
-                hopParams.impactPercent,
-                hopParams.startToken,
-                hopParams.endToken,
-                hopParams.settleType,
-                hopParams.maxIterations
-            ) returns (uint256 multihopId) {
-                exitHopsCore[exitHopId].multihopId = multihopId;
-                exitHopsStatus[exitHopId].status = 1; // Pending
-                emit ExitHopStarted(hopMaker, exitHopId, multihopId, exitHopsStatus[exitHopId].isCrossDriver);
-            } catch Error(string memory reason) {
-                exitHopsStatus[exitHopId].status = 3;
-                emit ErrorLogged(string(abi.encodePacked("MultiInitializer hopNative failed: ", reason)));
-                emit ExitHopCancelled(hopMaker, exitHopId);
-            }
-        } else {
-            try initializer.hopToken(
-                hopParams.listingAddresses.length > 0 ? hopParams.listingAddresses[0] : address(0),
-                hopParams.listingAddresses.length > 1 ? hopParams.listingAddresses[1] : address(0),
-                hopParams.listingAddresses.length > 2 ? hopParams.listingAddresses[2] : address(0),
-                hopParams.listingAddresses.length > 3 ? hopParams.listingAddresses[3] : address(0),
-                hopParams.impactPercent,
-                hopParams.startToken,
-                hopParams.endToken,
-                hopParams.settleType,
-                hopParams.maxIterations
-            ) returns (uint256 multihopId) {
-                exitHopsCore[exitHopId].multihopId = multihopId;
-                exitHopsStatus[exitHopId].status = 1; // Pending
-                emit ExitHopStarted(hopMaker, exitHopId, multihopId, exitHopsStatus[exitHopId].isCrossDriver);
-            } catch Error(string memory reason) {
-                exitHopsStatus[exitHopId].status = 3;
-                emit ErrorLogged(string(abi.encodePacked("MultiInitializer hopToken failed: ", reason)));
-                emit ExitHopCancelled(hopMaker, exitHopId);
-            }
-        }
-    }
-
-    // Internal function to execute exit hop
-    function _executeExitHop(
-        address hopMaker,
-        HopParams memory hopParams,
-        PositionParams memory posParams,
-        bool isCrossDriver,
-        bool isNative
-    ) internal {
-        // Validate inputs
-        _validateInputs(hopMaker, hopParams, posParams);
-
-        // Initialize hop
-        ExitHopData memory hopData = _initExitHop(hopMaker, hopParams, posParams, isCrossDriver);
-
-        // Call driver
-        hopData = _callDriver(hopMaker, posParams.positionId, isCrossDriver, hopData);
-        if (exitHopsStatus[hopData.exitHopId].status == 3) return;
-
-        // Check payout
-        hopData.payoutSettled = _checkPayout(hopData.exitHopId, hopData.listingAddress, posParams.positionType);
-        if (!hopData.payoutSettled) {
-            exitHopsStatus[hopData.exitHopId].status = 3;
-            emit ErrorLogged("Payout not settled");
-            emit ExitHopCancelled(hopMaker, hopData.exitHopId);
-            return;
-        }
-
-        // Call liquidation
-        _callLiquidation(hopData.listingAddress, hopParams.maxIterations, isCrossDriver, hopMaker, hopData.exitHopId);
-        if (exitHopsStatus[hopData.exitHopId].status == 3) return;
-
-        // Initiate multihop
-        _initMultihop(hopParams, isNative, hopMaker, hopData.exitHopId);
     }
 
     // Continues a user's pending exit hops
@@ -784,7 +1071,7 @@ contract ShockExit is ReentrancyGuard {
             if (status.status == 1 && status.isCrossDriver == isCrossDriver) {
                 try controller.continueHop(exitHopsCore[hopIds[i]].multihopId, maxIterations) {
                     IMultiController.HopOrderDetails memory details = controller.getHopOrderDetails(exitHopsCore[hopIds[i]].multihopId);
-                    if (details.status == 2) { // Completed
+                    if (details.status == 2) {
                         status.status = 2;
                         emit ExitHopCompleted(exitHopsCore[hopIds[i]].maker, hopIds[i]);
                     }
@@ -820,7 +1107,7 @@ contract ShockExit is ReentrancyGuard {
             if (status.status == 1 && status.isCrossDriver == isCrossDriver) {
                 try controller.continueHop(exitHopsCore[i].multihopId, maxIterations) {
                     IMultiController.HopOrderDetails memory details = controller.getHopOrderDetails(exitHopsCore[i].multihopId);
-                    if (details.status == 2) { // Completed
+                    if (details.status == 2) {
                         status.status = 2;
                         emit ExitHopCompleted(exitHopsCore[i].maker, i);
                     }
@@ -874,13 +1161,15 @@ contract ShockExit is ReentrancyGuard {
     function _getExitHopTokens(uint256 exitHopId) internal view returns (
         address startToken,
         address endToken,
-        uint256 payoutOrderId
+        uint256 payoutOrderId,
+        uint256 actualAmount
     ) {
         ExitHopTokens memory tokens = exitHopsTokens[exitHopId];
         return (
             tokens.startToken,
             tokens.endToken,
-            tokens.payoutOrderId
+            tokens.payoutOrderId,
+            tokens.actualAmount
         );
     }
 
@@ -912,13 +1201,14 @@ contract ShockExit is ReentrancyGuard {
         address endToken,
         uint8 settleType,
         uint8 status,
-        bool isCrossDriver
+        bool isCrossDriver,
+        uint256 actualAmount
     ) {
         // Fetch core details
         (maker, multihopId, positionId, listingAddress) = _getExitHopCore(exitHopId);
 
         // Fetch token details
-        (startToken, endToken, payoutOrderId) = _getExitHopTokens(exitHopId);
+        (startToken, endToken, payoutOrderId, actualAmount) = _getExitHopTokens(exitHopId);
 
         // Fetch status details
         (positionType, settleType, status, isCrossDriver) = _getExitHopStatus(exitHopId);

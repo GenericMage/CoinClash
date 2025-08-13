@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.53
+// Version: 0.0.57
 // Change Log:
+// - 2025-08-13: Added tokenPath to HopPrepState struct and updated initPrepState and buildListingArrays to use it.
+// - 2025-08-13: Replaced ISSAgent.getListing with ICCAgent.isValidListing for listing validation.
+// - 2025-08-13: Fixed onlyValidListing modifier usage in hopNative and hopToken.
+// - 2025-08-13: Changed listing parameters to listingAddresses array in hopNative, hopToken, and related functions.
+// - 2025-08-13: Replaced startToken and endToken with tokenPath array.
 // - 2025-08-12: Added multiController state variable with owner-only setter.
 // - 2025-08-12: Modified _createHopOrderNative and _createHopOrderToken to transfer principal to MultiController.
 // - 2025-08-12: Updated pre/post balance checks to use received amount for hop creation.
@@ -25,8 +30,15 @@ interface ISSListing {
     function update(UpdateType[] memory updates) external;
 }
 
-interface ISSAgent {
-    function getListing(address listing) external view returns (bool);
+interface ICCAgent {
+    struct ListingDetails {
+        address listingAddress;
+        address liquidityAddress;
+        address tokenA;
+        address tokenB;
+        uint256 listingId;
+    }
+    function isValidListing(address listingAddress) external view returns (bool isValid, ListingDetails memory details);
 }
 
 interface MultiStorage {
@@ -39,8 +51,7 @@ interface MultiStorage {
         address hopMaker;
         address[] remainingListings;
         uint256 principalAmount;
-        address startToken;
-        address endToken;
+        address[] tokenPath;
         uint8 settleType;
         uint8 hopStatus;
         uint256 maxIterations;
@@ -70,8 +81,7 @@ interface MultiStorage {
     struct HopExecutionParams {
         address[] listingAddresses;
         uint256[] impactPricePercents;
-        address startToken;
-        address endToken;
+        address[] tokenPath;
         uint8 settleType;
         uint256 maxIterations;
         uint256 numListings;
@@ -125,13 +135,15 @@ contract MultiInitializer is ReentrancyGuard {
         uint256 hopId;
         uint256[] indices;
         bool[] isBuy;
+        address[] tokenPath;
     }
 
     event HopStarted(uint256 indexed hopId, address indexed maker, uint256 numListings);
 
     modifier onlyValidListing(address listingAddress) {
         require(multiStorage.agent() != address(0), "Agent contract not set");
-        require(listingAddress == address(0) || ISSAgent(multiStorage.agent()).getListing(listingAddress), "Listing not registered");
+        (bool isValid, ) = ICCAgent(multiStorage.agent()).isValidListing(listingAddress);
+        require(listingAddress == address(0) || isValid, "Listing not registered");
         _;
     }
 
@@ -262,16 +274,17 @@ contract MultiInitializer is ReentrancyGuard {
         transferredAmount = balanceAfter - balanceBefore;
     }
 
-    function computeRoute(address[] memory listingAddresses, address startToken, address endToken)
+    function computeRoute(address[] memory listingAddresses, address[] memory tokenPath)
         internal view returns (uint256[] memory indices, bool[] memory isBuy)
     {
-        // Computes trading route from start to end token
+        // Computes trading route through tokenPath
         require(listingAddresses.length > 0, "No listings provided");
         require(listingAddresses.length <= 4, "Too many listings, max 4");
-        require(startToken != endToken, "Start and end tokens cannot be identical");
+        require(tokenPath.length >= 2, "Token path must include at least start and end tokens");
+        require(tokenPath[0] != tokenPath[tokenPath.length - 1], "Start and end tokens cannot be identical");
         indices = new uint256[](listingAddresses.length);
         isBuy = new bool[](listingAddresses.length);
-        address currentToken = startToken;
+        address currentToken = tokenPath[0];
         uint256 pathLength = 0;
         for (uint256 i = 0; i < listingAddresses.length; i++) {
             require(listingAddresses[i] != address(0), "Listing address cannot be zero");
@@ -279,20 +292,20 @@ contract MultiInitializer is ReentrancyGuard {
             address tokenA = listing.tokenA();
             address tokenB = listing.tokenB();
             require(tokenA != address(0) && tokenB != address(0), "Invalid token pair in listing");
-            if (currentToken == tokenA) {
+            if (currentToken == tokenA && pathLength < tokenPath.length - 1 && tokenPath[pathLength + 1] == tokenB) {
                 indices[pathLength] = i;
                 isBuy[pathLength] = false;
                 currentToken = tokenB;
                 pathLength++;
-            } else if (currentToken == tokenB) {
+            } else if (currentToken == tokenB && pathLength < tokenPath.length - 1 && tokenPath[pathLength + 1] == tokenA) {
                 indices[pathLength] = i;
                 isBuy[pathLength] = true;
                 currentToken = tokenA;
                 pathLength++;
             }
-            if (currentToken == endToken) break;
+            if (currentToken == tokenPath[tokenPath.length - 1]) break;
         }
-        require(currentToken == endToken, "No valid route from startToken to endToken");
+        require(currentToken == tokenPath[tokenPath.length - 1], "No valid route through tokenPath");
         uint256[] memory resizedIndices = new uint256[](pathLength);
         bool[] memory resizedIsBuy = new bool[](pathLength);
         for (uint256 i = 0; i < pathLength; i++) {
@@ -303,68 +316,41 @@ contract MultiInitializer is ReentrancyGuard {
     }
 
     function validateHopRequest(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        uint256 numListings,
         uint256 maxIterations
     ) internal view {
         // Validates hop request parameters
         require(multiStorage.agent() != address(0), "Agent contract not set");
-        require(numListings > 0, "At least one listing required");
-        require(numListings <= 4, "Too many listings, max 4");
+        require(listingAddresses.length > 0, "At least one listing required");
+        require(listingAddresses.length <= 4, "Too many listings, max 4");
         require(maxIterations > 0, "Max iterations must be positive");
         require(impactPercent <= 1000, "Impact percent exceeds 1000");
-        require(listing1 != address(0), "First listing cannot be zero address");
-        require(ISSAgent(multiStorage.agent()).getListing(listing1), "First listing not registered");
-        if (numListings >= 2) {
-            if (listing2 == address(0) && (listing3 != address(0) || listing4 != address(0))) {
+        require(listingAddresses[0] != address(0), "First listing cannot be zero address");
+        (bool isValid, ) = ICCAgent(multiStorage.agent()).isValidListing(listingAddresses[0]);
+        require(isValid, "First listing not registered");
+        for (uint256 i = 1; i < listingAddresses.length; i++) {
+            if (listingAddresses[i] == address(0) && i < listingAddresses.length - 1 && listingAddresses[i + 1] != address(0)) {
                 revert("Invalid listing sequence: zero address in middle");
             }
-            if (listing2 != address(0)) {
-                require(ISSAgent(multiStorage.agent()).getListing(listing2), "Second listing not registered");
+            if (listingAddresses[i] != address(0)) {
+                (bool valid, ) = ICCAgent(multiStorage.agent()).isValidListing(listingAddresses[i]);
+                require(valid, "Listing not registered");
             }
-        }
-        if (numListings >= 3) {
-            if (listing3 == address(0) && listing4 != address(0)) {
-                revert("Invalid listing sequence: zero address in middle");
-            }
-            if (listing3 != address(0)) {
-                require(ISSAgent(multiStorage.agent()).getListing(listing3), "Third listing not registered");
-            }
-        }
-        if (numListings == 4 && listing4 != address(0)) {
-            require(ISSAgent(multiStorage.agent()).getListing(listing4), "Fourth listing not registered");
         }
     }
 
     function initializeHopData(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        address startToken,
-        address endToken,
+        address[] memory tokenPath,
         uint8 settleType,
         uint256 maxIterations,
         uint256[] memory indices,
         uint256 hopId,
         address maker
     ) internal {
-        
         // Initializes hop data in MultiStorage
-        uint256 numListings = 1;
-        if (listing2 != address(0)) numListings++;
-        if (listing3 != address(0)) numListings++;
-        if (listing4 != address(0)) numListings++;
-        address[] memory listingAddresses = new address[](numListings);
-        listingAddresses[0] = listing1;
-        if (numListings >= 2) listingAddresses[1] = listing2;
-        if (numListings >= 3) listingAddresses[2] = listing3;
-        if (numListings == 4) listingAddresses[3] = listing4;
         address[] memory orderedListings = new address[](indices.length);
         for (uint256 i = 0; i < indices.length; i++) {
             orderedListings[i] = listingAddresses[indices[i]];
@@ -377,9 +363,8 @@ contract MultiInitializer is ReentrancyGuard {
             maxPrice: 0,
             hopMaker: maker,
             remainingListings: orderedListings,
-            principalAmount: startToken == address(0) ? msg.value : impactPercent,
-            startToken: startToken,
-            endToken: endToken,
+            principalAmount: tokenPath[0] == address(0) ? msg.value : impactPercent,
+            tokenPath: tokenPath,
             settleType: settleType,
             hopStatus: 1,
             maxIterations: maxIterations
@@ -394,40 +379,24 @@ contract MultiInitializer is ReentrancyGuard {
     }
 
     function initPrepState(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        address startToken,
+        address[] memory tokenPath,
         uint8 settleType,
         uint256 maxIterations
     ) internal view returns (HopPrepState memory state) {
         // Initializes prep state for hop
-        state.numListings = 1;
-        if (listing2 != address(0)) state.numListings++;
-        if (listing3 != address(0)) state.numListings++;
-        if (listing4 != address(0)) state.numListings++;
+        state.numListings = listingAddresses.length;
         state.hopId = multiStorage.nextHopId();
-        state.listingAddresses = new address[](state.numListings);
+        state.listingAddresses = listingAddresses;
         state.impactPricePercents = new uint256[](state.numListings);
-        state.listingAddresses[0] = listing1;
-        state.impactPricePercents[0] = impactPercent;
-        if (state.numListings >= 2) {
-            state.listingAddresses[1] = listing2;
-            state.impactPricePercents[1] = impactPercent;
-        }
-        if (state.numListings >= 3) {
-            state.listingAddresses[2] = listing3;
-            state.impactPricePercents[2] = impactPercent;
-        }
-        if (state.numListings == 4) {
-            state.listingAddresses[3] = listing4;
-            state.impactPricePercents[3] = impactPercent;
+        state.tokenPath = tokenPath;
+        for (uint256 i = 0; i < state.numListings; i++) {
+            state.impactPricePercents[i] = impactPercent;
         }
         require(settleType <= 1, "Invalid settle type");
         require(multiStorage.agent() != address(0), "Agent contract not set");
-        validateHopRequest(listing1, listing2, listing3, listing4, impactPercent, state.numListings, maxIterations);
+        validateHopRequest(listingAddresses, impactPercent, maxIterations);
     }
 
     function checkRouters() internal view returns (bool hasValidRouter) {
@@ -449,12 +418,12 @@ contract MultiInitializer is ReentrancyGuard {
 
     function buildListingArrays(HopPrepState memory state) internal view {
         // Builds listing arrays and computes route
-        (state.indices, state.isBuy) = computeRoute(state.listingAddresses, state.listingAddresses[0], state.listingAddresses[state.numListings - 1]);
+        (state.indices, state.isBuy) = computeRoute(state.listingAddresses, state.tokenPath);
     }
 
     function finalizePrepData(
         HopPrepState memory state,
-        address startToken,
+        address[] memory tokenPath,
         uint256 principal,
         address maker,
         bool isNative
@@ -464,7 +433,7 @@ contract MultiInitializer is ReentrancyGuard {
             hopId: state.hopId,
             indices: state.indices,
             isBuy: state.isBuy,
-            currentToken: startToken,
+            currentToken: tokenPath[0],
             principal: principal,
             maker: maker,
             isNative: isNative
@@ -472,13 +441,9 @@ contract MultiInitializer is ReentrancyGuard {
     }
 
     function prepHop(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        address startToken,
-        address endToken,
+        address[] memory tokenPath,
         uint8 settleType,
         uint256 maxIterations,
         address maker,
@@ -486,50 +451,32 @@ contract MultiInitializer is ReentrancyGuard {
     ) internal view returns (MultiStorage.HopPrepData memory prepData) {
         // Prepares hop data for execution
         require(checkRouters(), "No valid routers configured");
-        HopPrepState memory state = initPrepState(listing1, listing2, listing3, listing4, impactPercent, startToken, settleType, maxIterations);
+        HopPrepState memory state = initPrepState(listingAddresses, impactPercent, tokenPath, settleType, maxIterations);
         buildListingArrays(state);
-        prepData = finalizePrepData(state, startToken, isNative ? msg.value : impactPercent, maker, isNative);
+        prepData = finalizePrepData(state, tokenPath, isNative ? msg.value : impactPercent, maker, isNative);
     }
 
     function updateHopListings(
         MultiStorage.HopExecutionParams memory params,
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent
     ) internal pure {
         // Updates hop listings in execution params
-        params.numListings = 1;
-        params.listingAddresses = new address[](4);
-        params.impactPricePercents = new uint256[](4);
-        params.listingAddresses[0] = listing1;
-        params.impactPricePercents[0] = impactPercent;
-        if (listing2 != address(0)) {
-            params.listingAddresses[1] = listing2;
-            params.impactPricePercents[1] = impactPercent;
-            params.numListings++;
-        }
-        if (listing3 != address(0)) {
-            params.listingAddresses[2] = listing3;
-            params.impactPricePercents[2] = impactPercent;
-            params.numListings++;
-        }
-        if (listing4 != address(0)) {
-            params.listingAddresses[3] = listing4;
-            params.impactPricePercents[3] = impactPercent;
-            params.numListings++;
+        params.numListings = listingAddresses.length;
+        params.listingAddresses = new address[](listingAddresses.length);
+        params.impactPricePercents = new uint256[](listingAddresses.length);
+        for (uint256 i = 0; i < listingAddresses.length; i++) {
+            params.listingAddresses[i] = listingAddresses[i];
+            params.impactPricePercents[i] = impactPercent;
         }
     }
 
     function updateHopTokens(
         MultiStorage.HopExecutionParams memory params,
-        address startToken,
-        address endToken
+        address[] memory tokenPath
     ) internal pure {
         // Updates token addresses in execution params
-        params.startToken = startToken;
-        params.endToken = endToken;
+        params.tokenPath = tokenPath;
     }
 
     function updateHopSettings(
@@ -543,69 +490,65 @@ contract MultiInitializer is ReentrancyGuard {
     }
 
     function prepareHopExecution(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        address startToken,
-        address endToken,
+        address[] memory tokenPath,
         uint8 settleType,
         uint256 maxIterations,
         MultiStorage.HopPrepData memory prepData
     ) internal returns (MultiStorage.HopExecutionParams memory params) {
         // Prepares execution parameters and initializes hop
-        updateHopListings(params, listing1, listing2, listing3, listing4, impactPercent);
-        updateHopTokens(params, startToken, endToken);
+        updateHopListings(params, listingAddresses, impactPercent);
+        updateHopTokens(params, tokenPath);
         updateHopSettings(params, settleType, maxIterations);
-        initializeHopData(listing1, listing2, listing3, listing4, impactPercent, startToken, endToken, settleType, maxIterations, prepData.indices, prepData.hopId, prepData.maker);
+        initializeHopData(listingAddresses, impactPercent, tokenPath, settleType, maxIterations, prepData.indices, prepData.hopId, prepData.maker);
     }
 
     function hopNative(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        address startToken,
-        address endToken,
+        address[] memory tokenPath,
         uint8 settleType,
         uint256 maxIterations
-    ) external payable nonReentrant onlyValidListing(listing1) onlyValidListing(listing2) onlyValidListing(listing3) onlyValidListing(listing4) {
+    ) external payable nonReentrant onlyValidListing(listingAddresses[0]) {
         // Initiates a native hop
         require(msg.sender != address(0), "Caller cannot be zero address");
-        require(startToken == address(0), "Start token must be native");
-        require(endToken != address(0) || endToken != startToken, "End token cannot be identical to start");
+        require(tokenPath[0] == address(0), "Start token must be native");
+        require(tokenPath[0] != tokenPath[tokenPath.length - 1], "Start and end tokens cannot be identical");
         require(impactPercent <= 1000, "Impact percent exceeds 1000");
         require(settleType <= 1, "Invalid settle type");
         require(maxIterations > 0, "Max iterations must be positive");
         require(msg.value > 0, "Native amount must be positive");
-        MultiStorage.HopPrepData memory prepData = prepHop(listing1, listing2, listing3, listing4, impactPercent, startToken, endToken, settleType, maxIterations, msg.sender, true);
-        MultiStorage.HopExecutionParams memory params = prepareHopExecution(listing1, listing2, listing3, listing4, impactPercent, startToken, endToken, settleType, maxIterations, prepData);
+        for (uint256 i = 1; i < listingAddresses.length; i++) {
+            (bool isValid, ) = ICCAgent(multiStorage.agent()).isValidListing(listingAddresses[i]);
+            require(listingAddresses[i] == address(0) || isValid, "Invalid listing");
+        }
+        MultiStorage.HopPrepData memory prepData = prepHop(listingAddresses, impactPercent, tokenPath, settleType, maxIterations, msg.sender, true);
+        MultiStorage.HopExecutionParams memory params = prepareHopExecution(listingAddresses, impactPercent, tokenPath, settleType, maxIterations, prepData);
         emit HopStarted(prepData.hopId, msg.sender, params.numListings);
     }
 
     function hopToken(
-        address listing1,
-        address listing2,
-        address listing3,
-        address listing4,
+        address[] memory listingAddresses,
         uint256 impactPercent,
-        address startToken,
-        address endToken,
+        address[] memory tokenPath,
         uint8 settleType,
         uint256 maxIterations
-    ) external nonReentrant onlyValidListing(listing1) onlyValidListing(listing2) onlyValidListing(listing3) onlyValidListing(listing4) {
+    ) external nonReentrant onlyValidListing(listingAddresses[0]) {
         // Initiates a token hop
         require(msg.sender != address(0), "Caller cannot be zero address");
-        require(startToken != address(0), "Start token must be ERC20");
-        require(endToken != startToken, "Start and end tokens cannot be identical");
+        require(tokenPath[0] != address(0), "Start token must be ERC20");
+        require(tokenPath[0] != tokenPath[tokenPath.length - 1], "Start and end tokens cannot be identical");
         require(impactPercent <= 1000, "Impact percent exceeds 1000");
         require(settleType <= 1, "Invalid settle type");
         require(maxIterations > 0, "Max iterations must be positive");
         require(impactPercent > 0, "Token amount must be positive");
-        MultiStorage.HopPrepData memory prepData = prepHop(listing1, listing2, listing3, listing4, impactPercent, startToken, endToken, settleType, maxIterations, msg.sender, false);
-        MultiStorage.HopExecutionParams memory params = prepareHopExecution(listing1, listing2, listing3, listing4, impactPercent, startToken, endToken, settleType, maxIterations, prepData);
+        for (uint256 i = 1; i < listingAddresses.length; i++) {
+            (bool isValid, ) = ICCAgent(multiStorage.agent()).isValidListing(listingAddresses[i]);
+            require(listingAddresses[i] == address(0) || isValid, "Invalid listing");
+        }
+        MultiStorage.HopPrepData memory prepData = prepHop(listingAddresses, impactPercent, tokenPath, settleType, maxIterations, msg.sender, false);
+        MultiStorage.HopExecutionParams memory params = prepareHopExecution(listingAddresses, impactPercent, tokenPath, settleType, maxIterations, prepData);
         emit HopStarted(prepData.hopId, msg.sender, params.numListings);
     }
 
