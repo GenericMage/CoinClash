@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.9
+// Version: 0.0.11
 // Changes:
+// - v0.0.11: Added SwapImpactContext struct, IUniswapV2Pair interface, _getSwapReserves, and _computeSwapImpact from CCLiquidRouter.sol to fix DeclarationError in _processSingleOrder (line 424). Updated _processSingleOrder to call _computeSwapImpact directly.
+// - v0.0.10: Added helper functions (_collectOrderIdentifiers, _processOrderBatch, _processSingleOrder, _finalizeUpdates) for settleBuyLiquid and settleSellLiquid from CCLiquidRouter.sol to address stack-too-deep errors. Uses OrderBatchContext struct to manage data, ensuring no function handles >4 variables.
 // - v0.0.9: Removed unnecessary isRouter check in _prepareLiquidityTransaction to fix compatibility with CCLiquidityTemplate.sol v0.1.0, where isRouter was removed.
 // - v0.0.8: Updated to use depositor in ICCLiquidity function calls (update, updateLiquidity, transactToken, transactNative) in _updateLiquidity, _prepBuyOrderUpdate, _prepSellOrderUpdate to align with ICCLiquidity.sol v0.0.4. Ensured consistency with CCMainPartial.sol v0.0.11 and ICCListing.sol v0.0.7.
 // - v0.0.7: Added _prepBuyLiquidUpdates and _prepSellLiquidUpdates to prepare buy/sell order liquidation updates, fixing DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid.
@@ -12,9 +14,14 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Updated ICCLiquidity to return bool for transactToken and transactNative, removed redundant SafeERC20 import.
 // - v0.0.2: Added ICCLiquidity interface to resolve DeclarationError, copied from CCSettlementPartial.sol.
 // - v0.0.1: Created CCLiquidPartial.sol, extracted liquid settlement functions from CCSettlementPartial.sol, integrated normalize/denormalize from CCMainPartial.sol, removed CCUniPartial.sol dependency.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.11), CCLiquidRouter.sol (v0.0.6), CCLiquidityRouter.sol (v0.0.25), CCLiquidityTemplate.sol (v0.1.0).
+// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.14), CCLiquidRouter.sol (v0.0.8), CCLiquidityRouter.sol (v0.0.25), CCLiquidityTemplate.sol (v0.1.0).
 
 import "./CCMainPartial.sol";
+
+interface IUniswapV2Pair {
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function token0() external view returns (address);
+}
 
 contract CCLiquidPartial is CCMainPartial {
     struct OrderContext {
@@ -51,6 +58,53 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         uint256 amountSent;
+    }
+
+    struct OrderBatchContext {
+        address listingAddress;
+        uint256 maxIterations;
+        bool isBuyOrder;
+    }
+
+    struct SwapImpactContext {
+        uint256 reserveIn;
+        uint256 reserveOut;
+        uint8 decimalsIn;
+        uint8 decimalsOut;
+        uint256 normalizedReserveIn;
+        uint256 normalizedReserveOut;
+        uint256 amountInAfterFee;
+        uint256 price;
+        uint256 amountOut;
+    }
+
+    function _getSwapReserves(address listingAddress, bool isBuyOrder) private view returns (SwapImpactContext memory context) {
+        // Retrieves reserves and decimals for swap impact calculation
+        ICCListing listingContract = ICCListing(listingAddress);
+        address pairAddress = listingContract.uniswapV2PairView();
+        require(pairAddress != address(0), "Uniswap V2 pair not set");
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        address token0 = pair.token0();
+        bool isToken0In = isBuyOrder ? listingContract.tokenB() == token0 : listingContract.tokenA() == token0;
+        context.reserveIn = isToken0In ? uint256(reserve0) : uint256(reserve1);
+        context.reserveOut = isToken0In ? uint256(reserve1) : uint256(reserve0);
+        context.decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
+        context.decimalsOut = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
+        context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
+        context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
+    }
+
+    function _computeSwapImpact(address listingAddress, uint256 inputAmount, bool isBuyOrder) private view returns (uint256 price, uint256 amountOut) {
+        // Computes swap impact price using Uniswap V2 formula
+        SwapImpactContext memory context = _getSwapReserves(listingAddress, isBuyOrder);
+        require(context.normalizedReserveIn > 0 && context.normalizedReserveOut > 0, "Zero reserves");
+        context.amountInAfterFee = (inputAmount * 997) / 1000; // 0.3% fee
+        context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) /
+                           (context.normalizedReserveIn + context.amountInAfterFee);
+        context.price = context.amountOut > 0 ? (inputAmount * 1e18) / context.amountOut : type(uint256).max;
+        amountOut = denormalize(context.amountOut, context.decimalsOut);
+        price = context.price;
     }
 
     function _getTokenAndDecimals(
@@ -387,5 +441,86 @@ contract CCLiquidPartial is CCMainPartial {
             liquidityAddr: listingContract.liquidityAddressView()
         });
         return _prepSellLiquidUpdates(context, orderIdentifier, pendingAmount);
+    }
+
+    function _collectOrderIdentifiers(
+        address listingAddress,
+        uint256 maxIterations,
+        bool isBuyOrder
+    ) internal view returns (uint256[] memory orderIdentifiers, uint256 iterationCount) {
+        // Collects order identifiers up to maxIterations
+        ICCListing listingContract = ICCListing(listingAddress);
+        uint256[] memory identifiers = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
+        iterationCount = maxIterations < identifiers.length ? maxIterations : identifiers.length;
+        orderIdentifiers = new uint256[](iterationCount);
+        for (uint256 i = 0; i < iterationCount; i++) {
+            orderIdentifiers[i] = identifiers[i];
+        }
+    }
+
+    function _processSingleOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        bool isBuyOrder,
+        uint256 pendingAmount
+    ) internal returns (ICCListing.UpdateType[] memory updates) {
+        // Processes a single order, validating price and executing liquidation
+        (uint256 maxPrice, uint256 minPrice) = isBuyOrder
+            ? ICCListing(listingAddress).getBuyOrderPricing(orderIdentifier)
+            : ICCListing(listingAddress).getSellOrderPricing(orderIdentifier);
+        (uint256 price, ) = _computeSwapImpact(listingAddress, pendingAmount, isBuyOrder);
+        if (price >= minPrice && price <= maxPrice) {
+            updates = isBuyOrder
+                ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
+                : executeSingleSellLiquid(listingAddress, orderIdentifier);
+        } else {
+            updates = new ICCListing.UpdateType[](0);
+        }
+    }
+
+    function _processOrderBatch(
+        address listingAddress,
+        uint256 maxIterations,
+        bool isBuyOrder
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Processes a batch of orders, collecting and executing up to maxIterations
+        OrderBatchContext memory batchContext = OrderBatchContext({
+            listingAddress: listingAddress,
+            maxIterations: maxIterations,
+            isBuyOrder: isBuyOrder
+        });
+        (uint256[] memory orderIdentifiers, uint256 iterationCount) = _collectOrderIdentifiers(
+            batchContext.listingAddress,
+            batchContext.maxIterations,
+            batchContext.isBuyOrder
+        );
+        ICCListing.UpdateType[] memory tempUpdates = new ICCListing.UpdateType[](iterationCount * 3);
+        uint256 updateIndex = 0;
+        for (uint256 i = 0; i < iterationCount; i++) {
+            (uint256 pendingAmount, , ) = batchContext.isBuyOrder
+                ? ICCListing(listingAddress).getBuyOrderAmounts(orderIdentifiers[i])
+                : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
+            ICCListing.UpdateType[] memory updates = _processSingleOrder(
+                batchContext.listingAddress,
+                orderIdentifiers[i],
+                batchContext.isBuyOrder,
+                pendingAmount
+            );
+            for (uint256 j = 0; j < updates.length; j++) {
+                tempUpdates[updateIndex++] = updates[j];
+            }
+        }
+        return _finalizeUpdates(tempUpdates, updateIndex);
+    }
+
+    function _finalizeUpdates(
+        ICCListing.UpdateType[] memory tempUpdates,
+        uint256 updateIndex
+    ) internal pure returns (ICCListing.UpdateType[] memory finalUpdates) {
+        // Resizes and returns final updates array
+        finalUpdates = new ICCListing.UpdateType[](updateIndex);
+        for (uint256 i = 0; i < updateIndex; i++) {
+            finalUpdates[i] = tempUpdates[i];
+        }
     }
 }
