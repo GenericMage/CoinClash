@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.22
+// Version: 0.0.24
 // Changes:
+// - v0.0.24: Fixed typo in _executeTokenTransfer, corrected `iegler20` to `IERC20` for balance check.
+// - v0.0.23: Removed existing slot check and fee claim in _depositToken and _depositNative to create new slots for every deposit, reducing failure risk. Simplified state management by skipping _fetchSlotData and _processFeeShare.
 // - v0.0.22: Refactored _depositToken and _depositNative into call tree with helper functions (_validateInputs, _fetchListingData, _fetchSlotData, _executeTokenTransfer, _executeNativeTransfer, _updateSlot). Added private DepositState struct and mapping for state management. Enhanced error messages and early validation. Updated compatibility comments.
 // - v0.0.21: Updated _validateDeposit to use nextXSlotIDView/nextYSlotIDView for new slots, userXIndexView/userYIndexView for existing slots. Fixed _depositToken/_depositNative to claim fees for existing slots, reset dFeesAcc, and update allocation correctly.
 // - v0.0.20: Modified _depositToken and _depositNative to check for existing slot, claim fees, reset dFeesAcc, and update slot allocation if found, else create new slot. Added depositor parameter for third-party deposits.
@@ -104,21 +106,7 @@ contract CCLiquidityPartial is CCMainPartial {
         if (state.liquidityAddr == address(0)) revert InvalidListingState("Invalid liquidity address");
         ICCLiquidity liquidityContract = ICCLiquidity(state.liquidityAddr);
         (state.xAmount, state.yAmount) = liquidityContract.liquidityAmounts();
-        return state;
-    }
-
-    function _fetchSlotData(DepositState memory state) private view returns (DepositState memory) {
-        ICCLiquidity liquidityContract = ICCLiquidity(state.liquidityAddr);
-        uint256[] memory userIndices = state.isTokenA ? liquidityContract.userXIndexView(state.depositor) : liquidityContract.userYIndexView(state.depositor);
-        if (userIndices.length > 0) {
-            state.hasExistingSlot = true;
-            state.index = userIndices[0];
-            ICCLiquidity.Slot memory slot = state.isTokenA ? liquidityContract.getXSlotView(state.index) : liquidityContract.getYSlotView(state.index);
-            if (slot.depositor != state.depositor) revert InvalidLiquidityContract("Slot depositor mismatch");
-            state.existingAllocation = slot.allocation;
-        } else {
-            state.index = state.isTokenA ? liquidityContract.nextXSlotIDView() : liquidityContract.nextYSlotIDView();
-        }
+        state.index = state.isTokenA ? liquidityContract.nextXSlotIDView() : liquidityContract.nextYSlotIDView();
         return state;
     }
 
@@ -150,7 +138,7 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _executeNativeTransfer(DepositState memory state) private returns (DepositState memory) {
-        if (state.tokenAddress != address(0)) revert InvalidInput("Use depositToken for ERC20");
+        if (state.tokenAddress != address(0)) revert InvalidInput("Use depositNative for ERC20");
         if (state.inputAmount != msg.value) revert InvalidInput("Incorrect ETH amount");
         uint256 preBalanceTemplate = state.liquidityAddr.balance;
         (bool success, bytes memory reason) = state.liquidityAddr.call{value: state.inputAmount}("");
@@ -180,7 +168,6 @@ contract CCLiquidityPartial is CCMainPartial {
     function _validateDeposit(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal view returns (DepositContext memory) {
         DepositState memory state = _validateInputs(listingAddress, depositor, inputAmount, isTokenA);
         state = _fetchListingData(state);
-        state = _fetchSlotData(state);
         return DepositContext({
             listingAddress: state.listingAddress,
             depositor: state.depositor,
@@ -239,12 +226,7 @@ contract CCLiquidityPartial is CCMainPartial {
     function _depositToken(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal returns (uint256) {
         DepositState memory state = _validateInputs(listingAddress, depositor, inputAmount, isTokenA);
         state = _fetchListingData(state);
-        state = _fetchSlotData(state);
         depositStates[msg.sender] = state;
-        if (state.hasExistingSlot) {
-            _processFeeShare(listingAddress, depositor, state.index, isTokenA);
-            state.normalizedAmount += state.existingAllocation;
-        }
         state = _executeTokenTransfer(state);
         _updateSlot(state);
         uint256 receivedAmount = state.receivedAmount;
@@ -255,12 +237,7 @@ contract CCLiquidityPartial is CCMainPartial {
     function _depositNative(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal {
         DepositState memory state = _validateInputs(listingAddress, depositor, inputAmount, isTokenA);
         state = _fetchListingData(state);
-        state = _fetchSlotData(state);
         depositStates[msg.sender] = state;
-        if (state.hasExistingSlot) {
-            _processFeeShare(listingAddress, depositor, state.index, isTokenA);
-            state.normalizedAmount += state.existingAllocation;
-        }
         state = _executeNativeTransfer(state);
         _updateSlot(state);
         delete depositStates[msg.sender];
