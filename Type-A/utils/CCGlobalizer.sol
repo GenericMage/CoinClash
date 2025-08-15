@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.0
+// Version: 0.2.1
 // Changes:
+// - v0.2.1: Added liquidity view functions: getAllUserLiquidity, getAllUserTokenLiquidity, getAllTokenLiquidity, getAllTemplateLiquidity with step/maxIterations for gas efficiency. Uses ICCLiquidityTemplate for slot data.
 // - v0.2.0: Simplified contract, removed unused mappings/arrays. Added globalizeOrders with makerTokensByListing, globalizeLiquidity with depositorTokensByLiquidity. Restricted calls to valid listings/liquidity templates via agent. Added view functions with step/maxIterations. Ensured non-reverting behavior.
 // - v0.1.5: Removed step/maxIterations from token view functions to reduce stack usage.
 // - v0.1.4: Removed maxIterations/step from getAllMakerActiveOrders, getAllMakerOrders.
@@ -19,6 +20,18 @@ interface IERC20 {
 
 interface ICCLiquidityTemplate {
     function listingAddress() external view returns (address);
+    function userIndexView(address user) external view returns (uint256[] memory indices);
+    function getXSlotView(uint256 index) external view returns (Slot memory slot);
+    function getYSlotView(uint256 index) external view returns (Slot memory slot);
+    function activeXLiquiditySlotsView() external view returns (uint256[] memory slots);
+    function activeYLiquiditySlotsView() external view returns (uint256[] memory slots);
+    struct Slot {
+        address depositor;
+        address recipient;
+        uint256 allocation;
+        uint256 dFeesAcc;
+        uint256 timestamp;
+    }
 }
 
 interface ICCListingTemplate {
@@ -236,6 +249,168 @@ contract CCGlobalizer is Ownable {
         for (uint256 i = step; i < step + limit && i < sellIds.length && index < limit; i++) {
             orderIds[index] = sellIds[i];
             index++;
+        }
+    }
+
+    // Returns all user liquidity slot indices across templates
+    function getAllUserLiquidity(address user, uint256 step, uint256 maxIterations) external view returns (address[] memory templates, uint256[] memory slotIndices, bool[] memory isX) {
+        uint256 length = depositorLiquidityTemplates[user].length;
+        if (step >= length) return (new address[](0), new uint256[](0), new bool[](0));
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        uint256 totalSlots = 0;
+
+        // Count total slots
+        for (uint256 i = step; i < step + limit; i++) {
+            address template = depositorLiquidityTemplates[user][i];
+            uint256[] memory indices = ICCLiquidityTemplate(template).userIndexView(user);
+            totalSlots += indices.length;
+        }
+
+        // Collect slots
+        templates = new address[](totalSlots);
+        slotIndices = new uint256[](totalSlots);
+        isX = new bool[](totalSlots);
+        uint256 index = 0;
+        for (uint256 i = step; i < step + limit && index < totalSlots; i++) {
+            address template = depositorLiquidityTemplates[user][i];
+            uint256[] memory indices = ICCLiquidityTemplate(template).userIndexView(user);
+            for (uint256 j = 0; j < indices.length && index < totalSlots; j++) {
+                ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(indices[j]);
+                if (slot.depositor == user && slot.allocation > 0) {
+                    templates[index] = template;
+                    slotIndices[index] = indices[j];
+                    isX[index] = true;
+                    index++;
+                } else {
+                    slot = ICCLiquidityTemplate(template).getYSlotView(indices[j]);
+                    if (slot.depositor == user && slot.allocation > 0) {
+                        templates[index] = template;
+                        slotIndices[index] = indices[j];
+                        isX[index] = false;
+                        index++;
+                    }
+                }
+            }
+        }
+    }
+
+    // Returns user liquidity slot indices for a specific token
+    function getAllUserTokenLiquidity(address user, address token, uint256 step, uint256 maxIterations) external view returns (address[] memory templates, uint256[] memory slotIndices, bool[] memory isX) {
+        uint256 length = depositorLiquidityTemplates[user].length;
+        if (step >= length) return (new address[](0), new uint256[](0), new bool[](0));
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        uint256 totalSlots = 0;
+
+        // Count total slots for token
+        for (uint256 i = step; i < step + limit; i++) {
+            address template = depositorLiquidityTemplates[user][i];
+            if (isInArray(depositorTokensByLiquidity[user][template], token)) {
+                uint256[] memory indices = ICCLiquidityTemplate(template).userIndexView(user);
+                totalSlots += indices.length;
+            }
+        }
+
+        // Collect slots
+        templates = new address[](totalSlots);
+        slotIndices = new uint256[](totalSlots);
+        isX = new bool[](totalSlots);
+        uint256 index = 0;
+        for (uint256 i = step; i < step + limit && index < totalSlots; i++) {
+            address template = depositorLiquidityTemplates[user][i];
+            if (isInArray(depositorTokensByLiquidity[user][template], token)) {
+                uint256[] memory indices = ICCLiquidityTemplate(template).userIndexView(user);
+                for (uint256 j = 0; j < indices.length && index < totalSlots; j++) {
+                    ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(indices[j]);
+                    if (slot.depositor == user && slot.allocation > 0) {
+                        templates[index] = template;
+                        slotIndices[index] = indices[j];
+                        isX[index] = true;
+                        index++;
+                    } else {
+                        slot = ICCLiquidityTemplate(template).getYSlotView(indices[j]);
+                        if (slot.depositor == user && slot.allocation > 0) {
+                            templates[index] = template;
+                            slotIndices[index] = indices[j];
+                            isX[index] = false;
+                            index++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Returns all liquidity slot indices for a token
+    function getAllTokenLiquidity(address token, uint256 step, uint256 maxIterations) external view returns (address[] memory templates, uint256[] memory slotIndices, bool[] memory isX) {
+        uint256 length = tokenLiquidityTemplates[token].length;
+        if (step >= length) return (new address[](0), new uint256[](0), new bool[](0));
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        uint256 totalSlots = 0;
+
+        // Count total slots
+        for (uint256 i = step; i < step + limit; i++) {
+            address template = tokenLiquidityTemplates[token][i];
+            uint256[] memory xSlots = ICCLiquidityTemplate(template).activeXLiquiditySlotsView();
+            uint256[] memory ySlots = ICCLiquidityTemplate(template).activeYLiquiditySlotsView();
+            totalSlots += xSlots.length + ySlots.length;
+        }
+
+        // Collect slots
+        templates = new address[](totalSlots);
+        slotIndices = new uint256[](totalSlots);
+        isX = new bool[](totalSlots);
+        uint256 index = 0;
+        for (uint256 i = step; i < step + limit && index < totalSlots; i++) {
+            address template = tokenLiquidityTemplates[token][i];
+            uint256[] memory xSlots = ICCLiquidityTemplate(template).activeXLiquiditySlotsView();
+            uint256[] memory ySlots = ICCLiquidityTemplate(template).activeYLiquiditySlotsView();
+            for (uint256 j = 0; j < xSlots.length && index < totalSlots; j++) {
+                ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(xSlots[j]);
+                if (slot.allocation > 0) {
+                    templates[index] = template;
+                    slotIndices[index] = xSlots[j];
+                    isX[index] = true;
+                    index++;
+                }
+            }
+            for (uint256 j = 0; j < ySlots.length && index < totalSlots; j++) {
+                ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(ySlots[j]);
+                if (slot.allocation > 0) {
+                    templates[index] = template;
+                    slotIndices[index] = ySlots[j];
+                    isX[index] = false;
+                    index++;
+                }
+            }
+        }
+    }
+
+    // Returns all liquidity slot indices for a template
+    function getAllTemplateLiquidity(address template, uint256 step, uint256 maxIterations) external view returns (uint256[] memory slotIndices, bool[] memory isX) {
+        uint256[] memory xSlots = ICCLiquidityTemplate(template).activeXLiquiditySlotsView();
+        uint256[] memory ySlots = ICCLiquidityTemplate(template).activeYLiquiditySlotsView();
+        uint256 length = xSlots.length + ySlots.length;
+        if (step >= length) return (new uint256[](0), new bool[](0));
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        slotIndices = new uint256[](limit);
+        isX = new bool[](limit);
+        uint256 index = 0;
+
+        for (uint256 i = step; i < step + limit && i < xSlots.length && index < limit; i++) {
+            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(xSlots[i]);
+            if (slot.allocation > 0) {
+                slotIndices[index] = xSlots[i];
+                isX[index] = true;
+                index++;
+            }
+        }
+        for (uint256 i = step; i < step + limit && i < ySlots.length && index < limit; i++) {
+            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(ySlots[i]);
+            if (slot.allocation > 0) {
+                slotIndices[index] = ySlots[i];
+                isX[index] = false;
+                index++;
+            }
         }
     }
 
