@@ -3,7 +3,7 @@ pragma solidity ^0.8.2;
 
 // Version: 0.1.5
 // Changes:
-// - v0.1.5: Modified update function to call globalizeUpdate with tokenB for buy orders and tokenA for sell orders during order creation only. Removed redundant globalizeUpdate call at function end.
+// - v0.1.5: Updated globalizeUpdate to call ICCGlobalizer.globalizeOrders with token (_tokenB for buy, _tokenA for sell) instead of listing address, aligning with new ICCGlobalizer interface (v0.2.1).
 // - v0.1.4: Updated _updateRegistry to use ITokenRegistry.initializeTokens, passing both _tokenA and _tokenB (if non-zero) for a single maker, replacing initializeBalances calls.
 // - v0.1.3: Updated _updateRegistry to initialize balances for both _tokenA and _tokenB (if non-zero), removing block.timestamp % 2 token selection.
 // - v0.1.2: Modified LastDayFee struct to use lastDayXFeesAcc, lastDayYFeesAcc. Updated queryYield to accept depositAmount, isTokenA, fetching xFeesAcc, yFeesAcc from CCLiquidityTemplate.liquidityDetail. Updated update function to set lastDayXFeesAcc, lastDayYFeesAcc on day change.
@@ -252,9 +252,25 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         }
     }
 
-    // Calls globalizeOrders on the globalizer contract with a single token
-    function globalizeUpdate(address maker, address token) internal {
+    // Calls globalizeOrders on the globalizer contract with appropriate token
+    function globalizeUpdate(address maker) internal {
         if (_globalizerAddress == address(0)) return;
+        address token = address(0);
+        for (uint256 i = 0; i < _pendingBuyOrders.length; i++) {
+            if (_buyOrderCores[_pendingBuyOrders[i]].makerAddress == maker) {
+                token = _tokenB; // Buy orders involve tokenB
+                break;
+            }
+        }
+        if (token == address(0)) {
+            for (uint256 i = 0; i < _pendingSellOrders.length; i++) {
+                if (_sellOrderCores[_pendingSellOrders[i]].makerAddress == maker) {
+                    token = _tokenA; // Sell orders involve tokenA
+                    break;
+                }
+            }
+        }
+        if (token == address(0)) return; // No relevant orders found
         uint256 gasBefore = gasleft();
         try ICCGlobalizer(_globalizerAddress).globalizeOrders{gas: gasBefore / 10}(maker, token) {
         } catch (bytes memory reason) {
@@ -354,7 +370,6 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
                         _pendingBuyOrders.push(u.index);
                         _makerPendingOrders[u.addr].push(u.index);
                         _nextOrderId = u.index + 1;
-                        globalizeUpdate(u.addr, _tokenB); // Globalize for tokenB on buy order creation
                         emit OrderUpdated(_listingId, u.index, true, 1);
                     } else if (u.value == 0) {
                         core.status = 0;
@@ -398,7 +413,6 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
                         _pendingSellOrders.push(u.index);
                         _makerPendingOrders[u.addr].push(u.index);
                         _nextOrderId = u.index + 1;
-                        globalizeUpdate(u.addr, _tokenA); // Globalize for tokenA on sell order creation
                         emit OrderUpdated(_listingId, u.index, false, 1);
                     } else if (u.value == 0) {
                         core.status = 0;
@@ -452,6 +466,7 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         }
         if (maker != address(0)) {
             _updateRegistry(maker);
+            globalizeUpdate(maker);
         }
         emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
     }
