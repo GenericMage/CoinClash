@@ -5,20 +5,25 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.3 (Updated 2025-08-15)
+**Version**: 0.1.4 (Updated 2025-08-15)
+
+**Changes**:
+- v0.1.0: Added `globalizerAddress` state variable, updated `transactToken` and `transactNative` to fetch globalizer address from `ICCAgent.globalizerAddress` and call `ICCGlobalizer.globalizeLiquidity`. Added `userXIndexView`, `userYIndexView`, `getActiveXLiquiditySlots`, `getActiveYLiquiditySlots` view functions. Updated compatibility to include `CCSEntryPartial.sol` (v0.0.18).
+- v0.0.20: Initial documentation for `CCLiquidityTemplate.sol` (v0.0.20), covering state, mappings, structs, formulas, and functions.
 
 **Compatibility**:
-- CCListingTemplate.sol (v0.1.4)
+- CCListingTemplate.sol (v0.0.10)
 - CCLiquidityRouter.sol (v0.0.18)
-- CCMainPartial.sol (v0.0.14)
-- CCGlobalizer.sol (v0.2.0)
+- CCMainPartial.sol (v0.0.10)
+- CCGlobalizer.sol (v0.2.1)
 - ICCLiquidity.sol (v0.0.4)
 - ICCListing.sol (v0.0.7)
+- CCSEntryPartial.sol (v0.0.18)
 
 ## Interfaces
 - **IERC20**: Provides `decimals()` for normalization, `transfer(address, uint256)` for token transfers.
-- **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`), `globalizerAddressView()` (returns `address`).
-- **ICCAgent**: Provides `registryAddress()` (returns `address`) for fetching registry.
+- **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`).
+- **ICCAgent**: Provides `registryAddress()` (returns `address`), `globalizerAddress()` (returns `address`) for fetching registry and globalizer.
 - **ITokenRegistry**: Provides `initializeBalances(address token, address[] memory users)` for balance updates.
 - **ICCGlobalizer**: Provides `globalizeLiquidity(address depositor, address token)` for liquidity tracking.
 
@@ -29,6 +34,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **`tokenB`**: `address public` - Token B address (ETH if zero).
 - **`listingId`**: `uint256 public` - Listing identifier.
 - **`agent`**: `address public` - Agent contract address.
+- **`globalizerAddress`**: `address public` - Globalizer contract address, fetched from `ICCAgent`.
 - **`liquidityDetail`**: `LiquidityDetails public` - Stores `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`.
 - **`activeXLiquiditySlots`**: `uint256[] public` - Active xSlot indices.
 - **`activeYLiquiditySlots`**: `uint256[] public` - Active ySlot indices.
@@ -38,7 +44,8 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **`routers`**: `mapping(address => bool) public` - Authorized routers.
 - **`xLiquiditySlots`**: `mapping(uint256 => Slot) public` - Token A slot data.
 - **`yLiquiditySlots`**: `mapping(uint256 => Slot) public` - Token B slot data.
-- **`userIndex`**: `mapping(address => uint256[]) private` - User slot indices (accessed via `userXIndexView`/`userYIndexView`).
+- **`userXIndex`**: `mapping(address => uint256[]) public` - User xSlot indices.
+- **`userYIndex`**: `mapping(address => uint256[]) public` - User ySlot indices.
 
 ## Structs
 1. **LiquidityDetails**:
@@ -111,15 +118,15 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Gas**: Single write.
 
 ### update(address depositor, UpdateType[] memory updates)
-- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, calls `ITokenRegistry.initializeBalances` for `tokenA` and `tokenB`, calls `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)` for x/y slots, emits `LiquidityUpdated`.
-- **Internal**: Processes `updates` for balances, fees, or slots. Adds/removes slot indices. Fetches globalizer via `ICCListing.globalizerAddressView`. Uses try-catch, emits `GlobalizeUpdateFailed` or `UpdateRegistryFailed` on failure.
+- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userXIndex`, `userYIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, calls `ITokenRegistry.initializeBalances` for `tokenA` or `tokenB`, emits `LiquidityUpdated`.
+- **Internal**: Processes `updates` for balances, fees, or slots. Adds/removes slot indices. Fetches registry via `ICCAgent.registryAddress`. Uses try-catch, emits `UpdateRegistryFailed` on failure.
 - **Restrictions**: Router-only (`routers[msg.sender]`).
 - **Gas**: Loop over `updates`, array resizing, external calls.
 
 ### changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor)
-- **Behavior**: Transfers slot ownership, updates `userIndex`, calls `globalizeLiquidity` for both depositors, emits `SlotDepositorChanged`.
+- **Behavior**: Transfers slot ownership, updates `userXIndex` or `userYIndex`, emits `SlotDepositorChanged`.
 - **Restrictions**: Router-only, `depositor` must be slot owner, valid `newDepositor`.
-- **Gas**: Slot update, array adjustments, two `globalizeLiquidity` calls.
+- **Gas**: Slot update, array adjustments.
 
 ### addFees(address depositor, bool isX, uint256 fee)
 - **Behavior**: Adds fees to `xFees`/`yFees` via `update`, emits `FeesUpdated`.
@@ -127,17 +134,17 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Gas**: Single `update` call.
 
 ### transactToken(address depositor, address token, uint256 amount, address recipient)
-- **Behavior**: Transfers ERC20 tokens via `IERC20.transfer`, emits `TransactFailed` on failure.
+- **Behavior**: Transfers ERC20 tokens via `IERC20.transfer`, updates `xLiquid`/`yLiquid`, fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, emits `TransactFailed` or `GlobalizeUpdateFailed` on failure.
 - **Restrictions**: Router-only, valid token, non-zero amount.
-- **Gas**: Single transfer.
+- **Gas**: Single transfer, external calls.
 
 ### transactNative(address depositor, uint256 amount, address recipient)
-- **Behavior**: Transfers ETH via low-level `call`, emits `TransactFailed` on failure.
+- **Behavior**: Transfers ETH via low-level `call`, updates `xLiquid`/`yLiquid`, fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, emits `TransactFailed` or `GlobalizeUpdateFailed` on failure.
 - **Restrictions**: Router-only, non-zero amount.
-- **Gas**: Single transfer.
+- **Gas**: Single transfer, external calls.
 
 ### updateLiquidity(address depositor, bool isX, uint256 amount)
-- **Behavior**: Adds to `xLiquid` (if `isX`) or `yLiquid`, emits `LiquidityUpdated`.
+- **Behavior**: Reduces `xLiquid` (if `isX`) or `yLiquid`, emits `LiquidityUpdated`.
 - **Restrictions**: Router-only.
 - **Gas**: Single update.
 
@@ -164,23 +171,41 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Gas**: Two transfers, `update` call.
 
 ## View Functions
+### getListingAddress(uint256) view returns (address listingAddressReturn)
+- **Behavior**: Returns `listingAddress`.
+
 ### liquidityAmounts() view returns (uint256 xAmount, uint256 yAmount)
 - **Behavior**: Returns `xLiquid`, `yLiquid`.
 
-### liquidityDetailsView() view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc)
-- **Behavior**: Returns `liquidityDetail` fields.
+### liquidityDetailsView(address) view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees)
+- **Behavior**: Returns `liquidityDetail` fields for `CCSEntryPartial` compatibility.
 
-### getActiveXLiquiditySlots(uint256 maxIterations) view returns (uint256[] memory slots)
-- **Behavior**: Returns up to `maxIterations` of `activeXLiquiditySlots`.
+### activeXLiquiditySlotsView() view returns (uint256[] memory slots)
+- **Behavior**: Returns `activeXLiquiditySlots`.
 
-### getActiveYLiquiditySlots(uint256 maxIterations) view returns (uint256[] memory slots)
-- **Behavior**: Returns up to `maxIterations` of `activeYLiquiditySlots`.
+### activeYLiquiditySlotsView() view returns (uint256[] memory slots)
+- **Behavior**: Returns `activeYLiquiditySlots`.
 
 ### userXIndexView(address user) view returns (uint256[] memory indices)
-- **Behavior**: Returns xSlot indices for `user`.
+- **Behavior**: Returns xSlot indices for `user` from `userXIndex`.
 
 ### userYIndexView(address user) view returns (uint256[] memory indices)
-- **Behavior**: Returns ySlot indices for `user`.
+- **Behavior**: Returns ySlot indices for `user` from `userYIndex`.
+
+### getActiveXLiquiditySlots() view returns (uint256[] memory slots)
+- **Behavior**: Returns `activeXLiquiditySlots`.
+
+### getActiveYLiquiditySlots() view returns (uint256[] memory slots)
+- **Behavior**: Returns `activeYLiquiditySlots`.
+
+### getXSlotView(uint256 index) view returns (Slot memory slot)
+- **Behavior**: Returns xSlot details.
+
+### getYSlotView(uint256 index) view returns (Slot memory slot)
+- **Behavior**: Returns ySlot details.
+
+### routerAddressesView() view returns (address[] memory addresses)
+- **Behavior**: Returns `routerAddresses`.
 
 ## Additional Details
 - **Decimal Handling**: Normalizes to 1e18 using `IERC20.decimals`, denormalizes for transfers.
@@ -194,7 +219,184 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - Try-catch for external calls with detailed revert strings.
   - Public state variables accessed via auto-generated getters or unique view functions.
   - No reserved keywords, no `virtual`/`override`.
-  - `userIndex` private, accessed via `userXIndexView`/`userYIndexView`.
 - **Router Security**: Only `routers[msg.sender]` can call restricted functions.
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
-- **Globalization**: In `update`, fetches globalizer via `ICCListing.globalizerAddressView`, calls `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)` for x/y slots.
+- **Globalization**: In `transactToken` and `transactNative`, fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)` for x/y slots.
+</xaiArtifact>
+
+### Task 2: Do 128 bits (Generate Interface File)
+<xaiArtifact artifact_id="f2d93b7f-131c-4d06-8776-b8f0ae9d6f23" artifact_version_id="28e1aeb6-73ad-4220-b9e1-4a7f1d7ad4ab" title="ICCLiquidityTemplate.sol" contentType="text/solidity">
+/*
+ SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
+
+ Version: 0.0.1
+ Changes:
+ - v0.0.1: Initial interface for CCLiquidityTemplate.sol v0.0.22, capturing state variables, mappings, structs, and functions with brief comments.
+*/
+
+pragma solidity ^0.8.2;
+
+interface ICCLiquidityTemplate {
+    // State variable: Tracks if routers are set
+    function routersSet() external view returns (bool);
+
+    // State variable: Listing contract address
+    function listingAddress() external view returns (address);
+
+    // State variable: Token A address (ETH if zero)
+    function tokenA() external view returns (address);
+
+    // State variable: Token B address (ETH if zero)
+    function tokenB() external view returns (address);
+
+    // State variable: Listing identifier
+    function listingId() external view returns (uint256);
+
+    // State variable: Agent contract address
+    function agent() external view returns (address);
+
+    // State variable: Globalizer contract address
+    function globalizerAddress() external view returns (address);
+
+    // Struct: Stores liquidity and fee details
+    struct LiquidityDetails {
+        uint256 xLiquid; // Normalized token A liquidity
+        uint256 yLiquid; // Normalized token B liquidity
+        uint256 xFees; // Normalized token A fees
+        uint256 yFees; // Normalized token B fees
+        uint256 xFeesAcc; // Cumulative token A fee volume
+        uint256 yFeesAcc; // Cumulative token B fee volume
+    }
+
+    // Struct: Represents a liquidity slot
+    struct Slot {
+        address depositor; // Slot owner
+        address recipient; // Address receiving withdrawals
+        uint256 allocation; // Normalized liquidity allocation
+        uint256 dFeesAcc; // Cumulative fees at deposit
+        uint256 timestamp; // Slot creation timestamp
+    }
+
+    // Struct: Defines update parameters
+    struct UpdateType {
+        uint8 updateType; // 0=balance, 1=fees, 2=xSlot, 3=ySlot
+        uint256 index; // Index for fees, liquidity, or slot
+        uint256 value; // Normalized amount/allocation
+        address addr; // Depositor address
+        address recipient; // Recipient address for withdrawals
+    }
+
+    // Struct: Defines withdrawal amounts
+    struct PreparedWithdrawal {
+        uint256 amountA; // Normalized token A withdrawal
+        uint256 amountB; // Normalized token B withdrawal
+    }
+
+    // State variable: Liquidity details
+    function liquidityDetail() external view returns (LiquidityDetails memory);
+
+    // Mapping: Authorized routers
+    function routers(address router) external view returns (bool);
+
+    // Mapping: Token A slot data
+    function xLiquiditySlots(uint256 index) external view returns (Slot memory);
+
+    // Mapping: Token B slot data
+    function yLiquiditySlots(uint256 index) external view returns (Slot memory);
+
+    // Mapping: User xSlot indices
+    function userXIndex(address user) external view returns (uint256[] memory);
+
+    // Mapping: User ySlot indices
+    function userYIndex(address user) external view returns (uint256[] memory);
+
+    // State variable: Active xSlot indices
+    function activeXLiquiditySlots() external view returns (uint256[] memory);
+
+    // State variable: Active ySlot indices
+    function activeYLiquiditySlots() external view returns (uint256[] memory);
+
+    // State variable: Authorized router addresses
+    function routerAddresses() external view returns (address[] memory);
+
+    // Sets router addresses, callable once
+    function setRouters(address[] memory _routers) external;
+
+    // Sets listing ID, callable once
+    function setListingId(uint256 _listingId) external;
+
+    // Sets listing address, callable once
+    function setListingAddress(address _listingAddress) external;
+
+    // Sets token pair, callable once
+    function setTokens(address _tokenA, address _tokenB) external;
+
+    // Sets agent address, callable once
+    function setAgent(address _agent) external;
+
+    // Updates liquidity and slot details
+    function update(address depositor, UpdateType[] memory updates) external;
+
+    // Transfers slot ownership
+    function changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor) external;
+
+    // Adds fees to liquidity details
+    function addFees(address depositor, bool isX, uint256 fee) external;
+
+    // Transfers ERC20 tokens and updates liquidity
+    function transactToken(address depositor, address token, uint256 amount, address recipient) external;
+
+    // Transfers native ETH and updates liquidity
+    function transactNative(address depositor, uint256 amount, address recipient) external;
+
+    // Updates liquidity balance
+    function updateLiquidity(address depositor, bool isX, uint256 amount) external;
+
+    // Prepares token A withdrawal
+    function xPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
+
+    // Executes token A withdrawal
+    function xExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external;
+
+    // Prepares token B withdrawal
+    function yPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
+
+    // Executes token B withdrawal
+    function yExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external;
+
+    // Returns listing address
+    function getListingAddress(uint256) external view returns (address);
+
+    // Returns liquidity amounts
+    function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
+
+    // Returns liquidity details for CCSEntryPartial compatibility
+    function liquidityDetailsView(address) external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees);
+
+    // Returns active xLiquidity slots
+    function activeXLiquiditySlotsView() external view returns (uint256[] memory);
+
+    // Returns active yLiquidity slots
+    function activeYLiquiditySlotsView() external view returns (uint256[] memory);
+
+    // Returns user's xLiquidity slot indices
+    function userXIndexView(address user) external view returns (uint256[] memory);
+
+    // Returns user's yLiquidity slot indices
+    function userYIndexView(address user) external view returns (uint256[] memory);
+
+    // Returns active xLiquidity slots
+    function getActiveXLiquiditySlots() external view returns (uint256[] memory);
+
+    // Returns active yLiquidity slots
+    function getActiveYLiquiditySlots() external view returns (uint256[] memory);
+
+    // Returns xLiquidity slot details
+    function getXSlotView(uint256 index) external view returns (Slot memory);
+
+    // Returns yLiquidity slot details
+    function getYSlotView(uint256 index) external view returns (Slot memory);
+
+    // Returns router addresses
+    function routerAddressesView() external view returns (address[] memory);
+}
