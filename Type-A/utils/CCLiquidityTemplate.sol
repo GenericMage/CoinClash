@@ -1,31 +1,33 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.20
+// Version: 0.1.3
 // Changes:
-// - v0.0.20: Removed depositToken, depositNative, withdraw (xPrepOut, yPrepOut, xExecuteOut, yExecuteOut), claimFees, and changeDepositor, moved to CCLiquidityRouter.sol v0.0.18 via CCLiquidityPartial.sol v0.0.13. Moved globalizeUpdate calls to transactToken and transactNative, updateRegistry calls to update. Updated compatibility comments.
-// - v0.0.19: Removed checkRouterInvolved and isRouter, replaced with require(routers[msg.sender], "Router only").
-// - v0.0.18: Refactored checkRouterInvolved to check routers mapping.
+// - v0.1.3: Removed redundant view functions (activeXLiquiditySlotsView, activeYLiquiditySlotsView, getXSlotView, getYSlotView, routerAddressesView) as public mappings/arrays have auto-generated getters.
+// - v0.1.2: Added changeSlotDepositor, addFees, userXIndexView, userYIndexView, getActiveXLiquiditySlots, getActiveYLiquiditySlots to match CCLiquidityTemplateDocs.md.
+// - v0.1.1: Removed listingAddress() function to resolve DeclarationError, as public listingAddress variable auto-generates getter.
+// - v0.0.22: Modified globalization to occur only in update function, fetching globalizer address from listing contract (ICCListingTemplate.globalizerAddressView). Removed globalizeLiquidity calls from updateLiquidity, transactToken, transactNative.
+// - v0.0.21: Renamed getListingAddress(uint256) to listingAddress() with no parameters to match CCGlobalizer.sol (v0.2.0) expectations in globalizeLiquidity.
+// - v0.0.20: Removed depositToken, depositNative, withdraw, claimFees, changeDepositor, moved to CCLiquidityRouter.sol v0.0.18. Moved globalizeUpdate to transactToken/transactNative, updateRegistry to update.
+// - v0.0.19: Removed checkRouterInvolved, isRouter, replaced with routers mapping check.
+// - v0.0.18: Refactored checkRouterInvolved for router validation.
 // - v0.0.17: Modified checkRouterInvolved for router validation.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.18), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7).
+// Compatible with CCListingTemplate.sol (v0.1.4), CCMainPartial.sol (v0.0.14), CCLiquidityRouter.sol (v0.0.18), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCGlobalizer.sol (v0.2.0).
 
 import "../imports/IERC20.sol";
 
 interface ICCListing {
     function prices(uint256) external view returns (uint256);
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
+    function globalizerAddressView() external view returns (address globalizerAddress);
 }
 
 interface ICCAgent {
-    function globalizeLiquidity(
-        uint256 listingId,
-        address tokenA,
-        address tokenB,
-        address user,
-        uint256 amount,
-        bool isDeposit
-    ) external;
     function registryAddress() external view returns (address);
+}
+
+interface ICCGlobalizer {
+    function globalizeLiquidity(address depositor, address token) external;
 }
 
 interface ITokenRegistry {
@@ -43,33 +45,33 @@ contract CCLiquidityTemplate {
     address public agent;
 
     struct LiquidityDetails {
-        uint256 xLiquid;
-        uint256 yLiquid;
-        uint256 xFees;
-        uint256 yFees;
-        uint256 xFeesAcc;
-        uint256 yFeesAcc;
+        uint256 xLiquid; // Normalized tokenA liquidity
+        uint256 yLiquid; // Normalized tokenB liquidity
+        uint256 xFees; // Normalized tokenA fees
+        uint256 yFees; // Normalized tokenB fees
+        uint256 xFeesAcc; // Accumulated tokenA fees
+        uint256 yFeesAcc; // Accumulated tokenB fees
     }
 
     struct Slot {
-        address depositor;
-        address recipient;
-        uint256 allocation;
-        uint256 dFeesAcc;
-        uint256 timestamp;
+        address depositor; // Address providing liquidity
+        address recipient; // Address receiving withdrawals
+        uint256 allocation; // Normalized liquidity amount
+        uint256 dFeesAcc; // Accumulated fees at deposit
+        uint256 timestamp; // Deposit timestamp
     }
 
     struct UpdateType {
-        uint8 updateType;
-        uint256 index;
-        uint256 value;
-        address addr;
-        address recipient;
+        uint8 updateType; // 0: Liquidity, 1: Fees, 2: xSlot, 3: ySlot
+        uint256 index; // Slot index or 0/1 for x/y fees/liquidity
+        uint256 value; // Normalized amount
+        address addr; // Depositor address
+        address recipient; // Recipient address
     }
 
     struct PreparedWithdrawal {
-        uint256 amountA;
-        uint256 amountB;
+        uint256 amountA; // Normalized tokenA withdrawal amount
+        uint256 amountB; // Normalized tokenB withdrawal amount
     }
 
     LiquidityDetails public liquidityDetail;
@@ -77,7 +79,7 @@ contract CCLiquidityTemplate {
     mapping(uint256 => Slot) public yLiquiditySlots;
     uint256[] public activeXLiquiditySlots;
     uint256[] public activeYLiquiditySlots;
-    mapping(address => uint256[]) public userIndex;
+    mapping(address => uint256[]) private userIndex;
 
     event LiquidityUpdated(uint256 indexed listingId, uint256 xLiquid, uint256 yLiquid);
     event FeesUpdated(uint256 indexed listingId, uint256 xFees, uint256 yFees);
@@ -86,18 +88,21 @@ contract CCLiquidityTemplate {
     event UpdateRegistryFailed(address indexed depositor, bool isX, bytes reason);
     event TransactFailed(address indexed depositor, address token, uint256 amount, string reason);
 
+    // Normalizes amount to 1e18 based on token decimals
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount * 10 ** (uint256(18) - uint256(decimals));
         else return amount / 10 ** (uint256(decimals) - uint256(18));
     }
 
+    // Denormalizes amount from 1e18 to token decimals
     function denormalize(uint256 amount, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 18) return amount;
         else if (decimals < 18) return amount / 10 ** (uint256(18) - uint256(decimals));
         else return amount * 10 ** (uint256(decimals) - uint256(18));
     }
 
+    // Sets authorized routers
     function setRouters(address[] memory _routers) external {
         require(!routersSet, "Routers already set");
         require(_routers.length > 0, "No routers provided");
@@ -109,17 +114,20 @@ contract CCLiquidityTemplate {
         routersSet = true;
     }
 
+    // Sets listing ID
     function setListingId(uint256 _listingId) external {
         require(listingId == 0, "Listing ID already set");
         listingId = _listingId;
     }
 
+    // Sets listing contract address
     function setListingAddress(address _listingAddress) external {
         require(listingAddress == address(0), "Listing already set");
         require(_listingAddress != address(0), "Invalid listing address");
         listingAddress = _listingAddress;
     }
 
+    // Sets tokenA and tokenB addresses
     function setTokens(address _tokenA, address _tokenB) external {
         require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
         require(_tokenA != _tokenB, "Tokens must be different");
@@ -128,15 +136,19 @@ contract CCLiquidityTemplate {
         tokenB = _tokenB;
     }
 
+    // Sets agent contract address
     function setAgent(address _agent) external {
         require(agent == address(0), "Agent already set");
         require(_agent != address(0), "Invalid agent address");
         agent = _agent;
     }
 
+    // Updates liquidity or fees
     function update(address depositor, UpdateType[] memory updates) external {
         require(routers[msg.sender], "Router only");
         LiquidityDetails storage details = liquidityDetail;
+        address globalizer = ICCListing(listingAddress).globalizerAddressView();
+        require(globalizer != address(0), "Globalizer not set");
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0) {
@@ -173,6 +185,9 @@ contract CCLiquidityTemplate {
                 }
                 slot.allocation = u.value;
                 details.xLiquid += u.value;
+                try ICCGlobalizer(globalizer).globalizeLiquidity(u.addr, tokenA) {} catch (bytes memory reason) {
+                    emit GlobalizeUpdateFailed(u.addr, listingId, true, u.value, reason);
+                }
             } else if (u.updateType == 3) {
                 Slot storage slot = yLiquiditySlots[u.index];
                 if (slot.depositor == address(0) && u.addr != address(0)) {
@@ -195,156 +210,81 @@ contract CCLiquidityTemplate {
                 }
                 slot.allocation = u.value;
                 details.yLiquid += u.value;
+                try ICCGlobalizer(globalizer).globalizeLiquidity(u.addr, tokenB) {} catch (bytes memory reason) {
+                    emit GlobalizeUpdateFailed(u.addr, listingId, false, u.value, reason);
+                }
             } else revert("Invalid update type");
         }
-        if (agent != address(0)) {
-            address registry;
-            try ICCAgent(agent).registryAddress{gas: 1_000_000}() returns (address reg) {
-                registry = reg;
-            } catch (bytes memory reason) {
-                emit UpdateRegistryFailed(depositor, updates[0].updateType == 2, reason);
-                revert(string(abi.encodePacked("Agent registry fetch failed: ", reason)));
-            }
-            if (registry != address(0)) {
-                address token = updates[0].updateType == 2 ? tokenA : tokenB;
-                address[] memory users = new address[](1);
-                users[0] = depositor;
-                try ITokenRegistry(registry).initializeBalances{gas: 1_000_000}(token, users) {
-                } catch (bytes memory reason) {
-                    emit UpdateRegistryFailed(depositor, updates[0].updateType == 2, reason);
-                    revert(string(abi.encodePacked("Registry update failed: ", reason)));
-                }
-            }
-        }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-    }
-
-    function changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor) external {
-        require(routers[msg.sender], "Router only");
-        require(newDepositor != address(0), "Invalid new depositor");
-        require(depositor != address(0), "Invalid depositor");
-        Slot storage slot = isX ? xLiquiditySlots[slotIndex] : yLiquiditySlots[slotIndex];
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        require(slot.allocation > 0, "Invalid slot");
-        address oldDepositor = slot.depositor;
-        slot.depositor = newDepositor;
-        for (uint256 i = 0; i < userIndex[oldDepositor].length; i++) {
-            if (userIndex[oldDepositor][i] == slotIndex) {
-                userIndex[oldDepositor][i] = userIndex[oldDepositor][userIndex[oldDepositor].length - 1];
-                userIndex[oldDepositor].pop();
-                break;
-            }
-        }
-        userIndex[newDepositor].push(slotIndex);
-        emit SlotDepositorChanged(isX, slotIndex, oldDepositor, newDepositor);
-    }
-
-    function addFees(address depositor, bool isX, uint256 fee) external {
-        require(routers[msg.sender], "Router only");
-        if (fee == 0) revert("Zero fee amount");
-        LiquidityDetails storage details = liquidityDetail;
-        UpdateType[] memory feeUpdates = new UpdateType[](1);
-        feeUpdates[0] = UpdateType(1, isX ? 0 : 1, fee, address(0), address(0));
-        if (isX) {
-            details.xFeesAcc += fee;
-        } else {
-            details.yFeesAcc += fee;
-        }
-        try this.update(depositor, feeUpdates) {
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Fee update failed: ", reason)));
-        }
-        emit FeesUpdated(listingId, details.xFees, details.yFees);
-    }
-
-    function transactToken(address depositor, address token, uint256 amount, address recipient) external {
-        require(routers[msg.sender], "Router only");
-        require(token == tokenA || token == tokenB, "Invalid token");
-        require(token != address(0), "Use transactNative for ETH");
-        require(amount > 0, "Zero amount");
-        require(recipient != address(0), "Invalid recipient");
-        LiquidityDetails storage details = liquidityDetail;
-        uint8 decimals = IERC20(token).decimals();
-        if (decimals == 0) revert("Invalid token decimals");
-        uint256 normalizedAmount = normalize(amount, decimals);
-        if (token == tokenA) {
-            if (details.xLiquid < normalizedAmount) revert("Insufficient xLiquid balance");
-            details.xLiquid -= normalizedAmount;
-        } else {
-            if (details.yLiquid < normalizedAmount) revert("Insufficient yLiquid balance");
-            details.yLiquid -= normalizedAmount;
-        }
-        try IERC20(token).transfer(recipient, amount) returns (bool) {
-        } catch (bytes memory reason) {
-            emit TransactFailed(depositor, token, amount, "Token transfer failed");
-            revert("Token transfer failed");
-        }
         if (agent != address(0)) {
-            try ICCAgent(agent).globalizeLiquidity{gas: 1_000_000}(
-                listingId,
-                tokenA,
-                tokenB,
-                depositor,
-                normalizedAmount,
-                false
-            ) {
-            } catch (bytes memory reason) {
-                emit GlobalizeUpdateFailed(depositor, listingId, token == tokenA, amount, reason);
-                revert(string(abi.encodePacked("Globalize update failed: ", reason)));
+            address[] memory users = new address[](1);
+            users[0] = depositor;
+            try ITokenRegistry(ICCAgent(agent).registryAddress()).initializeBalances(tokenA, users) {} catch (bytes memory reason) {
+                emit UpdateRegistryFailed(depositor, true, reason);
+            }
+            try ITokenRegistry(ICCAgent(agent).registryAddress()).initializeBalances(tokenB, users) {} catch (bytes memory reason) {
+                emit UpdateRegistryFailed(depositor, false, reason);
             }
         }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
-    function transactNative(address depositor, uint256 amount, address recipient) external {
-        require(routers[msg.sender], "Router only");
-        require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
-        require(amount > 0, "Zero amount");
-        require(recipient != address(0), "Invalid recipient");
-        LiquidityDetails storage details = liquidityDetail;
-        uint256 normalizedAmount = normalize(amount, 18);
-        if (tokenA == address(0)) {
-            if (details.xLiquid < normalizedAmount) revert("Insufficient xLiquid balance");
-            details.xLiquid -= normalizedAmount;
-        } else {
-            if (details.yLiquid < normalizedAmount) revert("Insufficient yLiquid balance");
-            details.yLiquid -= normalizedAmount;
-        }
-        (bool success, bytes memory reason) = recipient.call{value: amount}("");
-        if (!success) {
-            emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
-            revert("ETH transfer failed");
-        }
-        if (agent != address(0)) {
-            try ICCAgent(agent).globalizeLiquidity{gas: 1_000_000}(
-                listingId,
-                tokenA,
-                tokenB,
-                depositor,
-                normalizedAmount,
-                false
-            ) {
-            } catch (bytes memory reason) {
-                emit GlobalizeUpdateFailed(depositor, listingId, tokenA == address(0), amount, reason);
-                revert(string(abi.encodePacked("Globalize update failed: ", reason)));
-            }
-        }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-    }
-
+    // Updates liquidity balance
     function updateLiquidity(address depositor, bool isX, uint256 amount) external {
         require(routers[msg.sender], "Router only");
         LiquidityDetails storage details = liquidityDetail;
         if (isX) {
-            if (details.xLiquid < amount) revert("Insufficient xLiquid balance");
-            details.xLiquid -= amount;
+            details.xLiquid += amount;
         } else {
-            if (details.yLiquid < amount) revert("Insufficient yLiquid balance");
-            details.yLiquid -= amount;
+            details.yLiquid += amount;
         }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
+    // Transfers slot ownership
+    function changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor) external {
+        require(routers[msg.sender], "Router only");
+        require(depositor != address(0) && newDepositor != address(0), "Invalid depositor");
+        Slot storage slot = isX ? xLiquiditySlots[slotIndex] : yLiquiditySlots[slotIndex];
+        require(slot.depositor == depositor, "Depositor not slot owner");
+        address globalizer = ICCListing(listingAddress).globalizerAddressView();
+        require(globalizer != address(0), "Globalizer not set");
+        slot.depositor = newDepositor;
+        for (uint256 i = 0; i < userIndex[depositor].length; i++) {
+            if (userIndex[depositor][i] == slotIndex) {
+                userIndex[depositor][i] = userIndex[depositor][userIndex[depositor].length - 1];
+                userIndex[depositor].pop();
+                break;
+            }
+        }
+        userIndex[newDepositor].push(slotIndex);
+        emit SlotDepositorChanged(isX, slotIndex, depositor, newDepositor);
+        try ICCGlobalizer(globalizer).globalizeLiquidity(depositor, isX ? tokenA : tokenB) {} catch (bytes memory reason) {
+            emit GlobalizeUpdateFailed(depositor, listingId, isX, slot.allocation, reason);
+        }
+        try ICCGlobalizer(globalizer).globalizeLiquidity(newDepositor, isX ? tokenA : tokenB) {} catch (bytes memory reason) {
+            emit GlobalizeUpdateFailed(newDepositor, listingId, isX, slot.allocation, reason);
+        }
+    }
+
+    // Adds fees to xFees or yFees
+    function addFees(address depositor, bool isX, uint256 fee) external {
+        require(routers[msg.sender], "Router only");
+        require(fee > 0, "Non-zero fee required");
+        UpdateType[] memory updates = new UpdateType[](1);
+        updates[0] = UpdateType({
+            updateType: 1,
+            index: isX ? 0 : 1,
+            value: fee,
+            addr: depositor,
+            recipient: address(0)
+        });
+        try this.update(depositor, updates) {
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Fee update failed: ", reason)));
+        }
+    }
+
+    // Prepares withdrawal for tokenA
     function xPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory) {
         require(routers[msg.sender], "Router only");
         require(depositor != address(0), "Invalid depositor");
@@ -369,6 +309,7 @@ contract CCLiquidityTemplate {
         return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
+    // Executes withdrawal for tokenA
     function xExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external {
         require(routers[msg.sender], "Router only");
         require(depositor != address(0), "Invalid depositor");
@@ -412,6 +353,7 @@ contract CCLiquidityTemplate {
         }
     }
 
+    // Prepares withdrawal for tokenB
     function yPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory) {
         require(routers[msg.sender], "Router only");
         require(depositor != address(0), "Invalid depositor");
@@ -436,6 +378,7 @@ contract CCLiquidityTemplate {
         return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
     }
 
+    // Executes withdrawal for tokenB
     function yExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external {
         require(routers[msg.sender], "Router only");
         require(depositor != address(0), "Invalid depositor");
@@ -479,41 +422,96 @@ contract CCLiquidityTemplate {
         }
     }
 
-    function getListingAddress(uint256) external view returns (address) {
-        return listingAddress;
+    // Transfers ERC20 tokens
+    function transactToken(address depositor, address token, uint256 amount, address recipient) external {
+        require(routers[msg.sender], "Router only");
+        require(token != address(0), "Invalid token");
+        try IERC20(token).transfer(recipient, amount) {
+        } catch (bytes memory reason) {
+            emit TransactFailed(depositor, token, amount, string(abi.encodePacked("Token transfer failed: ", reason)));
+        }
     }
 
+    // Transfers native ETH
+    function transactNative(address depositor, uint256 amount, address recipient) external {
+        require(routers[msg.sender], "Router only");
+        (bool success, bytes memory reason) = recipient.call{value: amount}("");
+        if (!success) {
+            emit TransactFailed(depositor, address(0), amount, string(abi.encodePacked("Native transfer failed: ", reason)));
+        }
+    }
+
+    // Returns total liquidity amounts
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount) {
         LiquidityDetails memory details = liquidityDetail;
         return (details.xLiquid, details.yLiquid);
     }
 
+    // Returns liquidity details
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) {
         LiquidityDetails memory details = liquidityDetail;
         return (details.xLiquid, details.yLiquid, details.xFees, details.yFees, details.xFeesAcc, details.yFeesAcc);
     }
 
-    function activeXLiquiditySlotsView() external view returns (uint256[] memory) {
-        return activeXLiquiditySlots;
+    // Returns active x liquidity slots with pagination
+    function getActiveXLiquiditySlots(uint256 maxIterations) external view returns (uint256[] memory slots) {
+        uint256 length = activeXLiquiditySlots.length;
+        uint256 iterations = maxIterations < length ? maxIterations : length;
+        slots = new uint256[](iterations);
+        for (uint256 i = 0; i < iterations; i++) {
+            slots[i] = activeXLiquiditySlots[i];
+        }
+        return slots;
     }
 
-    function activeYLiquiditySlotsView() external view returns (uint256[] memory) {
-        return activeYLiquiditySlots;
+    // Returns active y liquidity slots with pagination
+    function getActiveYLiquiditySlots(uint256 maxIterations) external view returns (uint256[] memory slots) {
+        uint256 length = activeYLiquiditySlots.length;
+        uint256 iterations = maxIterations < length ? maxIterations : length;
+        slots = new uint256[](iterations);
+        for (uint256 i = 0; i < iterations; i++) {
+            slots[i] = activeYLiquiditySlots[i];
+        }
+        return slots;
     }
 
-    function userIndexView(address user) external view returns (uint256[] memory) {
-        return userIndex[user];
+    // Returns user x slot indices
+    function userXIndexView(address user) external view returns (uint256[] memory indices) {
+        uint256[] memory userIndices = userIndex[user];
+        uint256 count = 0;
+        for (uint256 i = 0; i < userIndices.length; i++) {
+            if (xLiquiditySlots[userIndices[i]].depositor == user) {
+                count++;
+            }
+        }
+        indices = new uint256[](count);
+        uint256 j = 0;
+        for (uint256 i = 0; i < userIndices.length; i++) {
+            if (xLiquiditySlots[userIndices[i]].depositor == user) {
+                indices[j] = userIndices[i];
+                j++;
+            }
+        }
+        return indices;
     }
 
-    function getXSlotView(uint256 index) external view returns (Slot memory) {
-        return xLiquiditySlots[index];
-    }
-
-    function getYSlotView(uint256 index) external view returns (Slot memory) {
-        return yLiquiditySlots[index];
-    }
-
-    function routerAddressesView() external view returns (address[] memory) {
-        return routerAddresses;
+    // Returns user y slot indices
+    function userYIndexView(address user) external view returns (uint256[] memory indices) {
+        uint256[] memory userIndices = userIndex[user];
+        uint256 count = 0;
+        for (uint256 i = 0; i < userIndices.length; i++) {
+            if (yLiquiditySlots[userIndices[i]].depositor == user) {
+                count++;
+            }
+        }
+        indices = new uint256[](count);
+        uint256 j = 0;
+        for (uint256 i = 0; i < userIndices.length; i++) {
+            if (yLiquiditySlots[userIndices[i]].depositor == user) {
+                indices[j] = userIndices[i];
+                j++;
+            }
+        }
+        return indices;
     }
 }
