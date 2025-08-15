@@ -1,316 +1,122 @@
 # CCGlobalizer Documentation
 
 ## Overview
-The `CCGlobalizer`, implemented in Solidity (^0.8.2), tracks user liquidity and maker orders across tokens and liquidity pools. It integrates with `CCLiquidityTemplate`, `ICCListingTemplate`, and `ICCAgent` for verification, slot, and order data. It uses `Ownable` for agent setting, employs explicit casting, and ensures gas safety for array operations. Amounts are normalized to 1e18. View functions for makers and tokens return data directly for stack efficiency, while liquidity functions use `maxIterations` and `step` for gas control. Depopulation ensures zeroed-out liquidity entries are removed from mappings and arrays, maintaining efficiency by clearing outdated user-token and user-pool associations.
+The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orders and depositor liquidity across tokens, listings, and liquidity templates. It integrates with `ICCLiquidityTemplate`, `ICCListingTemplate`, and `ICCAgent` for validation and data retrieval. It uses `Ownable` for agent setting, employs explicit casting, and ensures non-reverting behavior for `globalizeOrders` and `globalizeLiquidity` to prevent stalling. View functions use `step` and `maxIterations` for gas-efficient pagination. Amounts are normalized to 1e18 via external contracts.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.6 (Updated 2025-08-04)
+**Version**: 0.2.0 (Updated 2025-08-15)
 
 **Compatibility**:
 - CCLiquidityTemplate.sol (v0.1.0)
 - CCListingTemplate.sol (v0.1.0)
-- ICCAgent.sol
+- ICCAgent.sol (v0.1.2)
 
 ## Interfaces
 - **IERC20**: Provides `decimals()` for token normalization.
-- **ICCLiquidityTemplate**: Provides `userXIndexView`, `userYIndexView` (returns `uint256[] memory indices`), `getXSlotView`, `getYSlotView` (returns `Slot`), `listingAddress` (returns `address`).
-- **ICCListingTemplate**: Provides `liquidityAddressView`, `tokenA`, `tokenB`, `globalizerAddressView` (returns `address`), `makerPendingBuyOrdersView`, `makerPendingSellOrdersView` (returns `uint256[] memory orderIds`), `getFullBuyOrderDetails`, `getFullSellOrderDetails` (returns order structs).
+- **ICCLiquidityTemplate**: Provides `listingAddress` (returns `address`).
+- **ICCListingTemplate**: Provides `makerPendingBuyOrdersView`, `makerPendingSellOrdersView`, `pendingBuyOrdersView`, `pendingSellOrdersView` (returns `uint256[] memory orderIds`), `tokenA`, `tokenB` (returns `address`).
 - **ICCAgent**: Provides `isValidListing(address)` (returns `bool isValid`, `ListingDetails`).
 
 ## State Variables
-- **`agent`**: `address public` - Agent contract address, set via `setAgent`.
+- **`agent`**: `address public` - Agent contract address for listing validation, set via `setAgent`.
 
 ## Mappings
-- **`userLiquidityByToken`**: `mapping(address => mapping(address => uint256)) public`  
-  - **Parameters**: `token` (address), `user` (address)  
-  - **Returns**: `uint256` (liquidity amount for user’s token)  
-  - **Usage**: Tracks liquidity per user for a token across pools, depopulated when liquidity is zero.
-- **`userLiquidityByPool`**: `mapping(address => mapping(address => uint256)) public`  
-  - **Parameters**: `user` (address), `liquidityTemplate` (address)  
-  - **Returns**: `uint256` (total liquidity in pool for user)  
-  - **Usage**: Tracks user’s total liquidity (tokenA + tokenB) in a pool, depopulated when zero.
-- **`userTokens`**: `mapping(address => address[]) public`  
-  - **Parameters**: `user` (address)  
-  - **Returns**: `address[]` (tokens user provides liquidity for)  
-  - **Usage**: Lists all tokens for a user, depopulated via `removeUserToken` when liquidity is zero.
-- **`userPools`**: `mapping(address => address[]) public`  
-  - **Parameters**: `user` (address)  
-  - **Returns**: `address[]` (liquidity templates for user)  
-  - **Usage**: Lists all pools for a user, depopulated via `removeUserPool` when liquidity is zero.
-- **`usersToToken`**: `mapping(address => address[]) public`  
-  - **Parameters**: `token` (address)  
-  - **Returns**: `address[]` (users providing liquidity for token)  
-  - **Usage**: Lists users for a token, depopulated via `removeUserFromToken` when liquidity is zero.
-- **`poolsToToken`**: `mapping(address => address[]) public`  
-  - **Parameters**: `token` (address)  
-  - **Returns**: `address[]` (liquidity templates for token)  
-  - **Usage**: Lists pools for a token.
-- **`makerBuyOrdersByToken`**: `mapping(address => mapping(address => mapping(address => uint256[]))) public`  
-  - **Parameters**: `token` (address), `listing` (address), `maker` (address)  
-  - **Returns**: `uint256[]` (buy order IDs)  
-  - **Usage**: Tracks buy orders by token, listing, and maker.
-- **`makerSellOrdersByToken`**: `mapping(address => mapping(address => mapping(address => uint256[]))) public`  
-  - **Parameters**: `token` (address), `listing` (address), `maker` (address)  
-  - **Returns**: `uint256[]` (sell order IDs)  
-  - **Usage**: Tracks sell orders by token, listing, and maker.
-- **`makerActiveBuyOrdersByToken`**: `mapping(address => mapping(address => mapping(address => uint256[]))) public`  
-  - **Parameters**: `token` (address), `listing` (address), `maker` (address)  
-  - **Returns**: `uint256[]` (active buy order IDs)  
-  - **Usage**: Tracks active buy orders by token, listing, and maker.
-- **`makerActiveSellOrdersByToken`**: `mapping(address => mapping(address => mapping(address => uint256[]))) public`  
-  - **Parameters**: `token` (address), `listing` (address), `maker` (address)  
-  - **Returns**: `uint256[]` (active sell order IDs)  
-  - **Usage**: Tracks active sell orders by token, listing, and maker.
-- **`makerBuyOrdersByListing`**: `mapping(address => mapping(address => uint256[])) public`  
+- **`makerTokensByListing`**: `mapping(address => mapping(address => address[])) public`  
   - **Parameters**: `maker` (address), `listing` (address)  
-  - **Returns**: `uint256[]` (buy order IDs)  
-  - **Usage**: Tracks buy orders by maker and listing.
-- **`makerSellOrdersByListing`**: `mapping(address => mapping(address => uint256[])) public`  
-  - **Parameters**: `maker` (address), `listing` (address)  
-  - **Returns**: `uint256[]` (sell order IDs)  
-  - **Usage**: Tracks sell orders by maker and listing.
-- **`makerTokens`**: `mapping(address => address[]) public`  
-  - **Parameters**: `maker` (address)  
-  - **Returns**: `address[]` (tokens with orders for maker)  
-  - **Usage**: Lists tokens with orders for a maker.
-- **`makerActiveTokens`**: `mapping(address => address[]) public`  
-  - **Parameters**: `maker` (address)  
-  - **Returns**: `address[]` (tokens with active orders for maker)  
-  - **Usage**: Lists tokens with active orders for a maker.
+  - **Returns**: `address[]` (tokens with orders for maker in listing)  
+  - **Usage**: Tracks tokens associated with maker orders per listing, updated in `globalizeOrders`.
+- **`depositorTokensByLiquidity`**: `mapping(address => mapping(address => address[])) public`  
+  - **Parameters**: `depositor` (address), `liquidityTemplate` (address)  
+  - **Returns**: `address[]` (tokens provided by depositor in liquidity template)  
+  - **Usage**: Tracks tokens for depositor liquidity per template, updated in `globalizeLiquidity`.
 - **`makerListings`**: `mapping(address => address[]) public`  
   - **Parameters**: `maker` (address)  
   - **Returns**: `address[]` (listings with orders for maker)  
-  - **Usage**: Lists listings with orders for a maker.
-- **`makerActiveListings`**: `mapping(address => address[]) public`  
-  - **Parameters**: `maker` (address)  
-  - **Returns**: `address[]` (listings with active orders for maker)  
-  - **Usage**: Lists listings with active orders for a maker.
-- **`makersToTokens`**: `address[] public`  
-  - **Returns**: `address[]` (makers with orders)  
-  - **Usage**: Lists all makers with orders.
-- **`activeMakersToTokens`**: `address[] public`  
-  - **Returns**: `address[]` (makers with active orders)  
-  - **Usage**: Lists all makers with active orders.
-- **`privateMakerOrders`**: `mapping(address => mapping(address => OrderData[])) private`  
-  - **Parameters**: `maker` (address), `listing` (address)  
-  - **Returns**: `OrderData[]` (order details)  
-  - **Usage**: Stores order data for makers and listings.
-- **`privateTokenOrders`**: `mapping(address => OrderData[]) private`  
+  - **Usage**: Lists all listings a maker has orders in, updated in `globalizeOrders`.
+- **`depositorLiquidityTemplates`**: `mapping(address => address[]) public`  
+  - **Parameters**: `depositor` (address)  
+  - **Returns**: `address[]` (liquidity templates for depositor)  
+  - **Usage**: Lists all liquidity templates a depositor provides liquidity for, updated in `globalizeLiquidity`.
+- **`tokenListings`**: `mapping(address => address[]) public`  
   - **Parameters**: `token` (address)  
-  - **Returns**: `OrderData[]` (order details)  
-  - **Usage**: Stores order data for tokens.
-
-## Structs
-- **ICCAgent.ListingDetails**:
-  - `listingAddress`: Listing contract address.
-  - `liquidityAddress`: Associated liquidity contract address.
-  - `tokenA`: First token in pair.
-  - `tokenB`: Second token in pair.
-  - `listingId`: Unique listing identifier.
-- **OrderData**:
-  - `maker`: Maker address.
-  - `listing`: Listing address.
-  - `token`: Token address.
-  - `orderId`: Order identifier.
-  - `amount`: Pending order amount.
-  - `isBuy`: True for buy orders, false for sell orders.
-- **TempMakerOrderData**:
-  - `tokens`: Array of token addresses.
-  - `listings`: Array of listing addresses.
-  - `orderIds`: Array of order IDs.
-  - `isBuy`: Array of order types (true for buy).
-  - `index`: Current index for data collection.
-- **TempOrderData**:
-  - `makers`: Array of maker addresses.
-  - `listings`: Array of listing addresses.
-  - `orderIds`: Array of order IDs.
-  - `amounts`: Array of order amounts.
-  - `isBuy`: Array of order types (true for buy).
-  - `index`: Current index for data collection.
+  - **Returns**: `address[]` (listings associated with token)  
+  - **Usage**: Tracks listings for a token, updated in `globalizeOrders`.
+- **`tokenLiquidityTemplates`**: `mapping(address => address[]) public`  
+  - **Parameters**: `token` (address)  
+  - **Returns**: `address[]` (liquidity templates for token)  
+  - **Usage**: Tracks liquidity templates for a token, updated in `globalizeLiquidity`.
 
 ## External Functions
 ### setAgent(address _agent)
-- **Behavior**: Sets `agent` address, callable once by owner, emits `AgentSet`.
-- **Parameters**: `_agent` (address) - Agent contract address.
-- **Restrictions**: Reverts if `agent` already set or `_agent` is zero address.
+- **Behavior**: Sets `agent` address, callable once by owner, emits `AgentSet`. Exits silently if already set or `_agent` is zero.
+- **Parameters**: `_agent` (address) - Agent contract address for validation.
+- **Restrictions**: Only owner, single-time set.
 - **Gas**: Single state write.
+- **Interactions**: Emits `AgentSet(address)`.
 
-### globalizeLiquidity(address user, address liquidityTemplate)
-- **Behavior**: Verifies `liquidityTemplate` via `ICCLiquidityTemplate.listingAddress`, `ICCListingTemplate.liquidityAddressView`, and `ICCAgent.isValidListing`. Fetches x/y slot indices, aggregates allocations, updates mappings/arrays, depopulates zeroed-out entries, emits `LiquidityGlobalized`.
-- **Parameters**: `user` (address), `liquidityTemplate` (address).
-- **Restrictions**: Reverts if `agent` unset, invalid template, or external calls fail (returns decoded error string).
-- **Gas**: Multiple external calls, array resizing, gas check (<10% initial gas).
+### globalizeOrders(address maker, address token)
+- **Behavior**: Called by valid listings (verified via `ICCAgent.isValidListing`). Updates `makerTokensByListing`, `makerListings`, and `tokenListings` if token matches listing’s `tokenA` or `tokenB`. Exits silently on invalid inputs or failed validation. Emits `OrdersGlobalized`.
+- **Parameters**: `maker` (address), `token` (address).
+- **Restrictions**: Caller must be a valid listing (via `ICCAgent.isValidListing`), `agent` must be set.
+- **Gas**: External call to `ICCAgent`, array pushes.
+- **Interactions**: Calls `ICCAgent.isValidListing`, updates mappings/arrays, emits `OrdersGlobalized(address maker, address listing, address token)`.
 
-### globalizeOrders(address maker, address listing)
-- **Behavior**: Verifies listing via `ICCAgent.isValidListing` and `ICCListingTemplate.globalizerAddressView`. Fetches pending buy/sell orders, updates order mappings/arrays, clears outdated data using `clearOrderData`, emits `OrdersGlobalized`.
-- **Parameters**: `maker` (address), `listing` (address).
-- **Restrictions**: Reverts if `agent` unset, invalid listing, unauthorized globalizer, or external calls fail (decoded error string).
-- **Gas**: External calls, array resizing, gas check (<10% initial gas).
+### globalizeLiquidity(address depositor, address token)
+- **Behavior**: Called by valid liquidity templates (verified via `ICCLiquidityTemplate.listingAddress` and `ICCAgent.isValidListing`). Updates `depositorTokensByLiquidity`, `depositorLiquidityTemplates`, and `tokenLiquidityTemplates` if token matches listing’s `tokenA` or `tokenB`. Exits silently on invalid inputs or failed validation. Emits `LiquidityGlobalized`.
+- **Parameters**: `depositor` (address), `token` (address).
+- **Restrictions**: Caller must be a valid liquidity template, `agent` must be set.
+- **Gas**: External calls to `ICCLiquidityTemplate` and `ICCAgent`, array pushes.
+- **Interactions**: Calls `ICCLiquidityTemplate.listingAddress`, `ICCAgent.isValidListing`, updates mappings/arrays, emits `LiquidityGlobalized(address depositor, address liquidity, address token)`.
 
-### getAllMakerActiveOrders(address maker) view returns (address[] memory tokens, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Returns all active orders for a maker from `privateMakerOrders`.
-- **Parameters**: `maker` (address).
-- **Returns**: `tokens` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
+### getAllUserOrders(address user, uint256 step, uint256 maxIterations) view returns (address[] memory listings, uint256[] memory orderIds)
+- **Behavior**: Returns paginated order IDs for a user across listings from `makerListings`, fetching buy/sell orders via `ICCListingTemplate.makerPendingBuyOrdersView` and `makerPendingSellOrdersView`. Returns empty arrays if `step` exceeds listings length.
+- **Parameters**: `user` (address), `step` (uint256), `maxIterations` (uint256).
+- **Returns**: `listings` (address[]), `orderIds` (uint256[]).
+- **Gas**: External calls to `ICCListingTemplate`, array allocation.
+- **Interactions**: Queries `ICCListingTemplate` for pending orders.
 
-### getAllMakerOrders(address maker) view returns (address[] memory tokens, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Returns all orders (active/inactive) for a maker from `makerBuyOrdersByToken`, `makerSellOrdersByToken`.
-- **Parameters**: `maker` (address).
-- **Returns**: `tokens` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
+### getAllUserTokenOrders(address user, address token, uint256 step, uint256 maxIterations) view returns (address[] memory listings, uint256[] memory orderIds)
+- **Behavior**: Returns paginated order IDs for a user’s token across listings from `makerListings`, filtering by `makerTokensByListing`. Fetches buy/sell orders via `ICCListingTemplate`. Returns empty arrays if `step` exceeds listings length.
+- **Parameters**: `user` (address), `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Returns**: `listings` (address[]), `orderIds` (uint256[]).
+ASP: **Gas**: External calls to `ICCListingTemplate`, array allocation.
+- **Interactions**: Queries `ICCListingTemplate` for pending orders, checks `makerTokensByListing`.
 
-### getAllActiveTokenOrders(address token) view returns (address[] memory makers, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Returns all active orders for a token from `privateTokenOrders`.
-- **Parameters**: `token` (address).
-- **Returns**: `makers` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
-
-### getAllTokenOrders(address token) view returns (address[] memory makers, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Returns all orders (active/inactive) for a token from `makerBuyOrdersByToken`, `makerSellOrdersByToken`.
-- **Parameters**: `token` (address).
-- **Returns**: `makers` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
-
-### viewActiveMakersByToken(address token) view returns (address[] memory makers, address[] memory listings, uint256[] memory orderIds, uint256[] memory amounts, bool[] memory isBuy)
-- **Behavior**: Returns active makers, their orders, and amounts for a token from `privateTokenOrders`.
-- **Parameters**: `token` (address).
-- **Returns**: `makers` (address[]), `listings` (address[]), `orderIds` (uint256[]), `amounts` (uint256[]), `isBuy` (bool[]).
-
-### viewProvidersByToken(address token, uint256 maxIterations) view returns (address[] memory users, uint256[] memory amounts)
-- **Behavior**: Returns up to `maxIterations` users and their liquidity amounts for a token from `userLiquidityByToken`.
-- **Parameters**: `token` (address), `maxIterations` (uint256).
-- **Returns**: `users` (address[]), `amounts` (uint256[]).
-
-### getAllUserLiquidity(address user, uint256 maxIterations) view returns (address[] memory tokens, uint256[] memory amounts)
-- **Behavior**: Returns up to `maxIterations` tokens and liquidity amounts for a user from `userLiquidityByToken`.
-- **Parameters**: `user` (address), `maxIterations` (uint256).
-- **Returns**: `tokens` (address[]), `amounts` (uint256[]).
-
-### getTotalTokenLiquidity(address token) view returns (uint256 total)
-- **Behavior**: Sums liquidity for a token across all users in `userLiquidityByToken`.
-- **Parameters**: `token` (address).
-- **Returns**: `total` (uint256).
-
-### getTokenPools(address token, uint256 step, uint256 maxIterations) view returns (address[] memory pools)
-- **Behavior**: Returns up to `maxIterations` liquidity templates for a token from `poolsToToken`, starting at `step`.
+### getAllTokenOrders(address token, uint256 step, uint256 maxIterations) view returns (address[] memory listings, uint256[] memory orderIds)
+- **Behavior**: Returns paginated order IDs for a token across listings from `tokenListings`, fetching buy/sell orders via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`. Returns empty arrays if `step` exceeds listings length.
 - **Parameters**: `token` (address), `step` (uint256), `maxIterations` (uint256).
-- **Returns**: `pools` (address[]).
+- **Returns**: `listings` (address[]), `orderIds` (uint256[]).
+- **Gas**: External calls to `ICCListingTemplate`, array allocation.
+- **Interactions**: Queries `ICCListingTemplate` for pending orders.
+
+### getAllListingOrders(address listing, uint256 step, uint256 maxIterations) view returns (uint256[] memory orderIds)
+- **Behavior**: Returns paginated order IDs for a listing, fetching buy/sell orders via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`. Returns empty array if `step` exceeds total orders.
+- **Parameters**: `listing` (address), `step` (uint256), `maxIterations` (uint256).
+- **Returns**: `orderIds` (uint256[]).
+- **Gas**: External calls to `ICCListingTemplate`, array allocation.
+- **Interactions**: Queries `ICCListingTemplate` for pending orders.
 
 ## Internal Functions
-### updateLiquidityMappings(address user, address liquidityTemplate, address tokenA, address tokenB, uint256 totalX, uint256 totalY)
-- **Behavior**: Updates liquidity mappings/arrays, removes zeroed-out entries via `removeUserToken`, `removeUserFromToken`, `removeUserPool`, emits `LiquidityGlobalized`.
-- **Parameters**: `user`, `liquidityTemplate`, `tokenA`, `tokenB` (address), `totalX`, `totalY` (uint256).
-- **Gas**: Array resizing, gas check.
-
-### updateBuyOrderData(address maker, address listing, address token, uint256[] memory buyOrderIds) returns (OrderData[] memory orders)
-- **Behavior**: Fetches buy order details, stores active orders in `OrderData`, resizes array if needed.
-- **Parameters**: `maker`, `listing`, `token` (address), `buyOrderIds` (uint256[]).
-- **Returns**: `orders` (OrderData[]).
-
-### updateSellOrderData(address maker, address listing, address token, uint256[] memory sellOrderIds) returns (OrderData[] memory orders)
-- **Behavior**: Fetches sell order details, stores active orders in `OrderData`, resizes array if needed.
-- **Parameters**: `maker`, `listing`, `token` (address), `sellOrderIds` (uint256[]).
-- **Returns**: `orders` (OrderData[]).
-
-### clearOrderData(address maker, address listing, address tokenA, address tokenB)
-- **Behavior**: Clears `privateMakerOrders` and `privateTokenOrders` for a maker and listing.
-- **Parameters**: `maker`, `listing`, `tokenA`, `tokenB` (address).
-
-### updateTokenArrays(address maker, address listing, address token, bool isBuy)
-- **Behavior**: Updates `makerTokens`, `makerActiveTokens`, `makerListings`, `makerActiveListings`, `makersToTokens`, `activeMakersToTokens`.
-- **Parameters**: `maker`, `listing`, `token` (address), `isBuy` (bool).
-
-### countMakerActiveOrders(address maker) view returns (uint256 totalOrders)
-- **Behavior**: Counts active orders for a maker from `privateMakerOrders`.
-- **Parameters**: `maker` (address).
-- **Returns**: `totalOrders` (uint256).
-
-### initMakerOrderData(uint256 totalOrders) pure returns (TempMakerOrderData memory data)
-- **Behavior**: Initializes `TempMakerOrderData` for order collection.
-- **Parameters**: `totalOrders` (uint256).
-- **Returns**: `data` (TempMakerOrderData).
-
-### collectMakerActiveOrders(address maker, uint256 totalOrders) view returns (address[] memory tokens, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Collects active orders for a maker from `privateMakerOrders`.
-- **Parameters**: `maker` (address), `totalOrders` (uint256).
-- **Returns**: `tokens` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
-
-### countMakerAllOrders(address maker) view returns (uint256 totalOrders)
-- **Behavior**: Counts all orders for a maker from `makerBuyOrdersByToken`, `makerSellOrdersByToken`.
-- **Parameters**: `maker` (address).
-- **Returns**: `totalOrders` (uint256).
-
-### collectMakerAllOrders(address maker, uint256 totalOrders) view returns (address[] memory tokens, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Collects all orders for a maker from `makerBuyOrdersByToken`, `makerSellOrdersByToken`.
-- **Parameters**: `maker` (address), `totalOrders` (uint256).
-- **Returns**: `tokens` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
-
-### countActiveTokenOrders(address token) view returns (uint256 totalOrders)
-- **Behavior**: Counts active orders for a token from `privateTokenOrders`.
-- **Parameters**: `token` (address).
-- **Returns**: `totalOrders` (uint256).
-
-### collectActiveTokenOrders(address token, uint256 totalOrders) view returns (address[] memory makers, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Collects active orders for a token from `privateTokenOrders`.
-- **Parameters**: `token` (address), `totalOrders` (uint256).
-- **Returns**: `makers` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
-
-### countTokenOrders(address token) view returns (uint256 totalOrders)
-- **Behavior**: Counts all orders for a token from `makerBuyOrdersByToken`, `makerSellOrdersByToken`.
-- **Parameters**: `token` (address).
-- **Returns**: `totalOrders` (uint256).
-
-### collectTokenOrders(address token, uint256 totalOrders) view returns (address[] memory makers, address[] memory listings, uint256[] memory orderIds, bool[] memory isBuy)
-- **Behavior**: Collects all orders for a token from `makerBuyOrdersByToken`, `makerSellOrdersByToken`.
-- **Parameters**: `token` (address), `totalOrders` (uint256).
-- **Returns**: `makers` (address[]), `listings` (address[]), `orderIds` (uint256[]), `isBuy` (bool[]).
-
-### countActiveMakersOrders(address token) view returns (uint256 totalOrders)
-- **Behavior**: Counts active makers and orders for a token from `privateTokenOrders`.
-- **Parameters**: `token` (address).
-- **Returns**: `totalOrders` (uint256).
-
-### collectActiveMakersOrders(address token, uint256 totalOrders) view returns (address[] memory makers, address[] memory listings, uint256[] memory orderIds, uint256[] memory amounts, bool[] memory isBuy)
-- **Behavior**: Collects active makers, orders, and amounts for a token from `privateTokenOrders`.
-- **Parameters**: `token` (address), `totalOrders` (uint256).
-- **Returns**: `makers` (address[]), `listings` (address[]), `orderIds` (uint256[]), `amounts` (uint256[]), `isBuy` (bool[]).
-
 ### isInArray(address[] memory array, address element) pure returns (bool)
 - **Behavior**: Checks if an address exists in an array.
 - **Parameters**: `array` (address[]), `element` (address).
 - **Returns**: `bool`.
-
-### removeUserToken(address user, address token)
-- **Behavior**: Removes a token from `userTokens` for depopulation when liquidity is zero.
-- **Parameters**: `user`, `token` (address).
-
-### removeUserFromToken(address token, address user)
-- **Behavior**: Removes a user from `usersToToken` for depopulation when liquidity is zero.
-- **Parameters**: `token`, `user` (address).
-
-### removeUserPool(address user, address pool)
-- **Behavior**: Removes a pool from `userPools` for depopulation when liquidity is zero.
-- **Parameters**: `user`, `pool` (address).
-
-### removeMakerFromActiveTokens(address maker, address token)
-- **Behavior**: Removes a token from `makerActiveTokens`.
-- **Parameters**: `maker`, `token` (address).
-
-### removeMakerFromActiveListings(address maker, address listing)
-- **Behavior**: Removes a listing from `makerActiveListings`.
-- **Parameters**: `maker`, `listing` (address).
-
-### removeMakerFromActiveMakers(address maker)
-- **Behavior**: Removes a maker from `activeMakersToTokens`.
-- **Parameters**: `maker` (address).
+- **Gas**: Loop over array length.
 
 ## Additional Details
-- **Decimal Handling**: Relies on `CCLiquidityTemplate` for normalization to 1e18.
-- **Depopulation**: Ensures efficiency by removing zeroed-out liquidity entries from `userLiquidityByToken`, `userLiquidityByPool`, `userTokens`, `userPools`, and `usersToToken` via `removeUserToken`, `removeUserFromToken`, and `removeUserPool` in `updateLiquidityMappings`. This prevents stale data accumulation when users withdraw liquidity.
-- **Gas Optimization**: Uses `maxIterations` and `step` for liquidity functions; removed from maker/token view functions for stack efficiency.
-- **Events**: `LiquidityGlobalized(address user, address token, address pool, uint256 amount)`, `AgentSet(address agent)`, `OrdersGlobalized(address maker, address listing, address token, uint256[] orderIds, bool isBuy)`.
+- **Decimal Handling**: Relies on `ICCListingTemplate` and `ICCLiquidityTemplate` for normalization to 1e18.
+- **Gas Optimization**: Uses `step` and `maxIterations` for pagination in view functions to control gas usage. Avoids inline assembly and uses high-level Solidity for array operations.
+- **Events**: `AgentSet(address agent)`, `OrdersGlobalized(address maker, address listing, address token)`, `LiquidityGlobalized(address depositor, address liquidity, address token)`.
 - **Safety**:
   - Explicit casting for interface calls.
-  - No inline assembly, high-level Solidity.
-  - Try-catch for external calls with decoded revert strings.
-  - Public mappings accessed directly (e.g., `userLiquidityByToken[token][user]`).
+  - Try-catch for external calls in `globalizeLiquidity` with silent exits on failure.
+  - Public mappings accessed directly in view functions (e.g., `makerTokensByListing[maker][listing]`).
   - No reserved keywords, no `virtual`/`override`.
-- **Verification**: Validates listings via `ICCAgent.isValidListing`, globalizer via `ICCListingTemplate.globalizerAddressView`.
-- **Globalization**: Tracks liquidity and orders across tokens/pools, removes zeroed-out entries for efficiency.
+  - Non-reverting `globalizeOrders` and `globalizeLiquidity` to prevent stalling external contracts.
+- **Verification**: Validates listings via `ICCAgent.isValidListing`, liquidity templates via `ICCLiquidityTemplate.listingAddress` and `ICCAgent.isValidListing`.
+- **Interactions**:
+  - `setAgent`: Owner-only, sets `agent` for validation.
+  - `globalizeOrders`: Called by listings, verifies via `ICCAgent`, updates mappings, emits event.
+  - `globalizeLiquidity`: Called by liquidity templates, verifies via `ICCLiquidityTemplate` and `ICCAgent`, updates mappings, emits event.
+  - View functions: Query `ICCListingTemplate` for real-time order data, use mappings for efficient filtering.
