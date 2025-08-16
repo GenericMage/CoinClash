@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
+/* SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025 */
 pragma solidity ^0.8.2;
 
-// Version: 0.1.5
+// Version: 0.1.6
 // Changes:
+// - v0.1.6: Modified update function to call globalizeUpdate after order updates are processed, ensuring order data is updated before globalization. Added checks to ensure globalizeUpdate is called for valid makers.
 // - v0.1.5: Updated globalizeUpdate to call ICCGlobalizer.globalizeOrders with token (_tokenB for buy, _tokenA for sell) instead of listing address, aligning with new ICCGlobalizer interface (v0.2.1).
 // - v0.1.4: Updated _updateRegistry to use ITokenRegistry.initializeTokens, passing both _tokenA and _tokenB (if non-zero) for a single maker, replacing initializeBalances calls.
 // - v0.1.3: Updated _updateRegistry to initialize balances for both _tokenA and _tokenB (if non-zero), removing block.timestamp % 2 token selection.
@@ -254,17 +255,17 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
 
     // Calls globalizeOrders on the globalizer contract with appropriate token
     function globalizeUpdate(address maker) internal {
-        if (_globalizerAddress == address(0)) return;
+        if (_globalizerAddress == address(0) || maker == address(0)) return;
         address token = address(0);
         for (uint256 i = 0; i < _pendingBuyOrders.length; i++) {
-            if (_buyOrderCores[_pendingBuyOrders[i]].makerAddress == maker) {
+            if (_buyOrderCores[_pendingBuyOrders[i]].makerAddress == maker && _buyOrderCores[_pendingBuyOrders[i]].status == 1) {
                 token = _tokenB; // Buy orders involve tokenB
                 break;
             }
         }
         if (token == address(0)) {
             for (uint256 i = 0; i < _pendingSellOrders.length; i++) {
-                if (_sellOrderCores[_pendingSellOrders[i]].makerAddress == maker) {
+                if (_sellOrderCores[_pendingSellOrders[i]].makerAddress == maker && _sellOrderCores[_pendingSellOrders[i]].status == 1) {
                     token = _tokenA; // Sell orders involve tokenA
                     break;
                 }

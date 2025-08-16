@@ -4,13 +4,10 @@
 The `CCListingTemplate` contract, written in Solidity (^0.8.2), facilitates decentralized trading for a token pair, integrating with Uniswap V2 for price discovery and liquidity management. It handles buy and sell orders, long and short payouts, and tracks volume and balances with normalized values (1e18 precision) for consistent calculations across tokens with varying decimals. The contract adheres to the Business Source License (BSL) 1.1 - Peng Protocol 2025, emphasizing secure, modular design for token pair listings, with explicit casting, no inline assembly, and graceful degradation for external calls.
 
 ## Version
-- **0.1.5**
+- **0.1.6**
 - **Changes**:
-  - v0.1.5: Updated `globalizeUpdate` to call `ICCGlobalizer.globalizeOrders` with token (`_tokenB` for buy, `_tokenA` for sell) instead of listing address, aligning with new `ICCGlobalizer` interface (v0.2.1).
-  - v0.1.4: Updated `_updateRegistry` to use `ITokenRegistry.initializeTokens`, passing both `_tokenA` and `_tokenB` (if non-zero) for a single maker, replacing `initializeBalances` calls.
-  - v0.1.3: Updated `_updateRegistry` to initialize balances for both `_tokenA` and `_tokenB` (if non-zero), removing block.timestamp % 2 token selection.
-  - v0.1.2: Modified `LastDayFee` struct to use `lastDayXFeesAcc`, `lastDayYFeesAcc`. Updated `queryYield` to accept `depositAmount`, `isTokenA`, fetching `xFeesAcc`, `yFeesAcc` from `CCLiquidityTemplate.liquidityDetail`. Updated `update` function to set `lastDayXFeesAcc`, `lastDayYFeesAcc` on day change.
-  - v0.1.1: Removed `_updateRegistry` calls from `transactToken`, `transactNative`. Added `UpdateRegistryFailed` event.
+  - v0.1.6: Modified `update` function to call `globalizeUpdate` after order updates are processed, ensuring order data is updated before globalization. Added checks in `globalizeUpdate` to ensure valid maker orders (status=1) trigger `ICCGlobalizer.globalizeOrders`.
+
 
 ## Interfaces
 The contract interacts with external contracts via well-defined interfaces, ensuring modularity and compliance with the style guide:
@@ -79,7 +76,7 @@ State variables are private, accessed via dedicated view functions for encapsula
 - **setTokens(address tokenA_, address tokenB_)**: Sets `_tokenA`, `_tokenB`, requires unset, different tokens, and at least one non-zero. Sets `_decimalsA`, `_decimalsB` via `IERC20.decimals` or 18 for ETH. Gas: State writes, two external calls.
 - **setAgent(address agent_)**: Sets `_agent`, requires unset and non-zero address. Gas: Single write.
 - **setRegistry(address registryAddress_)**: Sets `_registryAddress`, requires unset and non-zero address. Gas: Single write.
-- **update(UpdateType[] memory updates)**: Router-only, updates `_volumeBalance`, buy/sell orders, or `_historicalData`. Updates `_lastDayFee` on volume changes, calls `_updateRegistry(maker)` for individual maker balance updates during order creation, cancellation, or settlement, emits `BalancesUpdated`. Calls `globalizeUpdate` with `_tokenB` for buy orders and `_tokenA` for sell orders. Gas: Loop over `updates`, array operations, external calls.
+- **update(UpdateType[] memory updates)**: Router-only, updates `_volumeBalance`, buy/sell orders, or `_historicalData`. Updates `_lastDayFee` on volume changes, processes order updates (creation, cancellation, or settlement), then calls `_updateRegistry(maker)` and `globalizeUpdate(maker)` for the maker if present, emits `BalancesUpdated`. Calls `globalizeUpdate` with `_tokenB` for buy orders and `_tokenA` for sell orders after order updates to ensure data consistency. Gas: Loop over `updates`, array operations, external calls.
 - **ssUpdate(PayoutUpdate[] memory payoutUpdates)**: Router-only, creates long/short payouts using `ICCListing.PayoutUpdate`, updates `_longPayouts`, `_shortPayouts`, `_longPayoutsByIndex`, `_userPayoutIDs`, emits `PayoutOrderCreated`. Gas: Loop over `payoutUpdates`, array pushes.
 - **transactToken(address token, uint256 amount, address recipient)**: Router-only, transfers ERC20 (`_tokenA` or `_tokenB`), updates `_volumeBalance`, `_currentPrice`, emits `BalancesUpdated`. Gas: External `IERC20.transfer`, array updates.
 - **transactNative(uint256 amount, address recipient)**: Router-only, transfers ETH if `_tokenA` or `_tokenB` is `address(0)`, updates `_volumeBalance`, `_currentPrice`, emits `BalancesUpdated`. Gas: Native call, array updates.
@@ -92,7 +89,7 @@ State variables are private, accessed via dedicated view functions for encapsula
 - **_findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256 volumeChange)**: Calculates volume change since `startTime`, using `maxIterations` to limit traversal. Gas: View, loop up to `maxIterations`.
 - **_updateRegistry(address maker)**: Updates `ITokenRegistry.initializeTokens` for a single maker with `_tokenA` and `_tokenB` (if non-zero), uses 500,000 gas cap, emits `UpdateRegistryFailed` with reason on failure, reverts with decoded string. Gas: External call, dynamic array creation.
 - **removePendingOrder(uint256[] storage orders, uint256 orderId)**: Removes order ID from array, swaps with last element and pops. Gas: Array operation.
-- **globalizeUpdate(address maker)**: Calls `ICCGlobalizer.globalizeOrders(maker, token)` with gas checks, reverts with decoded reason on failure. Gas: External call with try-catch.
+- **globalizeUpdate(address maker)**: Calls `ICCGlobalizer.globalizeOrders(maker, token)` with gas checks, reverts with decoded reason on failure. Uses `_tokenB` for buy orders and `_tokenA` for sell orders, only for pending orders (status=1). Gas: External call with try-catch.
 
 ### View Functions
 View functions are pure or view, avoiding state changes and naming conflicts, with explicit return naming:
@@ -151,13 +148,13 @@ View functions are pure or view, avoiding state changes and naming conflicts, wi
 - **Uniswap V2**: `prices`, `update`, `transactToken`, `transactNative` call `IUniswapV2Pair.getReserves` to compute `_currentPrice` (tokenA/tokenB, 1e18). Token order is resolved using `token0`, `token1`. Calls use try-catch for reliability.
 - **ITokenRegistry**: `_updateRegistry(address maker)` calls `initializeTokens` with a single maker and an array of `_tokenA` and `_tokenB` (if non-zero), capped at 500,000 gas. Emits `UpdateRegistryFailed` with reason and reverts on failure. Called in `update` for order creation, cancellation, or settlement.
 - **ICCLiquidityTemplate**: `queryYield` calls `liquidityDetail` to fetch `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`, with try-catch to return 0 on failure, ensuring robust yield calculation.
-- **ICCGlobalizer**: `globalizeUpdate(address maker)` calls `globalizeOrders` with maker and specific token (`_tokenB` for buy orders, `_tokenA` for sell orders), using try-catch to revert with decoded reason on failure, ensuring robust order globalization.
+- **ICCGlobalizer**: `globalizeUpdate(address maker)` calls `globalizeOrders` with maker and specific token (`_tokenB` for buy orders, `_tokenA` for sell orders) after order updates, using try-catch to revert with decoded reason on failure, ensuring robust order globalization.
 - **IERC20**: `transactToken` calls `transfer` for ERC20 tokens, `decimals` for normalization. `transactNative` uses low-level `call` for ETH transfers, reverting on failure.
 - **Order Management**: `update` processes `UpdateType` arrays to modify `_volumeBalance`, buy/sell orders, or `_historicalData`. Buy orders input `_tokenB`, output `_tokenA`; sell orders input `_tokenA`, output `_tokenB`. Status updates trigger `OrderUpdated` events. `_makerPendingOrders` tracks all orders, with `removePendingOrder` clearing cancelled or filled orders.
 - **Payouts**: `ssUpdate` creates long (`_tokenB`) or short (`_tokenA`) payouts, assigning `_nextOrderId`, updating `_longPayouts`, `_shortPayouts`, `_longPayoutsByIndex`, `_userPayoutIDs`, emitting `PayoutOrderCreated`.
 - **Fee Tracking**: `_lastDayFee` updates daily (86400 seconds) in `update` when volume changes. `queryYield` uses fee difference (`xFeesAcc - lastDayXFeesAcc` or `yFeesAcc - lastDayYFeesAcc`) for yield calculation based on deposit contribution.
 - **Historical Data**: `update` (type 3) pushes `HistoricalData` with `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, used in `queryYield` and view functions like `getHistoricalDataView`.
-- **Globalization**: `globalizeUpdate` calls `ICCGlobalizer.globalizeOrders` to propagate maker orders to the globalizer contract, ensuring cross-listing tracking with `_tokenB` for buy orders and `_tokenA` for sell orders.
+- **Globalization**: `globalizeUpdate` calls `ICCGlobalizer.globalizeOrders` after order updates to propagate maker orders to the globalizer contract, ensuring cross-listing tracking with `_tokenB` for buy orders and `_tokenA` for sell orders.
 
 ## Security and Optimization
 - **Security**:
