@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.6
+// Version: 0.1.7
 // Changes:
+// - v0.1.7: Refactored globalizeUpdate to occur at end of update, fetching latest order ID and details (maker, token) for ICCGlobalizer.globalizeOrders call.
 // - v0.1.6: Modified globalizeUpdate to always call ICCGlobalizer.globalizeOrders for the maker with appropriate token, removing all checks for order existence.
 // - v0.1.5: Updated globalizeUpdate to call ICCGlobalizer.globalizeOrders with token (_tokenB for buy, _tokenA for sell) instead of listing address, aligning with new ICCGlobalizer interface (v0.2.1).
 // - v0.1.4: Updated _updateRegistry to use ITokenRegistry.initializeTokens, passing both _tokenA and _tokenB (if non-zero) for a single maker, replacing initializeBalances calls.
@@ -253,52 +254,32 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         }
     }
 
-    // Calls globalizeOrders on the globalizer contract with appropriate token
-    function globalizeUpdate(address maker) internal {
-        if (_globalizerAddress == address(0)) return;
-        address token = _tokenB != address(0) ? _tokenB : _tokenA; // Prefer tokenB for buy, tokenA for sell
+    // Calls globalizeOrders with latest order details
+    function globalizeUpdate() internal {
+        if (_globalizerAddress == address(0) || _nextOrderId == 0) return;
+        uint256 orderId = _nextOrderId - 1; // Latest order ID
+        address maker;
+        address token;
+        // Check if it's a buy order
+        BuyOrderCore memory buyCore = _buyOrderCores[orderId];
+        if (buyCore.makerAddress != address(0)) {
+            maker = buyCore.makerAddress;
+            token = _tokenB != address(0) ? _tokenB : _tokenA; // Use tokenB for buy
+        } else {
+            // Check if it's a sell order
+            SellOrderCore memory sellCore = _sellOrderCores[orderId];
+            if (sellCore.makerAddress != address(0)) {
+                maker = sellCore.makerAddress;
+                token = _tokenA != address(0) ? _tokenA : _tokenB; // Use tokenA for sell
+            } else {
+                return; // No valid order found
+            }
+        }
         uint256 gasBefore = gasleft();
         try ICCGlobalizer(_globalizerAddress).globalizeOrders{gas: gasBefore / 10}(maker, token) {
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Globalizer call failed: ", reason)));
         }
-    }
-
-    // Calculates annualized yield for a hypothetical deposit
-    function queryYield(bool isA, uint256 maxIterations, uint256 depositAmount, bool isTokenA) external view returns (uint256 yieldAnnualized) {
-        require(maxIterations > 0, "Invalid maxIterations");
-        if (_liquidityAddress == address(0)) return 0;
-        uint256 xLiquid;
-        uint256 yLiquid;
-        uint256 xFeesAcc;
-        uint256 yFeesAcc;
-        try ICCLiquidityTemplate(_liquidityAddress).liquidityDetail() returns (
-            uint256 xLiq,
-            uint256 yLiq,
-            uint256,
-            uint256,
-            uint256 xFees,
-            uint256 yFees
-        ) {
-            xLiquid = xLiq;
-            yLiquid = yLiq;
-            xFeesAcc = xFees;
-            yFeesAcc = yFees;
-        } catch {
-            return 0;
-        }
-        LastDayFee memory lastDay = _lastDayFee;
-        if (lastDay.timestamp == 0 || !_isSameDay(lastDay.timestamp, block.timestamp)) return 0;
-        uint256 fees = isTokenA ? xFeesAcc : yFeesAcc;
-        uint256 dFeesAcc = isTokenA ? lastDay.lastDayXFeesAcc : lastDay.lastDayYFeesAcc;
-        uint256 liquid = isTokenA ? xLiquid : yLiquid;
-        uint256 contributedFees = fees > dFeesAcc ? fees - dFeesAcc : 0;
-        uint256 liquidityContribution = liquid > 0 ? (depositAmount * 1e18) / (liquid + depositAmount) : 0;
-        uint256 feeShare = (contributedFees * liquidityContribution) / 1e18;
-        feeShare = feeShare > contributedFees ? contributedFees : feeShare;
-        uint256 dailyFees = feeShare;
-        yieldAnnualized = (dailyFees * 365 * 10000) / (depositAmount > 0 ? depositAmount : 1);
-        return yieldAnnualized;
     }
 
     // Updates balances, orders, or historical data, restricted to routers
@@ -452,8 +433,8 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         }
         if (maker != address(0)) {
             _updateRegistry(maker);
-            globalizeUpdate(maker);
         }
+        globalizeUpdate(); // Moved to end, using latest order details
         emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
     }
 

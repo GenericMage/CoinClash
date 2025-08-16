@@ -4,9 +4,9 @@
 The `CCListingTemplate` contract, written in Solidity (^0.8.2), facilitates decentralized trading for a token pair, integrating with Uniswap V2 for price discovery and liquidity management. It handles buy and sell orders, long and short payouts, and tracks volume and balances with normalized values (1e18 precision) for consistent calculations across tokens with varying decimals. The contract adheres to the Business Source License (BSL) 1.1 - Peng Protocol 2025, emphasizing secure, modular design for token pair listings, with explicit casting, no inline assembly, and graceful degradation for external calls.
 
 ## Version
-- **0.1.6**
+- **0.1.7**
 - **Changes**:
-  - v0.1.6: Modified `globalizeUpdate` to always call `ICCGlobalizer.globalizeOrders` for the maker with `_tokenB` (if non-zero) or `_tokenA`, removing all checks for order existence to ensure globalization on every `update` call.
+  - v0.1.7: Refactored `globalizeUpdate` to occur at the end of `update`, fetching the latest order ID (`_nextOrderId - 1`), retrieving maker and token (`_tokenB` for buy, `_tokenA` for sell) from order details, and calling `ICCGlobalizer.globalizeOrders` with these, reducing reliance on `update`’s loop.
 
 ## Interfaces
 The contract interacts with external contracts via well-defined interfaces, ensuring modularity and compliance with the style guide:
@@ -16,7 +16,7 @@ The contract interacts with external contracts via well-defined interfaces, ensu
 - **ICCListingTemplate**: Declares `getTokens`, `globalizerAddressView`, `makerPendingBuyOrdersView`, `makerPendingSellOrdersView` for token pair and globalizer address access, and pending order queries.
 - **ICCLiquidityTemplate**: Provides `liquidityDetail` (returns `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`) for yield calculations.
 - **ITokenRegistry**: Defines `initializeTokens(address user, address[] memory tokens)` for updating token balances in the registry for a single user.
-- **ICCGlobalizer**: Defines `globalizeOrders(address maker, address token)` for order globalization, called in `globalizeUpdate` with `_tokenB` (if non-zero) or `_tokenA`.
+- **ICCGlobalizer**: Defines `globalizeOrders(address maker, address token)` for order globalization, called in `globalizeUpdate` with token based on latest order type (`_tokenB` for buy, `_tokenA` for sell).
 
 Interfaces use explicit function declarations, avoid naming conflicts with state variables, and support external calls with revert strings for graceful degradation.
 
@@ -73,7 +73,7 @@ State variables are private, accessed via dedicated view functions for encapsula
 - **setTokens(address tokenA_, address tokenB_)**: Sets `_tokenA`, `_tokenB`, requires unset, different tokens, and at least one non-zero. Sets `_decimalsA`, `_decimalsB` via `IERC20.decimals` or 18 for ETH. Gas: State writes, two external calls.
 - **setAgent(address agent_)**: Sets `_agent`, requires unset and non-zero address. Gas: Single write.
 - **setRegistry(address registryAddress_)**: Sets `_registryAddress`, requires unset and non-zero address. Gas: Single write.
-- **update(UpdateType[] memory updates)**: Router-only, updates `_volumeBalance`, buy/sell orders, or `_historicalData`. Updates `_lastDayFee` on volume changes, processes order updates (creation, cancellation, or settlement), calls `_updateRegistry(maker)` and `globalizeUpdate(maker)` if maker is present, emits `BalancesUpdated`. Gas: Loop over `updates`, array operations, external calls.
+- **update(UpdateType[] memory updates)**: Router-only, updates `_volumeBalance`, buy/sell orders, or `_historicalData`. Updates `_lastDayFee` on volume changes, processes order updates (creation, cancellation, or settlement), calls `_updateRegistry(maker)` if maker is present, calls `globalizeUpdate()` at the end, emits `BalancesUpdated`. Gas: Loop over `updates`, array operations, external calls.
 - **ssUpdate(PayoutUpdate[] memory payoutUpdates)**: Router-only, creates long/short payouts, updates `_longPayouts`, `_shortPayouts`, `_longPayoutsByIndex`, `_userPayoutIDs`, emits `PayoutOrderCreated`. Gas: Loop over `payoutUpdates`, array pushes.
 - **transactToken(address token, uint256 amount, address recipient)**: Router-only, transfers ERC20 (`_tokenA` or `_tokenB`), updates `_volumeBalance`, `_currentPrice`, emits `BalancesUpdated`. Gas: External `IERC20.transfer`, array updates.
 - **transactNative(uint256 amount, address recipient)**: Router-only, transfers ETH if `_tokenA` or `_tokenB` is `address(0)`, updates `_volumeBalance`, `_currentPrice`, emits `BalancesUpdated`. Gas: Native call, array updates.
@@ -87,7 +87,7 @@ State variables are private, accessed via dedicated view functions for encapsula
 - **_findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256 volumeChange)**: Calculates volume change since `startTime`, using `maxIterations` to limit traversal of `_historicalData`. Called by none but available for volume analysis. Gas: View, loop up to `maxIterations`.
 - **_updateRegistry(address maker)**: Updates `ITokenRegistry.initializeTokens` for a single maker with `_tokenA` and `_tokenB` (if non-zero), uses 500,000 gas cap, emits `UpdateRegistryFailed` with reason on failure, reverts with decoded string. Called by `update` after order updates. Gas: External call, dynamic array creation.
 - **removePendingOrder(uint256[] storage orders, uint256 orderId)**: Removes order ID from array, swaps with last element and pops. Called by `update` for cancelled or filled orders in `_pendingBuyOrders`, `_pendingSellOrders`, `_makerPendingOrders`. Gas: Array operation.
-- **globalizeUpdate(address maker)**: Calls `ICCGlobalizer.globalizeOrders(maker, token)` with `_tokenB` (if non-zero) or `_tokenA`, using try-catch with gas limit (gasleft/10), reverts with decoded reason on failure. Called by `update` after order updates if maker is non-zero. Gas: External call.
+- **globalizeUpdate()**: Calls `ICCGlobalizer.globalizeOrders` with maker and token from the latest order (`_nextOrderId - 1`), using `_tokenB` for buy orders or `_tokenA` for sell orders, with try-catch and gas limit (gasleft/10), reverts with decoded reason on failure. Called by `update` at the end. Gas: External call.
 
 ### View Functions
 View functions are pure or view, avoiding state changes, with explicit return naming:
@@ -136,7 +136,7 @@ View functions are pure or view, avoiding state changes, with explicit return na
 - **Uniswap V2 Pair** (`_uniswapV2Pair`): Provides reserves for price calculation (tokenA/tokenB, 1e18), set via `setUniswapV2Pair`. Token order is mapped using `token0`, `token1` to align `_tokenA`, `_tokenB`.
 - **Agent** (`_agent`): Agent address, set via `setAgent`, used to fetch registry or validate listings in related contracts.
 - **Registry** (`_registryAddress`): `ITokenRegistry` address, set via `setRegistry`, used in `_updateRegistry` to initialize a single maker’s balances for `_tokenA` and `_tokenB`.
-- **Globalizer** (`_globalizerAddress`): Globalizer contract address, set via `setGlobalizerAddress`. One-time set ensures immutability, accessible via `globalizerAddressView`. Used in `globalizeUpdate` to propagate orders with `_tokenB` (if non-zero) or `_tokenA`.
+- **Globalizer** (`_globalizerAddress`): Globalizer contract address, set via `setGlobalizerAddress`. One-time set ensures immutability, accessible via `globalizerAddressView`. Used in `globalizeUpdate` to propagate the latest order with `_tokenB` (buy) or `_tokenA` (sell).
 - **Liquidity** (`_liquidityAddress`): `ICCLiquidityTemplate` address, set via `setLiquidityAddress`, provides liquidity data for `queryYield` to calculate fees relative to pool size.
 - **Orders** (`UpdateType`): Defines updates for balances (`updateType=0`), buy orders (`1`), sell orders (`2`), or historical data (`3`). Fields include `structId` (0: Core, 1: Pricing, 2: Amounts), `index` (orderId or balance/volume slot), `value` (amount/price), `addr` (maker), `recipient`, `maxPrice`, `minPrice`, `amountSent` (opposite token sent).
 - **Payouts** (`PayoutUpdate`): Specifies `payoutType` (0: Long for tokenB, 1: Short for tokenA), `recipient`, `required` for `ssUpdate`, creating payout orders tracked in `_longPayouts` or `_shortPayouts`.
@@ -146,18 +146,18 @@ View functions are pure or view, avoiding state changes, with explicit return na
 - **Uniswap V2**: `prices`, `update`, `transactToken`, `transactNative` call `IUniswapV2Pair.getReserves` to compute `_currentPrice` (tokenA/tokenB, 1e18). Token order is resolved using `token0`, `token1`. Calls use try-catch for reliability.
 - **ITokenRegistry**: `_updateRegistry` calls `initializeTokens` with a single maker and an array of `_tokenA` and `_tokenB` (if non-zero), capped at 500,000 gas. Emits `UpdateRegistryFailed` with reason and reverts on failure. Called in `update` for order creation, cancellation, or settlement.
 - **ICCLiquidityTemplate**: `queryYield` calls `liquidityDetail` to fetch `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`, with try-catch to return 0 on failure, ensuring robust yield calculation.
-- **ICCGlobalizer**: `globalizeUpdate` calls `globalizeOrders` with maker and `_tokenB` (if non-zero) or `_tokenA` after order updates in `update`, using try-catch to revert with decoded reason on failure. Ensures global order tracking for all maker updates.
+- **ICCGlobalizer**: `globalizeUpdate` calls `globalizeOrders` with maker and token from the latest order (`_nextOrderId - 1`), using `_tokenB` for buy or `_tokenA` for sell, with try-catch and gas limit (gasleft/10), reverts with decoded reason on failure. Called at the end of `update`.
 - **IERC20**: `transactToken` calls `transfer` for ERC20 tokens, `setTokens` calls `decimals` for normalization. `transactNative` uses low-level `call` for ETH transfers, reverting on failure.
 - **Internal Call Trees**:
   - **update**:
     - Iterates `UpdateType` array to update `_volumeBalance` (`updateType=0`), buy orders (`1`), sell orders (`2`), or `_historicalData` (`3`).
     - Calls `_isSameDay` and `_floorToMidnight` to update `_lastDayFee` on volume changes.
     - Calls `removePendingOrder` for cancelled or filled orders in `_pendingBuyOrders`, `_pendingSellOrders`, `_makerPendingOrders`.
-    - Calls `_updateRegistry(maker)` and `globalizeUpdate(maker)` if maker is non-zero, ensuring registry and globalizer updates follow order processing.
+    - Calls `_updateRegistry(maker)` if maker is non-zero, followed by `globalizeUpdate()` to process the latest order.
   - **ssUpdate**: Iterates `PayoutUpdate` array, updates `_longPayouts` or `_shortPayouts`, pushes to `_longPayoutsByIndex`, `_userPayoutIDs`. No internal function calls.
   - **transactToken**, **transactNative**: Call `normalize` to update `_volumeBalance`, use `IUniswapV2Pair.getReserves` for `_currentPrice`. No other internal calls.
   - **queryYield**: Calls `_isSameDay` for `_lastDayFee` validation, uses `ICCLiquidityTemplate.liquidityDetail` for fee data. No other internal calls.
-  - **globalizeUpdate**: Calls `ICCGlobalizer.globalizeOrders` with gas limit, no other internal calls.
+  - **globalizeUpdate**: Calls `ICCGlobalizer.globalizeOrders` with latest order’s maker and token, no other internal calls.
   - **_updateRegistry**: Builds dynamic token array, calls `ITokenRegistry.initializeTokens`, no other internal calls.
   - **removePendingOrder**: Modifies storage arrays, no other internal calls.
   - **_findVolumeChange**: Iterates `_historicalData`, no other internal calls.
@@ -177,7 +177,7 @@ View functions are pure or view, avoiding state changes, with explicit return na
   - Normalized amounts (1e18) simplify calculations.
   - `maxIterations` and `step` limit gas in view functions.
   - Single-maker `_updateRegistry` reduces gas.
- Lobbying for a change in the code that would make it easier to read and understand, such as by adding more comments or restructuring the code slightly, could improve maintainability. For instance, adding inline comments in the `update` function to clarify the flow of balance, order, and historical updates could enhance readability. However, the current structure is functional and adheres to the style guide.
+  - `globalizeUpdate` focuses on latest order, minimizing redundant calls.
 
 ## Token Usage
 - **Buy Orders**: Input `_tokenB`, output `_tokenA`. `amountSent` tracks `_tokenA` sent. `yBalance` increases on creation, `xBalance` decreases on fill.
