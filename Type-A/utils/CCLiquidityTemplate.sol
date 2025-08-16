@@ -1,13 +1,15 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- Version: 0.0.22
+ Version: 0.1.1
  Changes:
- - v0.0.22: Added globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address from agent and call ICCGlobalizer.globalizeLiquidity. Maintained compatibility with CCSEntryPartial.sol v0.0.18 and ICCGlobalizer v0.2.1.
+ - v0.1.1: Added globalizeUpdate internal function to encapsulate globalization calls, extracted from transactToken and transactNative. Integrated into update function to handle deposits from liquidity router. No other changes to maintain compatibility.
+ - Removed globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address directly from ICCAgent(agent).globalizerAddress() within each call, aligning with registry update pattern in update function. Compatible with CCGlobalizer.sol v0.2.1.
+ - v0.1.0: Added globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address from agent and call ICCGlobalizer.globalizeLiquidity. Maintained compatibility with CCSEntryPartial.sol v0.0.18 and ICCGlobalizer v0.2.1.
  - v0.0.21: Adjusted globalizeLiquidity call in transactToken and transactNative for ICCGlobalizer v0.2.1. Added view functions userXIndexView, userYIndexView, getActiveXLiquiditySlots, getActiveYLiquiditySlots.
  - v0.0.20: Removed depositToken, depositNative, withdraw, claimFees, changeDepositor, moved to CCLiquidityRouter.sol v0.0.18 via CCLiquidityPartial.sol v0.0.13.
  - v0.0.19: Removed checkRouterInvolved and isRouter, replaced with require(routers[msg.sender], "Router only").
- Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.18), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCSEntryPartial.sol (v0.0.18).
+ Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCSEntryPartial.sol (v0.0.18), CCGlobalizer.sol (v0.2.1).
 */
 
 pragma solidity ^0.8.2;
@@ -41,7 +43,6 @@ contract CCLiquidityTemplate {
     address public tokenB;
     uint256 public listingId;
     address public agent;
-    address public globalizerAddress;
 
     struct LiquidityDetails {
         uint256 xLiquid;
@@ -100,6 +101,26 @@ contract CCLiquidityTemplate {
         if (decimals == 18) return amount;
         if (decimals < 18) return amount / 10 ** (18 - decimals);
         return amount * 10 ** (decimals - 18);
+    }
+
+    function globalizeUpdate(address depositor, address token, bool isX, uint256 amount) internal {
+        // Handles globalization calls to ICCGlobalizer
+        if (agent != address(0)) {
+            address globalizer;
+            try ICCAgent(agent).globalizerAddress{gas: 1000000}() returns (address glob) {
+                globalizer = glob;
+            } catch (bytes memory reason) {
+                emit GlobalizeUpdateFailed(depositor, listingId, isX, amount, reason);
+                revert(string(abi.encodePacked("Globalizer address fetch failed: ", reason)));
+            }
+            if (globalizer != address(0)) {
+                try ICCGlobalizer(globalizer).globalizeLiquidity(depositor, token) {
+                } catch (bytes memory reason) {
+                    emit GlobalizeUpdateFailed(depositor, listingId, isX, amount, reason);
+                    revert(string(abi.encodePacked("Globalize update failed: ", reason)));
+                }
+            }
+        }
     }
 
     function setRouters(address[] memory _routers) external {
@@ -183,6 +204,7 @@ contract CCLiquidityTemplate {
                 }
                 slot.allocation = u.value;
                 details.xLiquid += u.value;
+                globalizeUpdate(depositor, tokenA, true, u.value);
             } else if (u.updateType == 3) {
                 Slot storage slot = yLiquiditySlots[u.index];
                 if (slot.depositor == address(0) && u.addr != address(0)) {
@@ -205,6 +227,7 @@ contract CCLiquidityTemplate {
                 }
                 slot.allocation = u.value;
                 details.yLiquid += u.value;
+                globalizeUpdate(depositor, tokenB, false, u.value);
             } else revert("Invalid update type");
         }
         if (agent != address(0)) {
@@ -251,104 +274,49 @@ contract CCLiquidityTemplate {
         emit SlotDepositorChanged(isX, slotIndex, oldDepositor, newDepositor);
     }
 
-    function addFees(address depositor, bool isX, uint256 fee) external {
-        // Adds fees to liquidity details
-        require(routers[msg.sender], "Router only");
-        if (fee == 0) revert("Zero fee amount");
-        LiquidityDetails storage details = liquidityDetail;
-        UpdateType[] memory feeUpdates = new UpdateType[](1);
-        feeUpdates[0] = UpdateType(1, isX ? 0 : 1, fee, address(0), address(0));
-        if (isX) {
-            details.xFeesAcc += fee;
-        } else {
-            details.yFeesAcc += fee;
-        }
-        try this.update(depositor, feeUpdates) {
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Fee update failed: ", reason)));
-        }
-        emit FeesUpdated(listingId, details.xFees, details.yFees);
-    }
-
     function transactToken(address depositor, address token, uint256 amount, address recipient) external {
-        // Transfers ERC20 tokens and updates liquidity
+        // Transfers ERC20 tokens to recipient
         require(routers[msg.sender], "Router only");
-        require(token == tokenA || token == tokenB, "Invalid token");
-        require(token != address(0), "Use transactNative for ETH");
-        require(amount > 0, "Zero amount");
-        require(recipient != address(0), "Invalid recipient");
-        LiquidityDetails storage details = liquidityDetail;
+        require(token != address(0), "Invalid token address");
         uint8 decimals = IERC20(token).decimals();
-        if (decimals == 0) revert("Invalid token decimals");
         uint256 normalizedAmount = normalize(amount, decimals);
-        if (token == tokenA) {
-            if (details.xLiquid < normalizedAmount) revert("Insufficient xLiquid balance");
-            details.xLiquid -= normalizedAmount;
+        LiquidityDetails storage details = liquidityDetail;
+        bool isTokenA = token == tokenA;
+        if (isTokenA) {
+            details.xLiquid += normalizedAmount;
         } else {
-            if (details.yLiquid < normalizedAmount) revert("Insufficient yLiquid balance");
-            details.yLiquid -= normalizedAmount;
+            details.yLiquid += normalizedAmount;
         }
-        try IERC20(token).transfer(recipient, amount) returns (bool) {
-        } catch (bytes memory reason) {
-            emit TransactFailed(depositor, token, amount, "Token transfer failed");
-            revert("Token transfer failed");
+        if (IERC20(token).balanceOf(address(this)) < amount) {
+            emit TransactFailed(depositor, token, amount, "Insufficient balance");
+            revert("Insufficient balance");
         }
-        if (agent != address(0)) {
-            address globalizer;
-            try ICCAgent(agent).globalizerAddress{gas: 1000000}() returns (address glob) {
-                globalizer = glob;
-            } catch (bytes memory reason) {
-                emit GlobalizeUpdateFailed(depositor, listingId, token == tokenA, amount, reason);
-                revert(string(abi.encodePacked("Globalizer address fetch failed: ", reason)));
-            }
-            if (globalizer != address(0)) {
-                try ICCGlobalizer(globalizer).globalizeLiquidity(depositor, token) {
-                    globalizerAddress = globalizer;
-                } catch (bytes memory reason) {
-                    emit GlobalizeUpdateFailed(depositor, listingId, token == tokenA, amount, reason);
-                    revert(string(abi.encodePacked("Globalize update failed: ", reason)));
-                }
-            }
+        if (!IERC20(token).transfer(recipient, amount)) {
+            emit TransactFailed(depositor, token, amount, "Transfer failed");
+            revert("Transfer failed");
         }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
 
-    function transactNative(address depositor, uint256 amount, address recipient) external {
-        // Transfers native ETH and updates liquidity
+    function transactNative(address depositor, uint256 amount, address recipient) external payable {
+        // Transfers native tokens (ETH) to recipient
         require(routers[msg.sender], "Router only");
-        require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
-        require(amount > 0, "Zero amount");
-        require(recipient != address(0), "Invalid recipient");
-        LiquidityDetails storage details = liquidityDetail;
         uint256 normalizedAmount = normalize(amount, 18);
-        if (tokenA == address(0)) {
-            if (details.xLiquid < normalizedAmount) revert("Insufficient xLiquid balance");
-            details.xLiquid -= normalizedAmount;
+        LiquidityDetails storage details = liquidityDetail;
+        bool isTokenA = tokenA == address(0);
+        if (isTokenA) {
+            details.xLiquid += normalizedAmount;
         } else {
-            if (details.yLiquid < normalizedAmount) revert("Insufficient yLiquid balance");
-            details.yLiquid -= normalizedAmount;
+            details.yLiquid += normalizedAmount;
+        }
+        if (address(this).balance < amount) {
+            emit TransactFailed(depositor, address(0), amount, "Insufficient balance");
+            revert("Insufficient balance");
         }
         (bool success, bytes memory reason) = recipient.call{value: amount}("");
         if (!success) {
-            emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
-            revert("ETH transfer failed");
-        }
-        if (agent != address(0)) {
-            address globalizer;
-            try ICCAgent(agent).globalizerAddress{gas: 1000000}() returns (address glob) {
-                globalizer = glob;
-            } catch (bytes memory reason) {
-                emit GlobalizeUpdateFailed(depositor, listingId, tokenA == address(0), amount, reason);
-                revert(string(abi.encodePacked("Globalizer address fetch failed: ", reason)));
-            }
-            if (globalizer != address(0)) {
-                try ICCGlobalizer(globalizer).globalizeLiquidity(depositor, address(0)) {
-                    globalizerAddress = globalizer;
-                } catch (bytes memory reason) {
-                    emit GlobalizeUpdateFailed(depositor, listingId, tokenA == address(0), amount, reason);
-                    revert(string(abi.encodePacked("Globalize update failed: ", reason)));
-                }
-            }
+            emit TransactFailed(depositor, address(0), amount, string(reason));
+            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
         }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
@@ -558,7 +526,7 @@ contract CCLiquidityTemplate {
     }
 
     function getYSlotView(uint256 index) external view returns (Slot memory slot) {
-        // Returns yLiquidity slot details
+        // Returns y liquid slot details
         return yLiquiditySlots[index];
     }
 

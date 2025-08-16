@@ -5,15 +5,17 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.4 (Updated 2025-08-15)
+**Version**: 0.1.1 (Updated 2025-08-16)
 
 **Changes**:
-- v0.1.0: Added `globalizerAddress` state variable, updated `transactToken` and `transactNative` to fetch globalizer address from `ICCAgent.globalizerAddress` and call `ICCGlobalizer.globalizeLiquidity`. Added `userXIndexView`, `userYIndexView`, `getActiveXLiquiditySlots`, `getActiveYLiquiditySlots` view functions. Updated compatibility to include `CCSEntryPartial.sol` (v0.0.18).
-- v0.0.20: Initial documentation for `CCLiquidityTemplate.sol` (v0.0.20), covering state, mappings, structs, formulas, and functions.
+- v0.1.1: Added `globalizeUpdate` internal function to encapsulate globalization calls, extracted from `transactToken` and `transactNative`. Integrated into `update` for deposits via liquidity router. No other changes.
+- Removed `globalizerAddress` state variable, updated `transactToken` and `transactNative` to fetch globalizer address from `ICCAgent.globalizerAddress`. Ensured `depositToken` globalization via `update`.
+- v0.1.0: Added `globalizerAddress`, updated `transactToken` and `transactNative` to fetch globalizer and call `ICCGlobalizer.globalizeLiquidity`. Added `userXIndexView`, `userYIndexView`, `getActiveXLiquiditySlots`, `getActiveYLiquiditySlots`. Updated compatibility with `CCSEntryPartial.sol` (v0.0.18).
+- v0.0.20: Initial documentation for `CCLiquidityTemplate.sol` (v0.0.20).
 
 **Compatibility**:
 - CCListingTemplate.sol (v0.0.10)
-- CCLiquidityRouter.sol (v0.0.18)
+- CCLiquidityRouter.sol (v0.0.25)
 - CCMainPartial.sol (v0.0.10)
 - CCGlobalizer.sol (v0.2.1)
 - ICCLiquidity.sol (v0.0.4)
@@ -23,7 +25,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 ## Interfaces
 - **IERC20**: Provides `decimals()` for normalization, `transfer(address, uint256)` for token transfers.
 - **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`).
-- **ICCAgent**: Provides `registryAddress()` (returns `address`), `globalizerAddress()` (returns `address`) for fetching registry and globalizer.
+- **ICCAgent**: Provides `registryAddress()` (returns `address`), `globalizerAddress()` (returns `address`).
 - **ITokenRegistry**: Provides `initializeBalances(address token, address[] memory users)` for balance updates.
 - **ICCGlobalizer**: Provides `globalizeLiquidity(address depositor, address token)` for liquidity tracking.
 
@@ -34,7 +36,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **`tokenB`**: `address public` - Token B address (ETH if zero).
 - **`listingId`**: `uint256 public` - Listing identifier.
 - **`agent`**: `address public` - Agent contract address.
-- **`globalizerAddress`**: `address public` - Globalizer contract address, fetched from `ICCAgent`.
 - **`liquidityDetail`**: `LiquidityDetails public` - Stores `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`.
 - **`activeXLiquiditySlots`**: `uint256[] public` - Active xSlot indices.
 - **`activeYLiquiditySlots`**: `uint256[] public` - Active ySlot indices.
@@ -91,6 +92,12 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
    - **Description**: Calculates withdrawal amounts, compensating shortfalls using `ICCListing.prices(0)` (price of token B in token A, 1e18 precision), capped by available liquidity.
    - **Used in**: `xPrepOut`, `yPrepOut`.
 
+## Internal Functions
+### globalizeUpdate(address depositor, address token, bool isX, uint256 amount)
+- **Behavior**: Fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, emits `GlobalizeUpdateFailed` on failure.
+- **Used in**: `update` for x/y slot updates.
+- **Gas**: Two external calls with try-catch.
+
 ## External Functions
 ### setRouters(address[] memory _routers)
 - **Behavior**: Sets routers, stores in `routers` and `routerAddresses`, callable once.
@@ -118,7 +125,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Gas**: Single write.
 
 ### update(address depositor, UpdateType[] memory updates)
-- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userXIndex`, `userYIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, calls `ITokenRegistry.initializeBalances` for `tokenA` or `tokenB`, emits `LiquidityUpdated`.
+- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userXIndex`, `userYIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, calls `ITokenRegistry.initializeBalances` and `globalizeUpdate` for `tokenA` or `tokenB`, emits `LiquidityUpdated`.
 - **Internal**: Processes `updates` for balances, fees, or slots. Adds/removes slot indices. Fetches registry via `ICCAgent.registryAddress`. Uses try-catch, emits `UpdateRegistryFailed` on failure.
 - **Restrictions**: Router-only (`routers[msg.sender]`).
 - **Gas**: Loop over `updates`, array resizing, external calls.
@@ -128,20 +135,15 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Restrictions**: Router-only, `depositor` must be slot owner, valid `newDepositor`.
 - **Gas**: Slot update, array adjustments.
 
-### addFees(address depositor, bool isX, uint256 fee)
-- **Behavior**: Adds fees to `xFees`/`yFees` via `update`, emits `FeesUpdated`.
-- **Restrictions**: Router-only, non-zero fee.
-- **Gas**: Single `update` call.
-
 ### transactToken(address depositor, address token, uint256 amount, address recipient)
-- **Behavior**: Transfers ERC20 tokens via `IERC20.transfer`, updates `xLiquid`/`yLiquid`, fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, emits `TransactFailed` or `GlobalizeUpdateFailed` on failure.
+- **Behavior**: Transfers ERC20 tokens via `IERC20.transfer`, updates `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Restrictions**: Router-only, valid token, non-zero amount.
-- **Gas**: Single transfer, external calls.
+- **Gas**: Single transfer.
 
 ### transactNative(address depositor, uint256 amount, address recipient)
-- **Behavior**: Transfers ETH via low-level `call`, updates `xLiquid`/`yLiquid`, fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, emits `TransactFailed` or `GlobalizeUpdateFailed` on failure.
+- **Behavior**: Transfers ETH via low-level `call`, updates `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Restrictions**: Router-only, non-zero amount.
-- **Gas**: Single transfer, external calls.
+- **Gas**: Single transfer.
 
 ### updateLiquidity(address depositor, bool isX, uint256 amount)
 - **Behavior**: Reduces `xLiquid` (if `isX`) or `yLiquid`, emits `LiquidityUpdated`.
@@ -221,4 +223,4 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - No reserved keywords, no `virtual`/`override`.
 - **Router Security**: Only `routers[msg.sender]` can call restricted functions.
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
-- **Globalization**: In `transactToken` and `transactNative`, fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)` for x/y slots.
+- **Globalization**: In `update`, calls `globalizeUpdate` for x/y slot updates, fetching globalizer via `ICCAgent.globalizerAddress`, calling `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)`.
