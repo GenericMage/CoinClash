@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.8
+// Version: 0.0.9
 // Changes:
+// - v0.0.9: Updated compatibility with CCLiquidPartial.sol v0.0.12 to reflect flipped price calculation (reserveB / reserveA) and improved settlement logic using current price when impact price is within bounds. No functional changes to settleBuyLiquid or settleSellLiquid, as logic is handled in CCLiquidPartial.sol.
 // - v0.0.8: Moved _getSwapReserves and _computeSwapImpact to CCLiquidPartial.sol to fix DeclarationError in _processSingleOrder (CCLiquidPartial.sol:424). Removed SwapImpactContext struct and IUniswapV2Pair interface as they are now in CCLiquidPartial.sol.
 // - v0.0.7: Refactored settleBuyLiquid and settleSellLiquid to address stack-too-deep errors by moving logic to CCLiquidPartial.sol helper functions (_collectOrderIdentifiers, _processOrderBatch, _processSingleOrder, _finalizeUpdates). Uses OrderBatchContext struct for data passing, ensuring no function handles >4 variables.
 // - v0.0.6: Updated to use depositor in ICCLiquidity.update call in settleBuyLiquid and settleSellLiquid, aligning with ICCLiquidity.sol v0.0.4 and CCMainPartial.sol v0.0.11. Ensured consistency with ICCListing.sol v0.0.7.
@@ -11,7 +12,7 @@ pragma solidity ^0.8.2;
 // - v0.0.3: Added price impact restrictions in settleBuyLiquid and settleSellLiquid, using Uniswap V2 reserve data to ensure hypothetical price changes stay within order bounds.
 // - v0.0.2: Removed SafeERC20 usage, used IERC20 from CCMainPartial, removed redundant require success checks for transfers.
 // - v0.0.1: Created CCLiquidRouter.sol, extracted settleBuyLiquid and settleSellLiquid from CCSettlementRouter.sol.
-// Compatible with CCListingTemplate.sol (v0.0.10), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.11).
+// Compatible with CCListingTemplate.sol (v0.1.8), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.12).
 
 import "./utils/CCLiquidPartial.sol";
 
