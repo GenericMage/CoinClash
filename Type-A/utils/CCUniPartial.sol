@@ -1,24 +1,25 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.17
+// Version: 0.0.18
 // Changes:
-// - v0.0.17: Fixed DeclarationError in _performETHBuySwap at line 372 by correcting `preBalanceOut` to `data.preBalanceOut`. Compatible with CCSettlementPartial.sol v0.0.21, CCSettlementRouter.sol v0.0.8, CCMainPartial.sol v0.0.14.
-// - v0.0.16: Refactored _computeMaxAmountIn to resolve stack-too-deep error by splitting into helper functions (_fetchReserves, _computeImpactPercent, _computeMaxAmount). Used ReserveContext and ImpactContext structs with ≤4 fields.
-// - v0.0.15: Fixed _computeSwapImpact to calculate impactPrice as (reserveA - amountOut) / (reserveB + amountInAfterFee) for correct post-swap price. Ensured normalization to 18 decimals.
-// - v0.0.14: Fixed TypeError in _performETHBuySwap, _performETHSellSwap, and _executeTokenSwap by correcting argument counts for transactToken and transactNative to align with ICCListing.sol v0.0.7 (removed 'depositor' parameter). Ensured try-catch returns decoded error reasons.
-// - v0.0.13: Added amountInReceived to ETHSwapData struct, updated _performETHSellSwap and _finalizeETHSellSwap to use it for tax handling consistency.
-// - v0.0.12: Modified _executeTokenSwap and _performETHSellSwap to use amountInReceived after transactToken, even if less than denormAmountIn, to handle transfer taxes gracefully.
-// - v0.0.11: Refactored _executeBuyETHSwap and _executeSellETHSwapInternal into single-task helper functions to resolve stack too deep error, using structs for data passing.
-// - v0.0.10: Renamed _executeSellETHSwap to _executeSellETHSwapInternal, updated to use SwapContext, fixed undeclared identifier error in _executePartialSellSwap.
-// - v0.0.9: Introduced generic SwapContext struct and refactored _executeTokenSwap to use it, resolving TypeError from passing SellSwapContext to BuySwapContext.
-// - v0.0.8: Refactored _executeBuyTokenSwap and _executeSellTokenSwap to use internal call tree with helper functions to resolve stack too deep error.
-// - v0.0.7: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, removed safeApprove, used direct approve, added pre/post balance checks for transactToken.
-// - v0.0.6: Removed inlined ICCListing, imported from CCMainPartial.sol to avoid duplication.
-// - v0.0.5: Marked transactNative as payable in inlined ICCListing (reverted).
-// - v0.0.4: Replaced ISSListingTemplate with ICCListing, updated transact to transactNative/transactToken.
-// - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext struct.
-// - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext struct.
+// - v0.0.18: Updated _computeCurrentPrice to use reserveB / reserveA to align with flipped price calculation in CCListingTemplate. Adjusted _computeSwapImpact to use (normalizedReserveIn + amountInAfterFee) / (normalizedReserveOut - amountOut) for buy orders and inverse for sell orders. Compatible with CCSettlementPartial.sol v0.0.21, CCSettlementRouter.sol v0.0.8, CCMainPartial.sol v0.0.14.
+// - v0.0.17: Fixed DeclarationError in _performETHBuySwap at line 372 by correcting `preBalanceOut` to `data.preBalanceOut`.
+// - v0.0.16: Refactored _computeMaxAmountIn to resolve stack-too-deep error.
+// - v0.0.15: Fixed _computeSwapImpact to calculate impactPrice correctly.
+// - v0.0.14: Fixed TypeError in swap functions.
+// - v0.0.13: Added amountInReceived to ETHSwapData struct.
+// - v0.0.12: Modified _executeTokenSwap to use amountInReceived.
+// - v0.0.11: Refactored _executeBuyETHSwap to resolve stack too deep.
+// - v0.0.10: Renamed _executeSellETHSwap to _executeSellETHSwapInternal.
+// - v0.0.9: Introduced SwapContext struct.
+// - v0.0.8: Refactored _executeBuyTokenSwap to use internal call tree.
+// - v0.0.7: Removed SafeERC20, added pre/post balance checks.
+// - v0.0.6: Removed inlined ICCListing.
+// - v0.0.5: Marked transactNative as payable (reverted).
+// - v0.0.4: Replaced ISSListingTemplate with ICCListing.
+// - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext.
+// - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext.
 // Compatible with CCMainPartial.sol (v0.0.14), CCSettlementPartial.sol (v0.0.21), CCSettlementRouter.sol (v0.0.8).
 
 import "./CCMainPartial.sol";
@@ -140,7 +141,7 @@ contract CCUniPartial is CCMainPartial {
     }
 
     function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
-        // Computes current price from Uniswap V2 pair reserves
+        // Computes current price as reserveB / reserveA to align with flipped CCListingTemplate price
         ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
@@ -154,8 +155,8 @@ contract CCUniPartial is CCMainPartial {
         uint256 reserveB = tokenA == token0 ? reserve1 : reserve0;
         uint256 normalizedReserveA = normalize(reserveA, decimalsA);
         uint256 normalizedReserveB = normalize(reserveB, decimalsB);
-        require(normalizedReserveB > 0, "Zero reserveB");
-        price = (normalizedReserveA * 1e18) / normalizedReserveB;
+        require(normalizedReserveA > 0, "Zero reserveA");
+        price = (normalizedReserveB * 1e18) / normalizedReserveA;
     }
 
     function _computeSwapImpact(
@@ -163,7 +164,7 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountIn,
         bool isBuyOrder
     ) internal view returns (uint256 price, uint256 amountOut) {
-        // Computes swap impact price and output amount
+        // Computes swap impact price and output amount, adjusted for flipped price (reserveB / reserveA)
         ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
@@ -182,8 +183,8 @@ contract CCUniPartial is CCMainPartial {
         context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
         context.amountInAfterFee = (amountIn * 997) / 1000;
         context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) / (context.normalizedReserveIn + context.amountInAfterFee);
-        context.price = context.normalizedReserveOut > 0
-            ? ((context.normalizedReserveOut - context.amountOut) * 1e18) / (context.normalizedReserveIn + context.amountInAfterFee)
+        context.price = context.normalizedReserveOut > context.amountOut
+            ? ((context.normalizedReserveIn + context.amountInAfterFee) * 1e18) / (context.normalizedReserveOut - context.amountOut)
             : 0;
         price = context.price;
         amountOut = context.amountOut;
@@ -293,28 +294,34 @@ contract CCUniPartial is CCMainPartial {
     function _prepareTokenSwap(
         address tokenIn,
         address tokenOut,
-        address recipient
+        address recipientAddress
     ) internal view returns (TokenSwapData memory data) {
         // Prepares token swap data with pre-balance checks
-        data.preBalanceIn = tokenIn == address(0) ? address(this).balance : IERC20(tokenIn).balanceOf(address(this));
-        data.preBalanceOut = tokenOut == address(0) ? recipient.balance : IERC20(tokenOut).balanceOf(recipient);
+        data = TokenSwapData({
+            preBalanceIn: IERC20(tokenIn).balanceOf(address(this)),
+            postBalanceIn: 0,
+            amountInReceived: 0,
+            preBalanceOut: tokenOut == address(0) ? recipientAddress.balance : IERC20(tokenOut).balanceOf(recipientAddress),
+            postBalanceOut: 0,
+            amountReceived: 0,
+            amountOut: 0
+        });
     }
 
     function _executeTokenSwap(
         SwapContext memory context,
         address[] memory path
     ) internal returns (TokenSwapData memory data) {
-        // Executes token-to-token swap
+        // Executes token-to-token swap with pre/post balance checks
         data = _prepareTokenSwap(context.tokenIn, context.tokenOut, context.recipientAddress);
-        IERC20 tokenIn = IERC20(context.tokenIn);
         try context.listingContract.transactToken(context.tokenIn, context.denormAmountIn, address(this)) {
-            data.postBalanceIn = tokenIn.balanceOf(address(this));
+            data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
             data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed: ", reason)));
         }
         require(data.amountInReceived > 0, "No tokens received");
-        try tokenIn.approve(uniswapV2Router, data.amountInReceived) {
+        try IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived) {
             // Approval succeeded
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token approval failed: ", reason)));

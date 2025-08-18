@@ -12,7 +12,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.1.7)
 - `CCMainPartial.sol` (v0.0.14)
-- `CCUniPartial.sol` (v0.0.17)
+- `CCUniPartial.sol` (v0.0.18)
 - `CCSettlementPartial.sol` (v0.0.21)
 
 ## Mappings
@@ -89,15 +89,18 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 ## Formulas
 Uniswap V2 formulas (from `CCUniPartial.sol`):
 - **Price Calculation** (`_computeCurrentPrice`):
-  - `price = (normalizedReserveA * 1e18) / normalizedReserveB`
+  - `price = (normalizedReserveB * 1e18) / normalizedReserveA` (updated to reflect flipped price in CCListingTemplate).
   - Uses `normalize(reserve, decimals)` for 1e18 precision.
 - **Swap Impact** (`_computeSwapImpact`):
   - `amountInAfterFee = (amountIn * 997) / 1000` (0.3% Uniswap fee).
   - `amountOut = (amountInAfterFee * normalizedReserveOut) / (normalizedReserveIn + amountInAfterFee)`.
-  - `price = ((normalizedReserveOut - amountOut) * 1e18) / (normalizedReserveIn + amountInAfterFee)` if `normalizedReserveOut > 0`, else `0`.
+  - `price = ((normalizedReserveIn + amountInAfterFee) * 1e18) / (normalizedReserveOut - amountOut)` if `normalizedReserveOut > amountOut`, else `0`.
 - **Max Amount In** (`_computeMaxAmountIn`):
   - `maxImpactPercent = isBuyOrder ? (maxPrice * 100e18 / currentPrice - 100e18) / 1e18 : (currentPrice * 100e18 / minPrice - 100e18) / 1e18`.
   - `maxAmountIn = min((normalizedReserveIn * maxImpactPercent) / (100 * 2), pendingAmount)`.
+- **Minimum Output**:
+  - Buy: `amountOutMin = (expectedAmountOut * 1e18) / maxPrice` (in `_prepareSwapData`).
+  - Sell: `amountOutMin = (expectedAmountOut * minPrice) / 1e18` (in `_prepareSellSwapData`).
 
 ## Internal Functions
 - **_getTokenAndDecimals** (`CCSettlementPartial`): Returns `tokenAddress` and `tokenDecimals` from `listingContract.tokenA()`/`tokenB()` and `decimalsA()`/`decimalsB()`.
@@ -116,19 +119,22 @@ Uniswap V2 formulas (from `CCUniPartial.sol`):
 - **Token Flow**:
   - Buy: `transactToken(tokenB)` or `transactNative` → `swapExactTokensForTokens` or `swapExactETHForTokens` → `amountReceived` (tokenA).
   - Sell: `transactToken(tokenA)` → `swapExactTokensForTokens` or `swapExactTokensForETH` → `amountReceived` (tokenB or ETH).
+- **Price Impact**:
+  - Buy: Increases price (`reserveB` increases, `reserveA` decreases).
+  - Sell: Decreases price (`reserveA` increases, `reserveB` decreases).
 
 ## Additional Details
 - **Reentrancy Protection**: `nonReentrant` on `settleOrders`.
 - **Gas Optimization**: Uses `step`, `maxIterations`, and dynamic arrays.
-- **Listing Validation**: `onlyValidListing` checks `ICCAgent.getListing`.
+- **Listing Validation**: `onlyValidListing` checks `ICCAgent.isValidListing`.
 - **Uniswap V2 Parameters**:
   - `amountIn`: `amountInReceived` (tax-adjusted) or `denormAmountIn`.
-  - `amountOutMin`: `denormAmountOutMin` from `(amountIn * 1e18) / maxPrice` (buy) or `amountIn * minPrice / 1e18` (sell).
+  - `amountOutMin`: `denormAmountOutMin` from `(expectedAmountOut * 1e18) / maxPrice` (buy) or `(expectedAmountOut * minPrice) / 1e18` (sell).
   - `path`: `[tokenB, tokenA]` (buy), `[tokenA, tokenB]` (sell).
   - `to`: `recipientAddress`.
   - `deadline`: `block.timestamp + 300`.
-- **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `update` with decoded reasons (updated in `CCUniPartial.sol` v0.0.17).
+- **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `update` with decoded reasons (updated in `CCUniPartial.sol` v0.0.18).
 - **Changes**:
   - `CCSettlementRouter.sol` (v0.0.8): Removed redundant `uint2str`, inherits from `CCSettlementPartial`.
   - `CCSettlementPartial.sol` (v0.0.21): Renamed `amountOut` to `amountReceived`, moved `amountIn <= pending` validation to `_processBuyOrder/_processSellOrder`.
-  - `CCUniPartial.sol` (v0.0.17): Fixed `_performETHBuySwap` (`data.preBalanceOut`).
+  - `CCUniPartial.sol` (v0.0.18): Updated `_computeCurrentPrice` to `reserveB / reserveA`, adjusted `_computeSwapImpact` for flipped price.
