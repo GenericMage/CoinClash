@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.14
+// Version: 0.0.17
 // Changes:
-// - v0.0.14: Fixed TypeError in _performETHBuySwap, _performETHSellSwap, and _executeTokenSwap by correcting argument counts for transactToken and transactNative to align with ICCListing.sol v0.0.7 (removed 'depositor' parameter). Ensured try-catch returns decoded error reasons. Compatible with CCMainPartial.sol v0.0.12.
+// - v0.0.17: Fixed DeclarationError in _performETHBuySwap at line 372 by correcting `preBalanceOut` to `data.preBalanceOut`. Compatible with CCSettlementPartial.sol v0.0.21, CCSettlementRouter.sol v0.0.8, CCMainPartial.sol v0.0.14.
+// - v0.0.16: Refactored _computeMaxAmountIn to resolve stack-too-deep error by splitting into helper functions (_fetchReserves, _computeImpactPercent, _computeMaxAmount). Used ReserveContext and ImpactContext structs with ≤4 fields.
+// - v0.0.15: Fixed _computeSwapImpact to calculate impactPrice as (reserveA - amountOut) / (reserveB + amountInAfterFee) for correct post-swap price. Ensured normalization to 18 decimals.
+// - v0.0.14: Fixed TypeError in _performETHBuySwap, _performETHSellSwap, and _executeTokenSwap by correcting argument counts for transactToken and transactNative to align with ICCListing.sol v0.0.7 (removed 'depositor' parameter). Ensured try-catch returns decoded error reasons.
 // - v0.0.13: Added amountInReceived to ETHSwapData struct, updated _performETHSellSwap and _finalizeETHSellSwap to use it for tax handling consistency.
 // - v0.0.12: Modified _executeTokenSwap and _performETHSellSwap to use amountInReceived after transactToken, even if less than denormAmountIn, to handle transfer taxes gracefully.
 // - v0.0.11: Refactored _executeBuyETHSwap and _executeSellETHSwapInternal into single-task helper functions to resolve stack too deep error, using structs for data passing.
@@ -16,7 +19,7 @@ pragma solidity ^0.8.2;
 // - v0.0.4: Replaced ISSListingTemplate with ICCListing, updated transact to transactNative/transactToken.
 // - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext struct.
 // - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext struct.
-// Compatible with CCMainPartial.sol (v0.0.12), CCSettlementPartial.sol (v0.0.19), CCSettlementRouter.sol (v0.0.6).
+// Compatible with CCMainPartial.sol (v0.0.14), CCSettlementPartial.sol (v0.0.21), CCSettlementRouter.sol (v0.0.8).
 
 import "./CCMainPartial.sol";
 
@@ -122,6 +125,20 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountOut;
     }
 
+    struct ReserveContext {
+        uint256 reserveIn;
+        uint8 decimalsIn;
+        uint256 normalizedReserveIn;
+        address tokenA;
+    }
+
+    struct ImpactContext {
+        uint256 currentPrice;
+        uint256 maxImpactPercent;
+        uint256 maxAmountIn;
+        uint256 pendingAmount;
+    }
+
     function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
         // Computes current price from Uniswap V2 pair reserves
         ICCListing listingContract = ICCListing(listingAddress);
@@ -130,59 +147,85 @@ contract CCUniPartial is CCMainPartial {
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
         (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
         address token0 = pair.token0();
-        bool isToken0A = listingContract.tokenA() == token0;
-        uint256 reserveA = isToken0A ? uint256(reserve0) : uint256(reserve1);
-        uint256 reserveB = isToken0A ? uint256(reserve1) : uint256(reserve0);
+        address tokenA = listingContract.tokenA();
         uint8 decimalsA = listingContract.decimalsA();
         uint8 decimalsB = listingContract.decimalsB();
+        uint256 reserveA = tokenA == token0 ? reserve0 : reserve1;
+        uint256 reserveB = tokenA == token0 ? reserve1 : reserve0;
         uint256 normalizedReserveA = normalize(reserveA, decimalsA);
         uint256 normalizedReserveB = normalize(reserveB, decimalsB);
         require(normalizedReserveB > 0, "Zero reserveB");
         price = (normalizedReserveA * 1e18) / normalizedReserveB;
     }
 
-    function _getReserveData(
+    function _computeSwapImpact(
         address listingAddress,
+        uint256 amountIn,
         bool isBuyOrder
-    ) private view returns (MaxAmountInContext memory context) {
-        // Retrieves reserve data and decimals for maxAmountIn calculation
+    ) internal view returns (uint256 price, uint256 amountOut) {
+        // Computes swap impact price and output amount
         ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
         (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
         address token0 = pair.token0();
-        bool isToken0In = isBuyOrder ? listingContract.tokenB() == token0 : listingContract.tokenA() == token0;
-        context.reserveIn = isToken0In ? uint256(reserve0) : uint256(reserve1);
-        context.decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
+        address tokenA = listingContract.tokenA();
+        uint8 decimalsA = listingContract.decimalsA();
+        uint8 decimalsB = listingContract.decimalsB();
+        SwapImpactContext memory context;
+        context.decimalsIn = isBuyOrder ? decimalsB : decimalsA;
+        context.decimalsOut = isBuyOrder ? decimalsA : decimalsB;
+        context.reserveIn = isBuyOrder ? (tokenA == token0 ? reserve1 : reserve0) : (tokenA == token0 ? reserve0 : reserve1);
+        context.reserveOut = isBuyOrder ? (tokenA == token0 ? reserve0 : reserve1) : (tokenA == token0 ? reserve1 : reserve0);
         context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
-        context.currentPrice = _computeCurrentPrice(listingAddress);
+        context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
+        context.amountInAfterFee = (amountIn * 997) / 1000;
+        context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) / (context.normalizedReserveIn + context.amountInAfterFee);
+        context.price = context.normalizedReserveOut > 0
+            ? ((context.normalizedReserveOut - context.amountOut) * 1e18) / (context.normalizedReserveIn + context.amountInAfterFee)
+            : 0;
+        price = context.price;
+        amountOut = context.amountOut;
     }
 
-    function _computePriceImpact(
-        MaxAmountInContext memory context,
+    function _fetchReserves(
+        address listingAddress,
+        bool isBuyOrder
+    ) internal view returns (ReserveContext memory reserveContext) {
+        // Fetches reserves and token details for max amount calculation
+        ICCListing listingContract = ICCListing(listingAddress);
+        address pairAddress = listingContract.uniswapV2PairView();
+        require(pairAddress != address(0), "Uniswap V2 pair not set");
+        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        address token0 = pair.token0();
+        reserveContext.tokenA = listingContract.tokenA();
+        reserveContext.decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
+        reserveContext.reserveIn = isBuyOrder ? (reserveContext.tokenA == token0 ? reserve1 : reserve0) : (reserveContext.tokenA == token0 ? reserve0 : reserve1);
+        reserveContext.normalizedReserveIn = normalize(reserveContext.reserveIn, reserveContext.decimalsIn);
+    }
+
+    function _computeImpactPercent(
         uint256 maxPrice,
         uint256 minPrice,
+        uint256 currentPrice,
         bool isBuyOrder
-    ) private pure returns (uint256 maxImpactPercent) {
-        // Computes price impact percentage based on price constraints
-        if (isBuyOrder) {
-            if (maxPrice < context.currentPrice) return 0;
-            maxImpactPercent = (maxPrice * 100e18 / context.currentPrice - 100e18) / 1e18;
-        } else {
-            if (context.currentPrice < minPrice) return 0;
-            maxImpactPercent = (context.currentPrice * 100e18 / minPrice - 100e18) / 1e18;
-        }
+    ) internal pure returns (uint256 maxImpactPercent) {
+        // Computes max impact percent based on price constraints
+        maxImpactPercent = isBuyOrder
+            ? (maxPrice * 100e18 / currentPrice - 100e18) / 1e18
+            : (currentPrice * 100e18 / minPrice - 100e18) / 1e18;
     }
 
-    function _finalizeMaxAmountIn(
-        MaxAmountInContext memory context,
+    function _computeMaxAmount(
+        ReserveContext memory reserveContext,
         uint256 maxImpactPercent,
         uint256 pendingAmount
-    ) private pure returns (uint256 maxAmountIn) {
-        // Finalizes maxAmountIn calculation using normalized reserve and impact
-        maxAmountIn = (context.normalizedReserveIn * maxImpactPercent) / (100 * 2);
-        maxAmountIn = maxAmountIn > pendingAmount ? pendingAmount : maxAmountIn;
+    ) internal pure returns (uint256 maxAmountIn) {
+        // Computes max input amount based on reserves and impact percent
+        maxAmountIn = (reserveContext.normalizedReserveIn * maxImpactPercent) / (100 * 2);
+        maxAmountIn = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
     }
 
     function _computeMaxAmountIn(
@@ -192,54 +235,13 @@ contract CCUniPartial is CCMainPartial {
         uint256 pendingAmount,
         bool isBuyOrder
     ) internal view returns (uint256 maxAmountIn) {
-        // Computes maximum amountIn using internal call tree and struct
-        MaxAmountInContext memory context = _getReserveData(listingAddress, isBuyOrder);
-        uint256 maxImpactPercent = _computePriceImpact(context, maxPrice, minPrice, isBuyOrder);
-        maxAmountIn = _finalizeMaxAmountIn(context, maxImpactPercent, pendingAmount);
-    }
-
-    function _getSwapReserves(
-        address listingAddress,
-        bool isBuyOrder
-    ) private view returns (SwapImpactContext memory context) {
-        // Retrieves reserves and decimals for swap impact calculation
-        ICCListing listingContract = ICCListing(listingAddress);
-        address pairAddress = listingContract.uniswapV2PairView();
-        require(pairAddress != address(0), "Uniswap V2 pair not set");
-        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        address token0 = pair.token0();
-        bool isToken0In = isBuyOrder ? listingContract.tokenB() == token0 : listingContract.tokenA() == token0;
-        context.reserveIn = isToken0In ? uint256(reserve0) : uint256(reserve1);
-        context.reserveOut = isToken0In ? uint256(reserve1) : uint256(reserve0);
-        context.decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
-        context.decimalsOut = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
-        context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
-        context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
-    }
-
-    function _computeSwapOutput(
-        SwapImpactContext memory context,
-        uint256 inputAmount
-    ) private pure returns (uint256 price, uint256 amountOut) {
-        // Computes swap output and price using Uniswap V2 formula
-        require(context.normalizedReserveIn > 0 && context.normalizedReserveOut > 0, "Zero reserves");
-        context.amountInAfterFee = (inputAmount * 997) / 1000; // 0.3% fee
-        context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) /
-                           (context.normalizedReserveIn + context.amountInAfterFee);
-        context.price = context.amountOut > 0 ? (inputAmount * 1e18) / context.amountOut : type(uint256).max;
-        amountOut = denormalize(context.amountOut, context.decimalsOut);
-        price = context.price;
-    }
-
-    function _computeSwapImpact(
-        address listingAddress,
-        uint256 inputAmount,
-        bool isBuyOrder
-    ) internal view returns (uint256 price, uint256 amountOut) {
-        // Computes swap impact price using Uniswap V2 pair reserves
-        SwapImpactContext memory context = _getSwapReserves(listingAddress, isBuyOrder);
-        (price, amountOut) = _computeSwapOutput(context, inputAmount);
+        // Computes maximum input amount based on price constraints
+        ReserveContext memory reserveContext = _fetchReserves(listingAddress, isBuyOrder);
+        ImpactContext memory impactContext;
+        impactContext.currentPrice = _computeCurrentPrice(listingAddress);
+        impactContext.maxImpactPercent = _computeImpactPercent(maxPrice, minPrice, impactContext.currentPrice, isBuyOrder);
+        impactContext.pendingAmount = pendingAmount;
+        maxAmountIn = _computeMaxAmount(reserveContext, impactContext.maxImpactPercent, impactContext.pendingAmount);
     }
 
     function _prepareSwapData(
@@ -247,219 +249,77 @@ contract CCUniPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountIn
     ) internal view returns (SwapContext memory context, address[] memory path) {
-        // Prepares swap data for buy order, including order details and swap path
+        // Prepares swap data for buy order
         ICCListing listingContract = ICCListing(listingAddress);
+        context.listingContract = listingContract;
         (context.makerAddress, context.recipientAddress, context.status) = listingContract.getBuyOrderCore(orderIdentifier);
         (uint256 maxPrice, uint256 minPrice) = listingContract.getBuyOrderPricing(orderIdentifier);
-        context.listingContract = listingContract;
         context.tokenIn = listingContract.tokenB();
         context.tokenOut = listingContract.tokenA();
         context.decimalsIn = listingContract.decimalsB();
         context.decimalsOut = listingContract.decimalsA();
-        address pairAddress = listingContract.uniswapV2PairView();
-        require(pairAddress != address(0), "Uniswap V2 pair not set");
-        require(uniswapV2Router != address(0), "Uniswap V2 router not set");
         context.denormAmountIn = denormalize(amountIn, context.decimalsIn);
+        (context.price, context.expectedAmountOut) = _computeSwapImpact(listingAddress, amountIn, true);
+        context.denormAmountOutMin = (context.expectedAmountOut * 1e18) / maxPrice;
+        context.denormAmountOutMin = denormalize(context.denormAmountOutMin, context.decimalsOut);
         path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
-        (context.price, context.expectedAmountOut) = _computeSwapImpact(listingAddress, amountIn, true);
-        context.denormAmountOutMin = denormalize((amountIn * 1e18) / maxPrice, context.decimalsOut);
-        if (context.price < minPrice || context.price > maxPrice || context.expectedAmountOut == 0) {
-            context.price = 0; // Signal invalid swap
-        }
     }
 
     function _prepareSellSwapData(
         address listingAddress,
         uint256 orderIdentifier,
         uint256 amountIn
-    ) private view returns (SwapContext memory context, address[] memory path) {
-        // Prepares swap data for sell order, including order details and swap path
+    ) internal view returns (SwapContext memory context, address[] memory path) {
+        // Prepares swap data for sell order
         ICCListing listingContract = ICCListing(listingAddress);
+        context.listingContract = listingContract;
         (context.makerAddress, context.recipientAddress, context.status) = listingContract.getSellOrderCore(orderIdentifier);
         (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
-        context.listingContract = listingContract;
         context.tokenIn = listingContract.tokenA();
         context.tokenOut = listingContract.tokenB();
         context.decimalsIn = listingContract.decimalsA();
         context.decimalsOut = listingContract.decimalsB();
-        address pairAddress = listingContract.uniswapV2PairView();
-        require(pairAddress != address(0), "Uniswap V2 pair not set");
-        require(uniswapV2Router != address(0), "Uniswap V2 router not set");
         context.denormAmountIn = denormalize(amountIn, context.decimalsIn);
+        (context.price, context.expectedAmountOut) = _computeSwapImpact(listingAddress, amountIn, false);
+        context.denormAmountOutMin = (context.expectedAmountOut * minPrice) / 1e18;
+        context.denormAmountOutMin = denormalize(context.denormAmountOutMin, context.decimalsOut);
         path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
-        (context.price, context.expectedAmountOut) = _computeSwapImpact(listingAddress, amountIn, false);
-        context.denormAmountOutMin = denormalize((amountIn * 1e18) / maxPrice, context.decimalsOut);
-        if (context.price < minPrice || context.price > maxPrice || context.expectedAmountOut == 0) {
-            context.price = 0; // Signal invalid swap
-        }
-    }
-
-    function _prepareETHSwap(
-        address tokenOut,
-        address recipientAddress
-    ) private view returns (ETHSwapData memory data) {
-        // Prepares balance checks for ETH swap
-        data.preBalanceOut = tokenOut == address(0) ? recipientAddress.balance : IERC20(tokenOut).balanceOf(recipientAddress);
-    }
-
-    function _performETHBuySwap(
-        SwapContext memory context,
-        address[] memory path
-    ) private returns (ETHSwapData memory data) {
-        // Performs ETH-to-token swap
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        try context.listingContract.transactNative{value: context.denormAmountIn}(context.denormAmountIn, address(this)) {
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
-        }
-        try router.swapExactETHForTokens{value: context.denormAmountIn}(
-            context.denormAmountOutMin,
-            path,
-            context.recipientAddress,
-            block.timestamp + 300
-        ) returns (uint256[] memory amounts) {
-            data.amountOut = amounts[1];
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Swap failed: ", reason)));
-        }
-        data.postBalanceOut = context.tokenOut == address(0) ? context.recipientAddress.balance : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
-    }
-
-    function _finalizeETHBuySwap(
-        ETHSwapData memory data,
-        SwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) private pure returns (ICCListing.UpdateType[] memory) {
-        // Finalizes ETH buy swap and creates update structs
-        if (data.amountReceived == 0) {
-            return new ICCListing.UpdateType[](0);
-        }
-        BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
-            makerAddress: context.makerAddress,
-            recipient: context.recipientAddress,
-            status: context.status,
-            amountReceived: data.amountReceived,
-            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
-            amountSent: context.denormAmountIn
-        });
-        return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-    }
-
-    function _executeBuyETHSwap(
-        SwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) internal returns (ICCListing.UpdateType[] memory) {
-        // Executes ETH-to-token swap for buy order using helper functions
-        address[] memory path = new address[](2);
-        path[0] = context.tokenIn;
-        path[1] = context.tokenOut;
-        ETHSwapData memory data = _prepareETHSwap(context.tokenOut, context.recipientAddress);
-        data = _performETHBuySwap(context, path);
-        return _finalizeETHBuySwap(data, context, orderIdentifier, pendingAmount);
-    }
-
-    function _performETHSellSwap(
-        SwapContext memory context,
-        address[] memory path
-    ) private returns (ETHSwapData memory data) {
-        // Performs token-to-ETH swap, using actual amount received after tax
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        data.preBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
-        data.preBalanceOut = context.recipientAddress.balance;
-        try context.listingContract.transactToken(context.tokenIn, context.denormAmountIn, address(this)) {
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
-        }
-        data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
-        data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
-        if (data.amountInReceived == 0) {
-            return data;
-        }
-        IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived);
-        try router.swapExactTokensForETH(
-            data.amountInReceived,
-            context.denormAmountOutMin,
-            path,
-            context.recipientAddress,
-            block.timestamp + 300
-        ) returns (uint256[] memory amounts) {
-            data.amountOut = amounts[1];
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Swap failed: ", reason)));
-        }
-        data.postBalanceOut = context.recipientAddress.balance;
-        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
-    }
-
-    function _finalizeETHSellSwap(
-        ETHSwapData memory data,
-        SwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) private pure returns (ICCListing.UpdateType[] memory) {
-        // Finalizes ETH sell swap and creates update structs
-        if (data.amountReceived == 0 || data.amountInReceived == 0) {
-            return new ICCListing.UpdateType[](0);
-        }
-        SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
-            makerAddress: context.makerAddress,
-            recipient: context.recipientAddress,
-            status: context.status,
-            amountReceived: data.amountReceived,
-            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
-            amountSent: data.amountInReceived
-        });
-        return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-    }
-
-    function _executeSellETHSwapInternal(
-        SwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) private returns (ICCListing.UpdateType[] memory) {
-        // Executes token-to-ETH swap for sell order using helper functions
-        address[] memory path = new address[](2);
-        path[0] = context.tokenIn;
-        path[1] = context.tokenOut;
-        ETHSwapData memory data = _prepareETHSwap(context.tokenOut, context.recipientAddress);
-        data = _performETHSellSwap(context, path);
-        return _finalizeETHSellSwap(data, context, orderIdentifier, pendingAmount);
     }
 
     function _prepareTokenSwap(
         address tokenIn,
         address tokenOut,
-        address recipientAddress
-    ) private view returns (TokenSwapData memory data) {
-        // Prepares balance checks for token swap
-        data.preBalanceIn = IERC20(tokenIn).balanceOf(address(this));
-        data.preBalanceOut = IERC20(tokenOut).balanceOf(recipientAddress);
+        address recipient
+    ) internal view returns (TokenSwapData memory data) {
+        // Prepares token swap data with pre-balance checks
+        data.preBalanceIn = tokenIn == address(0) ? address(this).balance : IERC20(tokenIn).balanceOf(address(this));
+        data.preBalanceOut = tokenOut == address(0) ? recipient.balance : IERC20(tokenOut).balanceOf(recipient);
     }
 
     function _executeTokenSwap(
         SwapContext memory context,
         address[] memory path
-    ) private returns (TokenSwapData memory data) {
-        // Executes token transfer and swap, using actual amount received after tax
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        data.preBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+    ) internal returns (TokenSwapData memory data) {
+        // Executes token-to-token swap
+        data = _prepareTokenSwap(context.tokenIn, context.tokenOut, context.recipientAddress);
+        IERC20 tokenIn = IERC20(context.tokenIn);
         try context.listingContract.transactToken(context.tokenIn, context.denormAmountIn, address(this)) {
+            data.postBalanceIn = tokenIn.balanceOf(address(this));
+            data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed: ", reason)));
         }
-        data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
-        data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
-        if (data.amountInReceived == 0) {
-            return data;
+        require(data.amountInReceived > 0, "No tokens received");
+        try tokenIn.approve(uniswapV2Router, data.amountInReceived) {
+            // Approval succeeded
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token approval failed: ", reason)));
         }
-        IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived);
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
         try router.swapExactTokensForTokens(
             data.amountInReceived,
             context.denormAmountOutMin,
@@ -467,11 +327,91 @@ contract CCUniPartial is CCMainPartial {
             context.recipientAddress,
             block.timestamp + 300
         ) returns (uint256[] memory amounts) {
-            data.amountOut = amounts[1];
+            data.amountOut = amounts[amounts.length - 1];
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
+        }
+        data.postBalanceOut = context.tokenOut == address(0)
+            ? context.recipientAddress.balance
+            : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
+    }
+
+    function _performETHBuySwap(
+        SwapContext memory context,
+        address[] memory path
+    ) internal returns (ETHSwapData memory data) {
+        // Executes ETH-to-token swap
+        data = ETHSwapData({
+            preBalanceIn: address(this).balance,
+            postBalanceIn: 0,
+            amountInReceived: 0,
+            preBalanceOut: IERC20(context.tokenOut).balanceOf(context.recipientAddress),
+            postBalanceOut: 0,
+            amountReceived: 0,
+            amountOut: 0
+        });
+        try context.listingContract.transactNative{value: context.denormAmountIn}(context.denormAmountIn, address(this)) {
+            data.postBalanceIn = address(this).balance;
+            data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
+        }
+        require(data.amountInReceived > 0, "No ETH received");
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
+        try router.swapExactETHForTokens{value: data.amountInReceived}(
+            context.denormAmountOutMin,
+            path,
+            context.recipientAddress,
+            block.timestamp + 300
+        ) returns (uint256[] memory amounts) {
+            data.amountOut = amounts[amounts.length - 1];
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Swap failed: ", reason)));
         }
         data.postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
+    }
+
+    function _performETHSellSwap(
+        SwapContext memory context,
+        address[] memory path
+    ) internal returns (ETHSwapData memory data) {
+        // Executes token-to-ETH swap
+        data = ETHSwapData({
+            preBalanceIn: IERC20(context.tokenIn).balanceOf(address(this)),
+            postBalanceIn: 0,
+            amountInReceived: 0,
+            preBalanceOut: context.recipientAddress.balance,
+            postBalanceOut: 0,
+            amountReceived: 0,
+            amountOut: 0
+        });
+        try context.listingContract.transactToken(context.tokenIn, context.denormAmountIn, address(this)) {
+            data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+            data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+        }
+        require(data.amountInReceived > 0, "No tokens received");
+        try IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived) {
+            // Approval succeeded
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token approval failed: ", reason)));
+        }
+        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
+        try router.swapExactTokensForETH(
+            data.amountInReceived,
+            context.denormAmountOutMin,
+            path,
+            context.recipientAddress,
+            block.timestamp + 300
+        ) returns (uint256[] memory amounts) {
+            data.amountOut = amounts[amounts.length - 1];
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
+        }
+        data.postBalanceOut = context.recipientAddress.balance;
         data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
     }
 
@@ -480,11 +420,9 @@ contract CCUniPartial is CCMainPartial {
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) private pure returns (ICCListing.UpdateType[] memory) {
-        // Finalizes token swap and creates update structs for buy order
-        if (data.amountReceived == 0 || data.amountInReceived == 0) {
-            return new ICCListing.UpdateType[](0);
-        }
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Finalizes token swap and creates updates
+        require(data.amountReceived > 0, "No tokens received in swap");
         BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
@@ -501,11 +439,53 @@ contract CCUniPartial is CCMainPartial {
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) private pure returns (ICCListing.UpdateType[] memory) {
-        // Finalizes token swap and creates update structs for sell order
-        if (data.amountReceived == 0 || data.amountInReceived == 0) {
-            return new ICCListing.UpdateType[](0);
-        }
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Finalizes token swap for sell order
+        require(data.amountReceived > 0, "No tokens received in swap");
+        SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
+            makerAddress: context.makerAddress,
+            recipient: context.recipientAddress,
+            status: context.status,
+            amountReceived: data.amountReceived,
+            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
+            amountSent: data.amountInReceived
+        });
+        return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    }
+
+    function _executeBuyETHSwap(
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Executes ETH-to-token swap for buy order
+        address[] memory path = new address[](2);
+        path[0] = context.tokenIn;
+        path[1] = context.tokenOut;
+        ETHSwapData memory data = _performETHBuySwap(context, path);
+        require(data.amountReceived > 0, "No tokens received in swap");
+        BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
+            makerAddress: context.makerAddress,
+            recipient: context.recipientAddress,
+            status: context.status,
+            amountReceived: data.amountReceived,
+            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
+            amountSent: data.amountInReceived
+        });
+        return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    }
+
+    function _executeSellETHSwapInternal(
+        SwapContext memory context,
+        uint256 orderIdentifier,
+        uint256 pendingAmount
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Executes token-to-ETH swap for sell order
+        address[] memory path = new address[](2);
+        path[0] = context.tokenIn;
+        path[1] = context.tokenOut;
+        ETHSwapData memory data = _performETHSellSwap(context, path);
+        require(data.amountReceived > 0, "No ETH received in swap");
         SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
@@ -535,7 +515,7 @@ contract CCUniPartial is CCMainPartial {
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
-    ) private returns (ICCListing.UpdateType[] memory) {
+    ) internal returns (ICCListing.UpdateType[] memory) {
         // Executes token-to-token swap for sell order using helper functions
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;

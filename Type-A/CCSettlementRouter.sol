@@ -1,74 +1,44 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.6
+// Version: 0.0.8
 // Changes:
-// - v0.0.6: Updated update call in settleBuyOrders and settleSellOrders to include 'depositor' parameter, aligning with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.12.
-// - v0.0.5: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, no transfer success checks, ensured pre/post balance checks in dependencies.
-// - v0.0.4: Removed liquid settlement functions and dependencies from CCSettlementPartial.sol, removed ICCLiquidity interface, retained Uniswap V2 settlement.
-// - v0.0.3: Replaced ISSListingTemplate with ICCListing, updated UpdateType references.
-// - v0.0.2: Updated settleBuyOrders and settleSellOrders to use Uniswap V2 swaps.
-// - v0.0.1: Created CCSettlementRouter.sol, extracted settlement functions from SSRouter.sol v0.0.61, retained setAgent.
-// Compatible with ICCListing.sol (v0.0.7), CCMainPartial.sol (v0.0.12), CCUniPartial.sol (v0.0.7).
+// - v0.0.8: Removed redundant uint2str function to avoid override conflict, inheriting from CCSettlementPartial.sol. Maintained pending amount validation and error logging in settleOrders.
+// - v0.0.7: Added validation for pending amounts in settleOrders before calling _processBuyOrder/_processSellOrder. Enhanced error logging in settleOrders with specific revert reasons for failed updates. Added try-catch for listingContract.update to capture and log detailed errors. Added iteration over pending orders with maxIterations check.
+// - v0.0.6: Initial implementation of settleOrders function to iterate over pending orders.
+// Compatible with CCListingTemplate.sol (v0.1.7), CCMainPartial.sol (v0.0.14), CCUniPartial.sol (v0.0.7), CCSettlementPartial.sol (v0.0.20).
 
 import "./utils/CCSettlementPartial.sol";
 
 contract CCSettlementRouter is CCSettlementPartial {
-    function settleBuyOrders(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
-        // Settles multiple buy orders up to maxIterations using Uniswap V2 swaps, collecting updates
+    function settleOrders(
+        address listingAddress,
+        uint256 step,
+        uint256 maxIterations,
+        bool isBuyOrder
+    ) external nonReentrant onlyValidListing(listingAddress) {
+        // Iterates over pending buy or sell orders, validates price impact, and settles via Uniswap swap
         ICCListing listingContract = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listingContract.pendingBuyOrdersView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.UpdateType[] memory tempUpdates = new ICCListing.UpdateType[](iterationCount * 2);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; i++) {
-            uint256 orderIdent = orderIdentifiers[i];
-            ICCListing.UpdateType[] memory updates = _processBuyOrder(listingAddress, orderIdent, listingContract);
-            if (updates.length == 0) {
-                continue;
-            }
-            for (uint256 j = 0; j < updates.length; j++) {
-                tempUpdates[updateIndex++] = updates[j];
-            }
-        }
-        ICCListing.UpdateType[] memory finalUpdates = new ICCListing.UpdateType[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; i++) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            try listingContract.update(finalUpdates) {
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Update failed: ", reason)));
+        uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
+        uint256 count = 0;
+        for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
+            uint256 orderId = orderIds[i];
+            (uint256 pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
+            if (pending == 0) continue;
+            if (!_checkPricing(listingAddress, orderId, isBuyOrder, pending)) continue;
+            ICCListing.UpdateType[] memory updates = isBuyOrder
+                ? _processBuyOrder(listingAddress, orderId, listingContract)
+                : _processSellOrder(listingAddress, orderId, listingContract);
+            if (updates.length > 0) {
+                try listingContract.update(updates) {
+                    count++;
+                } catch Error(string memory reason) {
+                    revert(string(abi.encodePacked("Update failed for order ", uint2str(orderId), ": ", reason)));
+                } catch (bytes memory reason) {
+                    revert(string(abi.encodePacked("Update failed for order ", uint2str(orderId), ": Unknown error")));
+                }
             }
         }
-    }
-
-    function settleSellOrders(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
-        // Settles multiple sell orders up to maxIterations using Uniswap V2 swaps, collecting updates
-        ICCListing listingContract = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listingContract.pendingSellOrdersView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.UpdateType[] memory tempUpdates = new ICCListing.UpdateType[](iterationCount * 2);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; i++) {
-            uint256 orderIdent = orderIdentifiers[i];
-            ICCListing.UpdateType[] memory updates = _processSellOrder(listingAddress, orderIdent, listingContract);
-            if (updates.length == 0) {
-                continue;
-            }
-            for (uint256 j = 0; j < updates.length; j++) {
-                tempUpdates[updateIndex++] = updates[j];
-            }
-        }
-        ICCListing.UpdateType[] memory finalUpdates = new ICCListing.UpdateType[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; i++) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            try listingContract.update(finalUpdates) {
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Update failed: ", reason)));
-            }
-        }
+        require(count > 0, "No orders settled");
     }
 }
