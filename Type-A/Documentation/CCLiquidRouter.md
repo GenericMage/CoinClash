@@ -1,11 +1,11 @@
 # CCLiquidRouter Contract Documentation
 
 ## Overview
-The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidity` for liquid settlement. It inherits from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair` for token operations and reserve data. It uses `ReentrancyGuard` (including `Ownable`) for security. The contract handles liquid settlement via `settleBuyLiquid` and `settleSellLiquid`, ensuring price impact stays within order bounds. State variables are hidden, accessed via view functions, and decimal precision is maintained. It avoids reserved keywords, uses explicit casting, and ensures graceful degradation with revert reasons. Transfers call `listingContract.update` post-liquidity transfer.
+The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidity` for liquid settlement. It inherits from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair` for token operations and reserve data. It uses `ReentrancyGuard` (including `Ownable`) for security. The contract handles liquid settlement via `settleBuyLiquid` and `settleSellLiquid`, ensuring price impact stays within order bounds. State variables are hidden, accessed via view functions, and decimal precision is maintained. It avoids reserved keywords, uses explicit casting, and ensures graceful degradation with revert reasons. Transfers involve two calls: `ICCListing.transactToken` or `transactNative` to transfer principal to the liquidity contract, and `ICCLiquidity.transactToken` or `transactNative` to transfer settlement amounts to the recipient.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.9 (updated 2025-08-18)
+**Version:** 0.0.10 (updated 2025-08-18)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
 
@@ -62,7 +62,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 - **Parameters**:
   - `listingAddress` (address): `ICCListing` contract address for order book.
   - `maxIterations` (uint256): Limits orders processed to control gas.
-- **Behavior**: Settles up to `maxIterations` pending buy orders, transferring tokenA to recipients, updating liquidity with tokenB via `ICCLiquidity.update`, and calling `listingContract.update`. Ensures price impact (`_computeSwapImpact`) and current price (`_computeCurrentPrice`) are within `minPrice` and `maxPrice`.
+- **Behavior**: Settles up to `maxIterations` pending buy orders by transferring principal (tokenB) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenA) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Updates liquidity with tokenB via `ICCLiquidity.update` and calls `listingContract.update`. Ensures price impact (`_computeSwapImpact`) and current price (`_computeCurrentPrice`) are within `minPrice` and `maxPrice`.
 - **Internal Call Flow**:
   - `_processOrderBatch`:
     - Creates `OrderBatchContext` (`listingAddress`, `maxIterations`, `isBuyOrder = true`).
@@ -78,14 +78,16 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
           - Calls `_prepBuyLiquidUpdates`:
             - Validates pricing via `_checkPricing`.
             - Calls `_prepareLiquidityTransaction` to compute `amountOut` and check `yAmount` (tokenB liquidity).
-            - Calls `_prepBuyOrderUpdate` for transfer (`transactNative` or `transactToken`) with pre/post balance checks.
-            - Returns `UpdateType[]` via `_createBuyOrderUpdates`.
+            - Calls `_prepBuyOrderUpdate`:
+              - Transfers principal (tokenB) to liquidity contract via `listingContract.transactToken` or `transactNative` with pre/post balance checks.
+              - Transfers settlement (tokenA) to recipient via `liquidityContract.transactToken` or `transactNative`, capturing the actual amount sent to the order's recipient after the transfer.
+              - Returns `UpdateType[]` via `_createBuyOrderUpdates`.
           - Updates liquidity via `ICCLiquidity.update` with `depositor = address(this)`.
     - Resizes updates via `_finalizeUpdates` and calls `listingContract.update`.
 
 ### settleSellLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyLiquid`.
-- **Behavior**: Settles sell orders, transferring tokenB, updating liquidity with tokenA, and calling `listingContract.update`. Uses `executeSingleSellLiquid`, `_prepSellLiquidUpdates`.
+- **Behavior**: Settles sell orders by transferring principal (tokenA) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenB) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Updates liquidity with tokenA and calls `listingContract.update`. Uses `executeSingleSellLiquid`, `_prepSellLiquidUpdates`.
 - **Internal Call Flow**: Mirrors `settleBuyLiquid`, with `isBuyOrder = false`, using `getSellOrderAmounts`, `getSellOrderPricing`, and `_prepSellLiquidUpdates`.
 
 ## Internal Functions (CCLiquidPartial)
@@ -94,7 +96,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 - **_computeSwapImpact**: Calculates output and price impact with 0.3% fee.
 - **_checkPricing**: Validates `impactPrice` within `minPrice` and `maxPrice`.
 - **_prepareLiquidityTransaction**: Computes `amountOut`, checks liquidity (`xAmount` for sell, `yAmount` for buy).
-- **_prepBuy/SellOrderUpdate**: Handles transfers with pre/post balance checks, returns `PrepOrderUpdateResult`.
+- **_prepBuy/SellOrderUpdate**: Handles transfers (principal to liquidity, settlement to recipient) with pre/post balance checks, returns `PrepOrderUpdateResult`.
 - **_prepBuy/SellLiquidUpdates**: Validates pricing, computes `amountOut`, prepares `UpdateType[]`.
 - **_createBuy/SellOrderUpdates**: Builds `UpdateType[]` for order updates.
 - **_collectOrderIdentifiers**: Fetches order IDs up to `maxIterations`.
