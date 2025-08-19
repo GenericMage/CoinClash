@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.18
+// Version: 0.0.19
 // Changes:
-// - v0.0.18: Updated _computeCurrentPrice to use reserveB / reserveA to align with flipped price calculation in CCListingTemplate. Adjusted _computeSwapImpact to use (normalizedReserveIn + amountInAfterFee) / (normalizedReserveOut - amountOut) for buy orders and inverse for sell orders. Compatible with CCSettlementPartial.sol v0.0.21, CCSettlementRouter.sol v0.0.8, CCMainPartial.sol v0.0.14.
+// - v0.0.19: Modified _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Updated _computeSwapImpact to use prices(0) for consistency. Compatible with CCSettlementPartial.sol v0.0.22, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
+// - v0.0.18: Updated _computeCurrentPrice to use reserveB / reserveA to align with flipped price calculation in CCListingTemplate. Adjusted _computeSwapImpact to use (normalizedReserveIn + amountInAfterFee) / (normalizedReserveOut - amountOut) for buy orders and inverse for sell orders.
 // - v0.0.17: Fixed DeclarationError in _performETHBuySwap at line 372 by correcting `preBalanceOut` to `data.preBalanceOut`.
 // - v0.0.16: Refactored _computeMaxAmountIn to resolve stack-too-deep error.
 // - v0.0.15: Fixed _computeSwapImpact to calculate impactPrice correctly.
@@ -20,7 +21,7 @@ pragma solidity ^0.8.2;
 // - v0.0.4: Replaced ISSListingTemplate with ICCListing.
 // - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext.
 // - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext.
-// Compatible with CCMainPartial.sol (v0.0.14), CCSettlementPartial.sol (v0.0.21), CCSettlementRouter.sol (v0.0.8).
+// Compatible with CCMainPartial.sol (v0.0.14), CCSettlementPartial.sol (v0.0.22), CCSettlementRouter.sol (v0.0.9).
 
 import "./CCMainPartial.sol";
 
@@ -141,22 +142,10 @@ contract CCUniPartial is CCMainPartial {
     }
 
     function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
-        // Computes current price as reserveB / reserveA to align with flipped CCListingTemplate price
+        // Retrieves current price from listingContract.prices(0)
         ICCListing listingContract = ICCListing(listingAddress);
-        address pairAddress = listingContract.uniswapV2PairView();
-        require(pairAddress != address(0), "Uniswap V2 pair not set");
-        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        address token0 = pair.token0();
-        address tokenA = listingContract.tokenA();
-        uint8 decimalsA = listingContract.decimalsA();
-        uint8 decimalsB = listingContract.decimalsB();
-        uint256 reserveA = tokenA == token0 ? reserve0 : reserve1;
-        uint256 reserveB = tokenA == token0 ? reserve1 : reserve0;
-        uint256 normalizedReserveA = normalize(reserveA, decimalsA);
-        uint256 normalizedReserveB = normalize(reserveB, decimalsB);
-        require(normalizedReserveA > 0, "Zero reserveA");
-        price = (normalizedReserveB * 1e18) / normalizedReserveA;
+        price = listingContract.prices(0);
+        require(price > 0, "Invalid price from listing");
     }
 
     function _computeSwapImpact(
@@ -164,7 +153,7 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountIn,
         bool isBuyOrder
     ) internal view returns (uint256 price, uint256 amountOut) {
-        // Computes swap impact price and output amount, adjusted for flipped price (reserveB / reserveA)
+        // Computes swap impact using listingContract.prices(0) for consistency
         ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
@@ -183,9 +172,7 @@ contract CCUniPartial is CCMainPartial {
         context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
         context.amountInAfterFee = (amountIn * 997) / 1000;
         context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) / (context.normalizedReserveIn + context.amountInAfterFee);
-        context.price = context.normalizedReserveOut > context.amountOut
-            ? ((context.normalizedReserveIn + context.amountInAfterFee) * 1e18) / (context.normalizedReserveOut - context.amountOut)
-            : 0;
+        context.price = listingContract.prices(0);
         price = context.price;
         amountOut = context.amountOut;
     }
@@ -301,7 +288,7 @@ contract CCUniPartial is CCMainPartial {
             preBalanceIn: IERC20(tokenIn).balanceOf(address(this)),
             postBalanceIn: 0,
             amountInReceived: 0,
-            preBalanceOut: tokenOut == address(0) ? recipientAddress.balance : IERC20(tokenOut).balanceOf(recipientAddress),
+            preBalanceOut: IERC20(tokenOut).balanceOf(recipientAddress),
             postBalanceOut: 0,
             amountReceived: 0,
             amountOut: 0
@@ -338,9 +325,7 @@ contract CCUniPartial is CCMainPartial {
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Swap failed: ", reason)));
         }
-        data.postBalanceOut = context.tokenOut == address(0)
-            ? context.recipientAddress.balance
-            : IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        data.postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
         data.amountReceived = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
     }
 

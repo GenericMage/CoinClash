@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.21
+// Version: 0.0.22
 // Changes:
-// - v0.0.21: Renamed amountOut to amountReceived in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect it’s the output amount from Uniswap swap. Moved amountIn <= pending validation to _processBuyOrder and _processSellOrder. Compatible with CCUniPartial.sol v0.0.15.
+// - v0.0.22: Updated _checkPricing and _processBuyOrder/_processSellOrder to use listingContract.prices(0) instead of _computeCurrentPrice for price validation. Compatible with CCUniPartial.sol v0.0.19, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
+// - v0.0.21: Renamed amountOut to amountReceived in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect it’s the output amount from Uniswap swap. Moved amountIn <= pending validation to _processBuyOrder and _processSellOrder.
 // - v0.0.20: Added validation in _prepBuyOrderUpdate and _prepSellOrderUpdate to check pending amount before transfer. Enhanced error logging with specific revert reasons for insufficient pending amounts and transfer failures. Updated _computeAmountSent to return full context for pre/post balance checks.
 // - v0.0.19: Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to use 'depositor' instead of 'caller' in transactToken and transactNative calls to align with ICCListing.sol v0.0.7 and ICCLiquidity.sol v0.0.4. Ensured pre/post balance checks in _computeAmountSent and transfer functions.
 // - v0.0.18: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, completed _computeAmountSent with pre/post balance checks, removed transfer success checks in _prepBuyOrderUpdate and _prepSellOrderUpdate, added pre/post balance checks for transactToken.
@@ -11,7 +12,7 @@ pragma solidity ^0.8.2;
 // - v0.0.16: Removed duplicated _prepareSellSwapData, added routers function to ICCLiquidity.
 // - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
 // - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
-// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.15), CCSettlementRouter.sol (v0.0.8), CCMainPartial.sol (v0.0.14).
+// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.19), CCSettlementRouter.sol (v0.0.9), CCMainPartial.sol (v0.0.14).
 
 import "./CCUniPartial.sol";
 import "./CCMainPartial.sol";
@@ -44,7 +45,7 @@ contract CCSettlementPartial is CCUniPartial {
         bool isBuyOrder,
         uint256 pendingAmount
     ) internal view returns (bool) {
-        // Validates order pricing against max/min price constraints
+        // Validates order pricing against max/min price constraints using listingContract.prices(0)
         ICCListing listingContract = ICCListing(listingAddress);
         uint256 maxPrice;
         uint256 minPrice;
@@ -53,8 +54,8 @@ contract CCSettlementPartial is CCUniPartial {
         } else {
             (maxPrice, minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
         }
-        (uint256 impactPrice,) = _computeSwapImpact(listingAddress, pendingAmount, isBuyOrder);
-        return impactPrice <= maxPrice && impactPrice >= minPrice;
+        uint256 currentPrice = listingContract.prices(0);
+        return currentPrice <= maxPrice && currentPrice >= minPrice;
     }
 
     function _computeAmountSent(
@@ -141,7 +142,7 @@ contract CCSettlementPartial is CCUniPartial {
             return new ICCListing.UpdateType[](0);
         }
         (uint256 maxPrice, uint256 minPrice) = listingContract.getBuyOrderPricing(orderIdentifier);
-        uint256 currentPrice = _computeCurrentPrice(listingAddress);
+        uint256 currentPrice = listingContract.prices(0);
         if (currentPrice < minPrice || currentPrice > maxPrice) {
             return new ICCListing.UpdateType[](0);
         }
@@ -165,7 +166,7 @@ contract CCSettlementPartial is CCUniPartial {
             return new ICCListing.UpdateType[](0);
         }
         (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
-        uint256 currentPrice = _computeCurrentPrice(listingAddress);
+        uint256 currentPrice = listingContract.prices(0);
         if (currentPrice < minPrice || currentPrice > maxPrice) {
             return new ICCListing.UpdateType[](0);
         }
