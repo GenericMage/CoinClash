@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.19
+// Version: 0.0.20
 // Changes:
+// - v0.0.20: Updated _computeSwapImpact to use IERC20 balanceOf for tokenA and tokenB from listing contract instead of Uniswap V2 reserves for impact price calculations. Ensured decimals normalization aligns with listing contract's tokenA and tokenB decimals. Compatible with CCSettlementPartial.sol v0.0.23, CCSettlementRouter.sol v0.0.10, CCMainPartial.sol v0.0.15.
 // - v0.0.19: Modified _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Updated _computeSwapImpact to use prices(0) for consistency. Compatible with CCSettlementPartial.sol v0.0.22, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
 // - v0.0.18: Updated _computeCurrentPrice to use reserveB / reserveA to align with flipped price calculation in CCListingTemplate. Adjusted _computeSwapImpact to use (normalizedReserveIn + amountInAfterFee) / (normalizedReserveOut - amountOut) for buy orders and inverse for sell orders.
 // - v0.0.17: Fixed DeclarationError in _performETHBuySwap at line 372 by correcting `preBalanceOut` to `data.preBalanceOut`.
@@ -21,7 +22,7 @@ pragma solidity ^0.8.2;
 // - v0.0.4: Replaced ISSListingTemplate with ICCListing.
 // - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext.
 // - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext.
-// Compatible with CCMainPartial.sol (v0.0.14), CCSettlementPartial.sol (v0.0.22), CCSettlementRouter.sol (v0.0.9).
+// Compatible with CCMainPartial.sol (v0.0.15), CCSettlementPartial.sol (v0.0.23), CCSettlementRouter.sol (v0.0.10).
 
 import "./CCMainPartial.sol";
 
@@ -153,21 +154,17 @@ contract CCUniPartial is CCMainPartial {
         uint256 amountIn,
         bool isBuyOrder
     ) internal view returns (uint256 price, uint256 amountOut) {
-        // Computes swap impact using listingContract.prices(0) for consistency
+        // Computes swap impact using IERC20 balanceOf for tokenA and tokenB from listing contract
         ICCListing listingContract = ICCListing(listingAddress);
-        address pairAddress = listingContract.uniswapV2PairView();
-        require(pairAddress != address(0), "Uniswap V2 pair not set");
-        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        address token0 = pair.token0();
         address tokenA = listingContract.tokenA();
+        address tokenB = listingContract.tokenB();
         uint8 decimalsA = listingContract.decimalsA();
         uint8 decimalsB = listingContract.decimalsB();
         SwapImpactContext memory context;
         context.decimalsIn = isBuyOrder ? decimalsB : decimalsA;
         context.decimalsOut = isBuyOrder ? decimalsA : decimalsB;
-        context.reserveIn = isBuyOrder ? (tokenA == token0 ? reserve1 : reserve0) : (tokenA == token0 ? reserve0 : reserve1);
-        context.reserveOut = isBuyOrder ? (tokenA == token0 ? reserve0 : reserve1) : (tokenA == token0 ? reserve1 : reserve0);
+        context.reserveIn = isBuyOrder ? IERC20(tokenB).balanceOf(listingAddress) : IERC20(tokenA).balanceOf(listingAddress);
+        context.reserveOut = isBuyOrder ? IERC20(tokenA).balanceOf(listingAddress) : IERC20(tokenB).balanceOf(listingAddress);
         context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
         context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
         context.amountInAfterFee = (amountIn * 997) / 1000;
@@ -260,7 +257,7 @@ contract CCUniPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountIn
     ) internal view returns (SwapContext memory context, address[] memory path) {
-        // Prepares swap data for sell order
+        // Prepares swap data for sell tapas order
         ICCListing listingContract = ICCListing(listingAddress);
         context.listingContract = listingContract;
         (context.makerAddress, context.recipientAddress, context.status) = listingContract.getSellOrderCore(orderIdentifier);
@@ -307,7 +304,6 @@ contract CCUniPartial is CCMainPartial {
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed: ", reason)));
         }
-        require(data.amountInReceived > 0, "No tokens received");
         try IERC20(context.tokenIn).approve(uniswapV2Router, data.amountInReceived) {
             // Approval succeeded
         } catch Error(string memory reason) {
