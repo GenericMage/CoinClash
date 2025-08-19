@@ -5,15 +5,15 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.8 (updated 2025-08-18)
+**Version:** 0.0.9 (updated 2025-08-19)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.1.7)
 - `CCMainPartial.sol` (v0.0.14)
-- `CCUniPartial.sol` (v0.0.18)
-- `CCSettlementPartial.sol` (v0.0.21)
+- `CCUniPartial.sol` (v0.0.19)
+- `CCSettlementPartial.sol` (v0.0.22)
 
 ## Mappings
 - None defined directly in `CCSettlementRouter` or `CCSettlementPartial`. Relies on `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -32,32 +32,34 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ## External Functions and Call Trees
 ### `settleOrders(address listingAddress, uint256 step, uint256 maxIterations, bool isBuyOrder)`
-- **Purpose**: Iterates over pending buy or sell orders, validates price impact, processes swaps via Uniswap V2, and updates the listing state.
+- **Purpose**: Iterates over pending buy or sell orders, validates price impact, processes swaps via Uniswap V2, updates the listing state, and returns a reason if no orders are settled.
 - **Modifiers**: `nonReentrant`, `onlyValidListing(listingAddress)` (from `CCMainPartial`).
 - **Parameters**:
   - `listingAddress`: Address of the `ICCListing` contract.
   - `step`: Starting index for order processing (e.g., if `pendingBuyOrdersView` returns `[10,11,22,23,24]` and `step = 3`, processing starts at index 3, orderId `23`).
   - `maxIterations`: Maximum number of orders to process for gas control.
   - `isBuyOrder`: True for buy orders, false for sell orders.
-- **Returns**: None (reverts if no orders are settled).
+- **Returns**: `string memory` (reason if no orders settled, e.g., "No pending orders or invalid step", "No orders settled: price out of range or insufficient tokens", or empty string if successful).
 - **Internal Call Tree**:
   1. **Fetch Orders**: Calls `listingContract.pendingBuyOrdersView()` or `pendingSellOrdersView()` to get `orderIds`.
+     - Returns "No pending orders or invalid step" if `orderIds.length == 0` or `step >= orderIds.length`.
   2. **Iterate Orders**: Loops from `i = step` to `min(orderIds.length, step + maxIterations)`.
      - Fetches `pending` via `listingContract.getBuyOrderAmounts(orderId)` or `getSellOrderAmounts(orderId)`.
      - Skips if `pending == 0`.
   3. **Validate Pricing**: Calls `_checkPricing(listingAddress, orderId, isBuyOrder, pending)`:
      - Gets `maxPrice`, `minPrice` via `listingContract.getBuyOrderPricing` or `getSellOrderPricing`.
-     - Calls `_computeSwapImpact` (from `CCUniPartial`) to get `impactPrice`.
-     - Returns `true` if `impactPrice <= maxPrice && impactPrice >= minPrice`.
+     - Fetches `currentPrice` via `listingContract.prices(0)` (updated in v0.0.22).
+     - Returns `true` if `currentPrice <= maxPrice && currentPrice >= minPrice`, else skips.
   4. **Process Order**: Calls `_processBuyOrder` or `_processSellOrder` (from `CCSettlementPartial`):
      - **_processBuyOrder/_processSellOrder**:
        - Fetches `pending`, `filled`, `amountSent` via `getBuyOrderAmounts` or `getSellOrderAmounts`.
-       - Returns empty array if `pending == 0` or `currentPrice` (from `_computeCurrentPrice`) is outside `minPrice`/`maxPrice`.
+       - Returns empty array if `pending == 0` or `currentPrice` (from `listingContract.prices(0)`) is outside `minPrice`/`maxPrice`.
        - Calls `_computeMaxAmountIn` (from `CCUniPartial`) to get `maxAmountIn`.
        - Sets `swapAmount = min(maxAmountIn, pendingAmount)` with validation (`require(swapAmount <= pendingAmount)`).
        - Calls `_executePartialBuySwap` or `_executePartialSellSwap` (from `CCUniPartial`).
      - **_executePartialBuySwap/_executePartialSellSwap**:
        - Calls `_prepareSwapData` or `_prepareSellSwapData` to populate `SwapContext` and `path`.
+       - Returns empty array if `context.price == 0`.
        - For buy orders, if `tokenIn == address(0)`, calls `_executeBuyETHSwap`; else, `_executeBuyTokenSwap`.
        - For sell orders, if `tokenOut == address(0)`, calls `_executeSellETHSwapInternal`; else, `_executeSellTokenSwap`.
      - **_executeBuyETHSwap/_executeSellETHSwapInternal**:
@@ -76,10 +78,10 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
      - **_createBuyOrderUpdates/_createSellOrderUpdates**:
        - Returns `ICCListing.UpdateType[]` with updates for amount received and order status.
   5. **Update Listing**: Calls `listingContract.update(updates)` with try-catch, reverting with decoded error reasons (e.g., `"Update failed for order <orderId>: <reason>"`).
-  6. **Validation**: Increments `count` on successful updates, reverts if `count == 0` with `"No orders settled"`.
+  6. **Validation**: Increments `count` on successful updates, returns "No orders settled: price out of range or insufficient tokens" if `count == 0`, else empty string.
 - **Error Handling**:
-  - Reverts if `uniswapV2PairView` is `address(0)` or reserves are zero.
-  - Catches errors in `transactNative`, `transactToken`, `approve`, `swap`, and `update` calls, reverting with decoded reasons.
+  - Reverts only on catastrophic failures (e.g., failed `transactNative`, `transactToken`, `approve`, `swap`, or `update`) with decoded reasons.
+  - Returns descriptive strings for non-catastrophic cases (e.g., no pending orders, invalid step, price out of range).
   - Skips invalid orders (zero pending, invalid pricing) without state changes.
 - **Gas Optimization**:
   - Uses `step` to skip processed orders.
@@ -89,12 +91,12 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 ## Formulas
 Uniswap V2 formulas (from `CCUniPartial.sol`):
 - **Price Calculation** (`_computeCurrentPrice`):
-  - `price = (normalizedReserveB * 1e18) / normalizedReserveA` (updated to reflect flipped price in CCListingTemplate).
-  - Uses `normalize(reserve, decimals)` for 1e18 precision.
+  - `price = listingContract.prices(0)` (updated in v0.0.19).
+  - Reverts if `price == 0`.
 - **Swap Impact** (`_computeSwapImpact`):
   - `amountInAfterFee = (amountIn * 997) / 1000` (0.3% Uniswap fee).
   - `amountOut = (amountInAfterFee * normalizedReserveOut) / (normalizedReserveIn + amountInAfterFee)`.
-  - `price = ((normalizedReserveIn + amountInAfterFee) * 1e18) / (normalizedReserveOut - amountOut)` if `normalizedReserveOut > amountOut`, else `0`.
+  - `price = listingContract.prices(0)` (updated in v0.0.19).
 - **Max Amount In** (`_computeMaxAmountIn`):
   - `maxImpactPercent = isBuyOrder ? (maxPrice * 100e18 / currentPrice - 100e18) / 1e18 : (currentPrice * 100e18 / minPrice - 100e18) / 1e18`.
   - `maxAmountIn = min((normalizedReserveIn * maxImpactPercent) / (100 * 2), pendingAmount)`.
@@ -104,10 +106,10 @@ Uniswap V2 formulas (from `CCUniPartial.sol`):
 
 ## Internal Functions
 - **_getTokenAndDecimals** (`CCSettlementPartial`): Returns `tokenAddress` and `tokenDecimals` from `listingContract.tokenA()`/`tokenB()` and `decimalsA()`/`decimalsB()`.
-- **_checkPricing** (`CCSettlementPartial`): Validates `impactPrice` against `maxPrice`/`minPrice` using `_computeSwapImpact`.
+- **_checkPricing** (`CCSettlementPartial`): Validates `currentPrice` (from `listingContract.prices(0)`) against `maxPrice`/`minPrice`.
 - **_computeAmountSent** (`CCSettlementPartial`): Returns pre-transfer balance for recipient (ETH or token).
 - **_prepBuyOrderUpdate/_prepSellOrderUpdate** (`CCSettlementPartial`): Prepares `PrepOrderUpdateResult` with balance checks, calls `transactNative` or `transactToken`.
-- **_processBuyOrder/_processSellOrder** (`CCSettlementPartial`): Validates `pendingAmount`, `currentPrice`, and `swapAmount`, calls `_executePartialBuySwap` or `_executePartialSellSwap`.
+- **_processBuyOrder/_processSellOrder** (`CCSettlementPartial`): Validates `pendingAmount`, `currentPrice` (from `listingContract.prices(0)`), and `swapAmount`, calls `_executePartialBuySwap` or `_executePartialSellSwap`.
 - **_computeCurrentPrice**, `_computeSwapImpact**, `_fetchReserves**, `_computeImpactPercent**, `_computeMaxAmount**, `_prepareSwapData**, `_prepareSellSwapData**, `_prepareTokenSwap**, `_executeTokenSwap**, `_performETHBuySwap**, `_performETHSellSwap**, `_finalizeTokenSwap**, `_finalizeSellTokenSwap**, `_executeBuyETHSwap**, `_executeSellETHSwapInternal**, `_executeBuyTokenSwap**, `_executeSellTokenSwap**, `_executePartialBuySwap**, `_executePartialSellSwap**, `_createBuyOrderUpdates**, `_createSellOrderUpdates** (`CCUniPartial`): Handle swap logic, balance checks, and update generation.
 
 ## Limitations and Assumptions
@@ -120,8 +122,8 @@ Uniswap V2 formulas (from `CCUniPartial.sol`):
   - Buy: `transactToken(tokenB)` or `transactNative` → `swapExactTokensForTokens` or `swapExactETHForTokens` → `amountReceived` (tokenA).
   - Sell: `transactToken(tokenA)` → `swapExactTokensForTokens` or `swapExactTokensForETH` → `amountReceived` (tokenB or ETH).
 - **Price Impact**:
-  - Buy: Increases price (`reserveB` increases, `reserveA` decreases).
-  - Sell: Decreases price (`reserveA` increases, `reserveB` decreases).
+  - Buy: Increases price (handled by `listingContract.prices(0)`).
+  - Sell: Decreases price (handled by `listingContract.prices(0)`).
 
 ## Additional Details
 - **Reentrancy Protection**: `nonReentrant` on `settleOrders`.
@@ -133,8 +135,8 @@ Uniswap V2 formulas (from `CCUniPartial.sol`):
   - `path`: `[tokenB, tokenA]` (buy), `[tokenA, tokenB]` (sell).
   - `to`: `recipientAddress`.
   - `deadline`: `block.timestamp + 300`.
-- **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `update` with decoded reasons (updated in `CCUniPartial.sol` v0.0.18).
+- **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swapソー`, and `update` with decoded reasons (updated in `CCUniPartial.sol` v0.0.19).
 - **Changes**:
-  - `CCSettlementRouter.sol` (v0.0.8): Removed redundant `uint2str`, inherits from `CCSettlementPartial`.
-  - `CCSettlementPartial.sol` (v0.0.21): Renamed `amountOut` to `amountReceived`, moved `amountIn <= pending` validation to `_processBuyOrder/_processSellOrder`.
-  - `CCUniPartial.sol` (v0.0.18): Updated `_computeCurrentPrice` to `reserveB / reserveA`, adjusted `_computeSwapImpact` for flipped price.
+  - `CCSettlementRouter.sol` (v0.0.9): Removed `require(count > 0)` for graceful degradation, returns detailed reasons for no settlements.
+  - `CCSettlementPartial.sol` (v0.0.22): Uses `listingContract.prices(0)` for pricing in `_checkPricing`, `_processBuyOrder`, `_processSellOrder`.
+  - `CCUniPartial.sol` (v0.0.19): Uses `listingContract.prices(0)` in `_computeCurrentPrice` and `_computeSwapImpact`.
