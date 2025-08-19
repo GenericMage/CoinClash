@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.14
+// Version: 0.0.15
 // Changes:
-// - v0.0.14: Added missing _prepBuyLiquidUpdates and _prepSellLiquidUpdates functions to fix DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid (lines 326, 345). 
+// - v0.0.15: Updated _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Modified _computeSwapImpact to use balanceOf for Uniswap V2 LP tokens for reserve data. Added PriceOutOfBounds event emission in _processSingleOrder for graceful degradation when price is out of bounds.
+// - v0.0.14: Added missing _prepBuyLiquidUpdates and _prepSellLiquidUpdates functions to fix DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid (lines 326, 345).
 // - v0.0.13: Fixed TypeError in _processSingleOrder by converting ICCListing.UpdateType[] to ICCLiquidity.UpdateType[] for liquidityContract.update call. Retained flipped price calculation (reserveB / reserveA) and settlement logic from v0.0.12.
 // - v0.0.12: Updated _computeSwapImpact to align with flipped price calculation (reserveB / reserveA) from CCListingTemplate.sol v0.1.8. Adjusted _processSingleOrder to settle at current price if impact price is within max/min bounds, using _computeCurrentPrice from CCUniPartial.sol. Ensured pre/post balance checks in _prepBuyOrderUpdate and _prepSellOrderUpdate align with CCSettlementPartial.sol v0.0.21.
-// Compatible with CCListingTemplate.sol (v0.1.8), CCMainPartial.sol (v0.0.14), CCLiquidRouter.sol (v0.0.9), CCLiquidityTemplate.sol (v0.1.1).
+// Compatible with CCListingTemplate.sol (v0.1.8), CCMainPartial.sol (v0.0.14), CCLiquidRouter.sol (v0.0.10), CCLiquidityTemplate.sol (v0.1.1).
 
 import "./CCMainPartial.sol";
 
 interface IUniswapV2Pair {
     function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
     function token0() external view returns (address);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 contract CCLiquidPartial is CCMainPartial {
@@ -70,17 +72,19 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 amountOut;
     }
 
+    // Emitted when price is out of bounds
+    event PriceOutOfBounds(address indexed listingAddress, uint256 orderId, uint256 impactPrice, uint256 maxPrice, uint256 minPrice);
+
     function _getSwapReserves(address listingAddress, bool isBuyOrder) private view returns (SwapImpactContext memory context) {
-        // Retrieves reserves and decimals for swap impact calculation
+        // Retrieves reserves and decimals for swap impact calculation using balanceOf
         ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
         require(pairAddress != address(0), "Uniswap V2 pair not set");
         IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
         address token0 = pair.token0();
         bool isToken0In = isBuyOrder ? listingContract.tokenB() == token0 : listingContract.tokenA() == token0;
-        context.reserveIn = isToken0In ? uint256(reserve0) : uint256(reserve1);
-        context.reserveOut = isToken0In ? uint256(reserve1) : uint256(reserve0);
+        context.reserveIn = isToken0In ? IERC20(token0).balanceOf(pairAddress) : IERC20(listingContract.tokenB()).balanceOf(pairAddress);
+        context.reserveOut = isToken0In ? IERC20(listingContract.tokenA()).balanceOf(pairAddress) : IERC20(token0).balanceOf(pairAddress);
         context.decimalsIn = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
         context.decimalsOut = isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB();
         context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
@@ -88,26 +92,14 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _computeCurrentPrice(address listingAddress) private view returns (uint256 price) {
-        // Computes current price as reserveB / reserveA to align with CCListingTemplate
+        // Fetches current price from listingContract.prices(0)
         ICCListing listingContract = ICCListing(listingAddress);
-        address pairAddress = listingContract.uniswapV2PairView();
-        require(pairAddress != address(0), "Uniswap V2 pair not set");
-        IUniswapV2Pair pair = IUniswapV2Pair(pairAddress);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        address token0 = pair.token0();
-        address tokenA = listingContract.tokenA();
-        uint8 decimalsA = listingContract.decimalsA();
-        uint8 decimalsB = listingContract.decimalsB();
-        uint256 reserveA = tokenA == token0 ? reserve0 : reserve1;
-        uint256 reserveB = tokenA == token0 ? reserve1 : reserve0;
-        uint256 normalizedReserveA = normalize(reserveA, decimalsA);
-        uint256 normalizedReserveB = normalize(reserveB, decimalsB);
-        require(normalizedReserveA > 0, "Zero reserveA");
-        price = (normalizedReserveB * 1e18) / normalizedReserveA;
+        price = listingContract.prices(0);
+        require(price > 0, "Invalid price from listing");
     }
 
     function _computeSwapImpact(address listingAddress, uint256 amountIn, bool isBuyOrder) private view returns (uint256 price, uint256 amountOut) {
-        // Computes swap impact price and output amount, aligned with reserveB / reserveA
+        // Computes swap impact price and output amount using balanceOf reserves
         SwapImpactContext memory context = _getSwapReserves(listingAddress, isBuyOrder);
         require(context.normalizedReserveIn > 0 && context.normalizedReserveOut > 0, "Zero reserves");
         context.amountInAfterFee = (amountIn * 997) / 1000; // 0.3% fee
@@ -314,7 +306,12 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 pendingAmount
     ) internal returns (ICCListing.UpdateType[] memory) {
         // Prepares buy order liquidation updates with price validation
-        require(_checkPricing(address(context.listingContract), orderIdentifier, true, pendingAmount), "Invalid pricing");
+        if (!_checkPricing(address(context.listingContract), orderIdentifier, true, pendingAmount)) {
+            (uint256 maxPrice, uint256 minPrice) = context.listingContract.getBuyOrderPricing(orderIdentifier);
+            (uint256 impactPrice,) = _computeSwapImpact(address(context.listingContract), pendingAmount, true);
+            emit PriceOutOfBounds(address(context.listingContract), orderIdentifier, impactPrice, maxPrice, minPrice);
+            return new ICCListing.UpdateType[](0);
+        }
         (uint256 amountOut, , ) = _prepareLiquidityTransaction(address(context.listingContract), pendingAmount, true);
         PrepOrderUpdateResult memory result = _prepBuyOrderUpdate(address(context.listingContract), orderIdentifier, amountOut);
         if (result.normalizedReceived == 0) {
@@ -337,7 +334,12 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 pendingAmount
     ) internal returns (ICCListing.UpdateType[] memory) {
         // Prepares sell order liquidation updates with price validation
-        require(_checkPricing(address(context.listingContract), orderIdentifier, false, pendingAmount), "Invalid pricing");
+        if (!_checkPricing(address(context.listingContract), orderIdentifier, false, pendingAmount)) {
+            (uint256 maxPrice, uint256 minPrice) = context.listingContract.getSellOrderPricing(orderIdentifier);
+            (uint256 impactPrice,) = _computeSwapImpact(address(context.listingContract), pendingAmount, false);
+            emit PriceOutOfBounds(address(context.listingContract), orderIdentifier, impactPrice, maxPrice, minPrice);
+            return new ICCListing.UpdateType[](0);
+        }
         (uint256 amountOut, , ) = _prepareLiquidityTransaction(address(context.listingContract), pendingAmount, false);
         PrepOrderUpdateResult memory result = _prepSellOrderUpdate(address(context.listingContract), orderIdentifier, amountOut);
         if (result.normalizedReceived == 0) {
@@ -442,6 +444,7 @@ contract CCLiquidPartial is CCMainPartial {
                 }
             }
         } else {
+            emit PriceOutOfBounds(listingAddress, orderIdentifier, impactPrice, maxPrice, minPrice);
             updates = new ICCListing.UpdateType[](0);
         }
     }
