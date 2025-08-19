@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.8
+// Version: 0.1.9
 // Changes:
-// - v0.1.8: Modified price calculation in prices, update, transactToken, and transactNative functions to use reserveB / reserveA * 1e18 instead of reserveA / reserveB * 1e18.
+// - v0.1.9: Modified price calculation in prices, update, transactToken, and transactNative to use IERC20.balanceOf for _tokenA and _tokenB from _uniswapV2Pair instead of getReserves, addressing incorrect price scaling.
+// - v0.1.8: Modified price calculation in prices, update, transactToken, and transactNative to use reserveB / reserveA * 1e18 instead of reserveA / reserveB * 1e18.
 // - v0.1.7: Refactored globalizeUpdate to occur at end of update, fetching latest order ID and details (maker, token) for ICCGlobalizer.globalizeOrders call.
 // - v0.1.6: Modified globalizeUpdate to always call ICCGlobalizer.globalizeOrders for the maker with appropriate token, removing all checks for order existence.
 // - v0.1.5: Updated globalizeUpdate to call ICCGlobalizer.globalizeOrders with token (_tokenB for buy, _tokenA for sell) instead of listing address, aligning with new ICCGlobalizer interface (v0.2.1).
@@ -16,6 +17,7 @@ pragma solidity ^0.8.2;
 interface IERC20 {
     function decimals() external view returns (uint8);
     function transfer(address recipient, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 interface ICCListing {
@@ -35,7 +37,6 @@ interface ICCListing {
 }
 
 interface IUniswapV2Pair {
-    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
     function token0() external view returns (address);
     function token1() external view returns (address);
 }
@@ -425,17 +426,23 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
                 _historicalData.push(data);
             }
         }
-        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
-            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
-            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
-            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
-            _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        uint256 reserveA;
+        uint256 reserveB;
+        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
+            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
         } catch {
+            reserveA = 0;
         }
+        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
+            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        } catch {
+            reserveB = 0;
+        }
+        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
         if (maker != address(0)) {
             _updateRegistry(maker);
         }
-        globalizeUpdate(); // Moved to end, using latest order details
+        globalizeUpdate();
         emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
     }
 
@@ -483,13 +490,19 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
             _volumeBalance.yBalance += normalizedAmount;
             _volumeBalance.yVolume += normalizedAmount;
         }
-        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
-            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
-            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
-            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
-            _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        uint256 reserveA;
+        uint256 reserveB;
+        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
+            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
         } catch {
+            reserveA = 0;
         }
+        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
+            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        } catch {
+            reserveB = 0;
+        }
+        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
         require(IERC20(token).transfer(recipient, amount), "Token transfer failed");
         emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
     }
@@ -506,13 +519,19 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
             _volumeBalance.yBalance += normalizedAmount;
             _volumeBalance.yVolume += normalizedAmount;
         }
-        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
-            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
-            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
-            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
-            _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        uint256 reserveA;
+        uint256 reserveB;
+        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
+            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
         } catch {
+            reserveA = 0;
         }
+        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
+            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        } catch {
+            reserveB = 0;
+        }
+        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
         (bool success, ) = recipient.call{value: amount}("");
         require(success, "Native transfer failed");
         emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
@@ -594,16 +613,21 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         return _uniswapV2Pair;
     }
 
-    // Computes current price from Uniswap V2 reserves
+    // Computes current price from Uniswap V2 pair token balances
     function prices(uint256) external view returns (uint256 price) {
-        try IUniswapV2Pair(_uniswapV2Pair).getReserves() returns (uint112 reserve0, uint112 reserve1, uint32) {
-            address token0 = IUniswapV2Pair(_uniswapV2Pair).token0();
-            uint256 reserveA = _tokenA == token0 ? reserve0 : reserve1;
-            uint256 reserveB = _tokenA == token0 ? reserve1 : reserve0;
-            return reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        uint256 reserveA;
+        uint256 reserveB;
+        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
+            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
         } catch {
             return _currentPrice;
         }
+        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
+            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        } catch {
+            return _currentPrice;
+        }
+        return reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
     }
 
     // Returns token pair
