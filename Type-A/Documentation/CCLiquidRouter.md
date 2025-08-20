@@ -5,18 +5,18 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.11 (updated 2025-08-19)
+**Version:** 0.0.12 (updated 2025-08-20)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
 
-**Compatibility:** CCListingTemplate.sol (v0.1.8), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.15), CCLiquidityRouter.sol (v0.0.27), CCLiquidityTemplate.sol (v0.1.1).
+**Compatibility:** CCListingTemplate.sol (v0.1.8), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.16), CCLiquidityRouter.sol (v0.0.27), CCLiquidityTemplate.sol (v0.1.1).
 
 ## Mappings
 - None defined in `CCLiquidRouter`. Uses `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
 
 ## Structs
 - **OrderContext** (`CCLiquidPartial`): Holds `listingContract` (ICCListing), `tokenIn` (address), `tokenOut` (address), `liquidityAddr` (address).
-- **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized).
+- **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `token Reel`, `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized).
 - **BuyOrderUpdateContext** (`CCLiquidPartial`): Holds `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, tokenA for buy).
 - **SellOrderUpdateContext** (`CCLiquidPartial`): Same as `BuyOrderUpdateContext`, with `amountSent` (tokenB for sell).
 - **OrderBatchContext** (`CCLiquidPartial`): Holds `listingAddress` (address), `maxIterations` (uint256), `isBuyOrder` (bool).
@@ -83,7 +83,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
             - Calls `_prepBuyOrderUpdate`:
               - Transfers principal (tokenB) to liquidity contract via `listingContract.transactToken` or `transactNative` with pre/post balance checks.
               - Transfers settlement (tokenA) to recipient via `liquidityContract.transactToken` or `transactNative`, capturing actual amount sent.
-              - Returns `UpdateType[]` via `_createBuyOrderUpdates`.
+              - Returns `UpdateType[]` via `_createBuyOrderUpdates` (sets `addr = makerAddress` for registry update).
           - Updates liquidity via `ICCLiquidity.update` with `depositor = address(this)`.
         - Else, emits `PriceOutOfBounds` and returns empty `UpdateType[]`.
     - Resizes updates via `_finalizeUpdates` and calls `listingContract.update` if updates exist.
@@ -92,7 +92,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 ### settleSellLiquid(address listingAddress, uint256 maxIterations)
 - **Parameters**: Same as `settleBuyLiquid`.
 - **Behavior**: Settles sell orders by transferring principal (tokenA) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenB) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (xBalance). Emits `NoPendingOrders` or `InsufficientBalance` and returns if no orders or insufficient xBalance. Updates liquidity with tokenA and calls `listingContract.update`. Uses `executeSingleSellLiquid`, `_prepSellLiquidUpdates`.
-- **Internal Call Flow**: Mirrors `settleBuyLiquid`, with `isBuyOrder = false`, using `getSellOrderAmounts`, `getSellOrderPricing`, `_prepSellLiquidUpdates`, and checking `xBalance`.
+- **Internal Call Flow**: Mirrors `settleBuyLiquid`, with `isBuyOrder = false`, using `getSellOrderAmounts`, `getSellOrderPricing`, `_prepSellLiquidUpdates` (sets `addr = makerAddress` for registry update), and checking `xBalance`.
 - **Graceful Degradation**: Same as `settleBuyLiquid`, with events for no orders or insufficient balance.
 
 ## Internal Functions (CCLiquidPartial)
@@ -102,8 +102,8 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 - **_checkPricing**: Validates `impactPrice` within `minPrice` and `maxPrice`.
 - **_prepareLiquidityTransaction**: Computes `amountOut`, checks liquidity (`xAmount` for sell, `yAmount` for buy).
 - **_prepBuy/SellOrderUpdate**: Handles transfers (principal to liquidity, settlement to recipient) with pre/post balance checks, returns `PrepOrderUpdateResult`.
-- **_prepBuy/SellLiquidUpdates**: Validates pricing, computes `amountOut`, prepares `UpdateType[]`; emits `PriceOutOfBounds` if invalid.
-- **_createBuy/SellOrderUpdates**: Builds `UpdateType[]` for order updates.
+- **_prepBuy/SellLiquidUpdates**: Validates pricing, computes `amountOut`, prepares `UpdateType[]` with `addr = makerAddress`; emits `PriceOutOfBounds` if invalid.
+- **_createBuy/SellOrderUpdates**: Builds `UpdateType[]` for order updates with `addr = makerAddress` for registry updates.
 - **_collectOrderIdentifiers**: Fetches order IDs up to `maxIterations`.
 - **_processSingleOrder**: Validates prices, executes order, updates liquidity; emits `PriceOutOfBounds` if invalid.
 - **_processOrderBatch**: Iterates orders, collects updates.
@@ -120,6 +120,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
   - Hidden state variables (`agent`, `uniswapV2Router`) accessed via `agentView`, `uniswapV2RouterView`.
   - Avoids reserved keywords, `virtual`/`override`.
   - Graceful degradation with events (`NoPendingOrders`, `InsufficientBalance`, `PriceOutOfBounds`) and revert reasons (e.g., "Invalid pricing").
+  - Sets `addr = makerAddress` in `UpdateType` structs for accurate registry updates.
 
 ## Limitations and Assumptions
 - Relies on `ICCLiquidity` for settlements, not direct Uniswap V2 swaps.

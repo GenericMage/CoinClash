@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.15
+// Version: 0.0.16
 // Changes:
+// - v0.0.16: Fixed issue in _prepBuyLiquidUpdates and _prepSellLiquidUpdates by setting addr to makerAddress in ICCListing.UpdateType structs to ensure correct maker address is passed for registry updates in listingContract.update call.
 // - v0.0.15: Updated _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Modified _computeSwapImpact to use balanceOf for Uniswap V2 LP tokens for reserve data. Added PriceOutOfBounds event emission in _processSingleOrder for graceful degradation when price is out of bounds.
 // - v0.0.14: Added missing _prepBuyLiquidUpdates and _prepSellLiquidUpdates functions to fix DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid (lines 326, 345).
 // - v0.0.13: Fixed TypeError in _processSingleOrder by converting ICCListing.UpdateType[] to ICCLiquidity.UpdateType[] for liquidityContract.update call. Retained flipped price calculation (reserveB / reserveA) and settlement logic from v0.0.12.
@@ -248,7 +249,7 @@ contract CCLiquidPartial is CCMainPartial {
             structId: 2,
             index: orderIdentifier,
             value: updateContext.normalizedReceived,
-            addr: address(0),
+            addr: updateContext.makerAddress, // Set makerAddress for registry update
             recipient: address(0),
             maxPrice: 0,
             minPrice: 0,
@@ -280,7 +281,7 @@ contract CCLiquidPartial is CCMainPartial {
             structId: 2,
             index: orderIdentifier,
             value: updateContext.normalizedReceived,
-            addr: address(0),
+            addr: updateContext.makerAddress, // Set makerAddress for registry update
             recipient: address(0),
             maxPrice: 0,
             minPrice: 0,
