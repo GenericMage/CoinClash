@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.22
+// Version: 0.0.23
 // Changes:
+// - v0.0.23: Modified _processBuyOrder and _processSellOrder to include makerAddress in UpdateType structs, fixing 'Update failed for order 0: Unknown error' by ensuring valid maker address for registry updates in CCListingTemplate.sol.
 // - v0.0.22: Updated _checkPricing and _processBuyOrder/_processSellOrder to use listingContract.prices(0) instead of _computeCurrentPrice for price validation. Compatible with CCUniPartial.sol v0.0.19, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
 // - v0.0.21: Renamed amountOut to amountReceived in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect it’s the output amount from Uniswap swap. Moved amountIn <= pending validation to _processBuyOrder and _processSellOrder.
 // - v0.0.20: Added validation in _prepBuyOrderUpdate and _prepSellOrderUpdate to check pending amount before transfer. Enhanced error logging with specific revert reasons for insufficient pending amounts and transfer failures. Updated _computeAmountSent to return full context for pre/post balance checks.
@@ -138,6 +139,7 @@ contract CCSettlementPartial is CCUniPartial {
     ) internal returns (ICCListing.UpdateType[] memory updates) {
         // Processes a single buy order using Uniswap V2 swap
         (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getBuyOrderAmounts(orderIdentifier);
+        (address makerAddress, address recipientAddress, uint8 status) = listingContract.getBuyOrderCore(orderIdentifier);
         if (pendingAmount == 0) {
             return new ICCListing.UpdateType[](0);
         }
@@ -153,6 +155,13 @@ contract CCSettlementPartial is CCUniPartial {
             return new ICCListing.UpdateType[](0);
         }
         updates = _executePartialBuySwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
+        // Ensure makerAddress is included in updates
+        for (uint256 i = 0; i < updates.length; i++) {
+            if (updates[i].structId == 0) {
+                updates[i].addr = makerAddress;
+                updates[i].recipient = recipientAddress;
+            }
+        }
     }
 
     function _processSellOrder(
@@ -162,6 +171,7 @@ contract CCSettlementPartial is CCUniPartial {
     ) internal returns (ICCListing.UpdateType[] memory updates) {
         // Processes a single sell order using Uniswap V2 swap
         (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getSellOrderAmounts(orderIdentifier);
+        (address makerAddress, address recipientAddress, uint8 status) = listingContract.getSellOrderCore(orderIdentifier);
         if (pendingAmount == 0) {
             return new ICCListing.UpdateType[](0);
         }
@@ -177,6 +187,13 @@ contract CCSettlementPartial is CCUniPartial {
             return new ICCListing.UpdateType[](0);
         }
         updates = _executePartialSellSwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
+        // Ensure makerAddress is included in updates
+        for (uint256 i = 0; i < updates.length; i++) {
+            if (updates[i].structId == 0) {
+                updates[i].addr = makerAddress;
+                updates[i].recipient = recipientAddress;
+            }
+        }
     }
 
     function uint2str(uint256 _i) internal pure returns (string memory str) {
