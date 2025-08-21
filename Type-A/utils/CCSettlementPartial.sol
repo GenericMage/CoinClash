@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.24
+// Version: 0.0.27
 // Changes:
+// - v0.0.27: Fixed TypeError by removing `try` from `_executePartialBuySwap` and `_executePartialSellSwap` calls in `_processBuyOrder` and `_processSellOrder`, as they are internal functions. Ensured direct calls to internal functions inherited from CCUniPartial.sol. Maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals. Ensured compatibility with CCListingTemplate.sol v0.1.12.
+// - v0.0.26: Fixed TypeError by removing `this.` from `_executePartialBuySwap` and `_executePartialSellSwap` calls, as they are internal functions inherited from CCUniPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
+// - v0.0.25: Enhanced error logging in _processBuyOrder and _processSellOrder to capture specific failure reasons: failed token transfer, Uniswap swap failures (slippage, insufficient liquidity), failed approval. Added validation for non-zero swap amount and token addresses. Ensured compatibility with CCListingTemplate.sol v0.1.12 update function clearing pending orders. Replaced "Unknown error" with detailed revert reasons.
 // - v0.0.24: Updated _processBuyOrder and _processSellOrder to set makerAddress and recipientAddress for all updates, not just Core updates, to ensure compatibility with CCListingTemplate.sol update function and prevent 'Update failed for order 0: Unknown error'.
 // - v0.0.23: Modified _processBuyOrder and _processSellOrder to include makerAddress in UpdateType structs, fixing 'Update failed for order 0: Unknown error' by ensuring valid maker address for registry updates in CCListingTemplate.sol.
 // - v0.0.22: Updated _checkPricing and _processBuyOrder/_processSellOrder to use listingContract.prices(0) instead of _computeCurrentPrice for price validation. Compatible with CCUniPartial.sol v0.0.19, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
@@ -14,7 +17,7 @@ pragma solidity ^0.8.2;
 // - v0.0.16: Removed duplicated _prepareSellSwapData, added routers function to ICCLiquidity.
 // - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
 // - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
-// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.21), CCSettlementRouter.sol (v0.0.10), CCMainPartial.sol (v0.0.15).
+// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.22), CCSettlementRouter.sol (v0.0.11), CCMainPartial.sol (v0.0.15).
 
 import "./CCUniPartial.sol";
 import "./CCMainPartial.sol";
@@ -39,6 +42,9 @@ contract CCSettlementPartial is CCUniPartial {
         ICCListing listingContract = ICCListing(listingAddress);
         tokenAddress = isBuyOrder ? listingContract.tokenB() : listingContract.tokenA();
         tokenDecimals = isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA();
+        if (tokenAddress == address(0) && !isBuyOrder) {
+            revert("Invalid token address for sell order");
+        }
     }
 
     function _checkPricing(
@@ -57,6 +63,9 @@ contract CCSettlementPartial is CCUniPartial {
             (maxPrice, minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
         }
         uint256 currentPrice = listingContract.prices(0);
+        if (currentPrice == 0) {
+            return false;
+        }
         return currentPrice <= maxPrice && currentPrice >= minPrice;
     }
 
@@ -79,8 +88,14 @@ contract CCSettlementPartial is CCUniPartial {
         // Prepares buy order update data, including token transfer with validation
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
+        if (pending == 0) {
+            revert(string(abi.encodePacked("No pending amount for buy order ", uint2str(orderIdentifier))));
+        }
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
+        if (result.orderStatus != 1) {
+            revert(string(abi.encodePacked("Invalid status for buy order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
+        }
         uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
         uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
         if (result.tokenAddress == address(0)) {
@@ -98,7 +113,10 @@ contract CCSettlementPartial is CCUniPartial {
                 revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
             }
         }
-        result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
+        if (result.amountReceived == 0) {
+            revert(string(abi.encodePacked("No tokens received for buy order ", uint2str(orderIdentifier))));
+        }
+        result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
         result.amountSent = result.amountReceived;
     }
 
@@ -110,8 +128,14 @@ contract CCSettlementPartial is CCUniPartial {
         // Prepares sell order update data, including token transfer with validation
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
+        if (pending == 0) {
+            revert(string(abi.encodePacked("No pending amount for sell order ", uint2str(orderIdentifier))));
+        }
         (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
+        if (result.orderStatus != 1) {
+            revert(string(abi.encodePacked("Invalid status for sell order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
+        }
         uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
         uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
         if (result.tokenAddress == address(0)) {
@@ -129,7 +153,10 @@ contract CCSettlementPartial is CCUniPartial {
                 revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
             }
         }
-        result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
+        if (result.amountReceived == 0) {
+            revert(string(abi.encodePacked("No tokens received for sell order ", uint2str(orderIdentifier))));
+        }
+        result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
         result.amountSent = result.amountReceived;
     }
 
@@ -139,24 +166,34 @@ contract CCSettlementPartial is CCUniPartial {
         ICCListing listingContract
     ) internal returns (ICCListing.UpdateType[] memory updates) {
         // Processes a single buy order using Uniswap V2 swap
+        if (uniswapV2Router == address(0)) {
+            revert(string(abi.encodePacked("Missing Uniswap V2 router for buy order ", uint2str(orderIdentifier))));
+        }
         (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getBuyOrderAmounts(orderIdentifier);
         (address makerAddress, address recipientAddress, uint8 status) = listingContract.getBuyOrderCore(orderIdentifier);
         if (pendingAmount == 0) {
-            return new ICCListing.UpdateType[](0);
+            revert(string(abi.encodePacked("No pending amount for buy order ", uint2str(orderIdentifier))));
+        }
+        if (status != 1) {
+            revert(string(abi.encodePacked("Invalid status for buy order ", uint2str(orderIdentifier), ": ", uint2str(status))));
         }
         (uint256 maxPrice, uint256 minPrice) = listingContract.getBuyOrderPricing(orderIdentifier);
         uint256 currentPrice = listingContract.prices(0);
+        if (currentPrice == 0) {
+            revert(string(abi.encodePacked("Invalid current price for buy order ", uint2str(orderIdentifier))));
+        }
         if (currentPrice < minPrice || currentPrice > maxPrice) {
             return new ICCListing.UpdateType[](0);
         }
         uint256 maxAmountIn = _computeMaxAmountIn(listingAddress, maxPrice, minPrice, pendingAmount, true);
         uint256 swapAmount = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
-        require(swapAmount <= pendingAmount, "Swap amount exceeds pending");
         if (swapAmount == 0) {
             return new ICCListing.UpdateType[](0);
         }
         updates = _executePartialBuySwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
-        // Ensure makerAddress and recipientAddress are included in all updates
+        if (updates.length == 0) {
+            return updates;
+        }
         for (uint256 i = 0; i < updates.length; i++) {
             updates[i].addr = makerAddress;
             updates[i].recipient = recipientAddress;
@@ -169,24 +206,34 @@ contract CCSettlementPartial is CCUniPartial {
         ICCListing listingContract
     ) internal returns (ICCListing.UpdateType[] memory updates) {
         // Processes a single sell order using Uniswap V2 swap
+        if (uniswapV2Router == address(0)) {
+            revert(string(abi.encodePacked("Missing Uniswap V2 router for sell order ", uint2str(orderIdentifier))));
+        }
         (uint256 pendingAmount, uint256 filled, uint256 amountSent) = listingContract.getSellOrderAmounts(orderIdentifier);
         (address makerAddress, address recipientAddress, uint8 status) = listingContract.getSellOrderCore(orderIdentifier);
         if (pendingAmount == 0) {
-            return new ICCListing.UpdateType[](0);
+            revert(string(abi.encodePacked("No pending amount for sell order ", uint2str(orderIdentifier))));
+        }
+        if (status != 1) {
+            revert(string(abi.encodePacked("Invalid status for sell order ", uint2str(orderIdentifier), ": ", uint2str(status))));
         }
         (uint256 maxPrice, uint256 minPrice) = listingContract.getSellOrderPricing(orderIdentifier);
         uint256 currentPrice = listingContract.prices(0);
+        if (currentPrice == 0) {
+            revert(string(abi.encodePacked("Invalid current price for sell order ", uint2str(orderIdentifier))));
+        }
         if (currentPrice < minPrice || currentPrice > maxPrice) {
             return new ICCListing.UpdateType[](0);
         }
         uint256 maxAmountIn = _computeMaxAmountIn(listingAddress, maxPrice, minPrice, pendingAmount, false);
         uint256 swapAmount = maxAmountIn >= pendingAmount ? pendingAmount : maxAmountIn;
-        require(swapAmount <= pendingAmount, "Swap amount exceeds pending");
         if (swapAmount == 0) {
             return new ICCListing.UpdateType[](0);
         }
         updates = _executePartialSellSwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
-        // Ensure makerAddress and recipientAddress are included in all updates
+        if (updates.length == 0) {
+            return updates;
+        }
         for (uint256 i = 0; i < updates.length; i++) {
             updates[i].addr = makerAddress;
             updates[i].recipient = recipientAddress;

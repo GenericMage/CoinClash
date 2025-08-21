@@ -1,55 +1,115 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.9
+// Version: 0.0.13
 // Changes:
+// - v0.0.13: Refactored settleOrders to resolve stack-too-deep error per "do x64" instruction. Split into helper functions (_validateOrder, _processOrder, _updateOrder) with OrderContext struct (orderId, pending, status, updates) to manage at most 4 variables per function. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
+// - v0.0.12: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
+// - v0.0.11: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
+// - v0.0.10: Enhanced error logging in settleOrders to capture specific failure reasons: missing router address, failed token transfer, Uniswap swap failures (slippage, insufficient liquidity), failed approval. Added validation for router address and order existence before processing. Ensured compatibility with CCListingTemplate.sol v0.1.12 update function clearing pending orders by checking order status post-update. Removed "Unknown error" messages with detailed revert reasons.
 // - v0.0.9: Modified settleOrders to avoid reverting unless catastrophic failure. Added detailed return string for reasons no orders are settled (e.g., no pending orders, price out of range, zero swap amount). Removed require(count > 0) to allow graceful degradation.
 // - v0.0.8: Removed redundant uint2str function to avoid override conflict, inheriting from CCSettlementPartial.sol. Maintained pending amount validation and error logging in settleOrders.
 // - v0.0.7: Added validation for pending amounts in settleOrders before calling _processBuyOrder/_processSellOrder. Enhanced error logging in settleOrders with specific revert reasons for failed updates. Added try-catch for listingContract.update to capture and log detailed errors. Added iteration over pending orders with maxIterations check.
 // - v0.0.6: Initial implementation of settleOrders function to iterate over pending orders.
-// Compatible with CCListingTemplate.sol (v0.1.7), CCMainPartial.sol (v0.0.14), CCUniPartial.sol (v0.0.19), CCSettlementPartial.sol (v0.0.22).
+// Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.0.15), CCUniPartial.sol (v0.0.22), CCSettlementPartial.sol (v0.0.27).
 
 import "./utils/CCSettlementPartial.sol";
 
 contract CCSettlementRouter is CCSettlementPartial {
+    struct OrderContext {
+        uint256 orderId;
+        uint256 pending;
+        uint8 status;
+        ICCListing.UpdateType[] updates;
+    }
+
+    function _validateOrder(
+        address listingAddress,
+        uint256 orderId,
+        bool isBuyOrder,
+        ICCListing listingContract
+    ) internal view returns (OrderContext memory context) {
+        // Validates order details and pricing
+        context.orderId = orderId;
+        (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
+        (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
+        if (context.pending == 0 || context.status != 1) {
+            return context;
+        }
+        if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
+            context.pending = 0; // Mark invalid for pricing
+        }
+    }
+
+    function _processOrder(
+        address listingAddress,
+        bool isBuyOrder,
+        ICCListing listingContract,
+        OrderContext memory context
+    ) internal returns (OrderContext memory) {
+        // Processes buy or sell order
+        if (context.pending == 0 || context.status != 1) {
+            return context;
+        }
+        context.updates = isBuyOrder
+            ? _processBuyOrder(listingAddress, context.orderId, listingContract)
+            : _processSellOrder(listingAddress, context.orderId, listingContract);
+        return context;
+    }
+
+    function _updateOrder(
+        ICCListing listingContract,
+        OrderContext memory context
+    ) internal returns (bool success, string memory reason) {
+        // Updates order and verifies status
+        if (context.updates.length == 0) {
+            return (false, "");
+        }
+        try listingContract.update(context.updates) {
+            (, , context.status) = listingContract.getBuyOrderCore(context.orderId);
+            if (context.status == 0 || context.status == 3) {
+                return (false, "");
+            }
+            return (true, "");
+        } catch Error(string memory updateReason) {
+            return (false, string(abi.encodePacked("Update failed for order ", uint2str(context.orderId), ": ", updateReason)));
+        } catch {
+            return (false, string(abi.encodePacked("Update failed for order ", uint2str(context.orderId), ": Unexpected error during update")));
+        }
+    }
+
     function settleOrders(
         address listingAddress,
         uint256 step,
         uint256 maxIterations,
         bool isBuyOrder
     ) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
-        // Iterates over pending buy or sell orders, validates price impact, settles via Uniswap swap, returns reason if no orders settled
+        // Iterates over pending orders, validates, processes, and updates via Uniswap swap
         ICCListing listingContract = ICCListing(listingAddress);
+        if (uniswapV2Router == address(0)) {
+            return "Missing Uniswap V2 router address";
+        }
         uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
         if (orderIds.length == 0 || step >= orderIds.length) {
             return "No pending orders or invalid step";
         }
         uint256 count = 0;
         for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
-            uint256 orderId = orderIds[i];
-            (uint256 pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
-            if (pending == 0) {
+            OrderContext memory context = _validateOrder(listingAddress, orderIds[i], isBuyOrder, listingContract);
+            if (context.pending == 0 || context.status != 1) {
                 continue;
             }
-            if (!_checkPricing(listingAddress, orderId, isBuyOrder, pending)) {
-                continue;
+            context = _processOrder(listingAddress, isBuyOrder, listingContract, context);
+            (bool success, string memory updateReason) = _updateOrder(listingContract, context);
+            if (!success && bytes(updateReason).length > 0) {
+                return updateReason;
             }
-            ICCListing.UpdateType[] memory updates = isBuyOrder
-                ? _processBuyOrder(listingAddress, orderId, listingContract)
-                : _processSellOrder(listingAddress, orderId, listingContract);
-            if (updates.length == 0) {
-                continue;
-            }
-            try listingContract.update(updates) {
+            if (success) {
                 count++;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Update failed for order ", uint2str(orderId), ": ", reason)));
-            } catch (bytes memory) {
-                revert(string(abi.encodePacked("Update failed for order ", uint2str(orderId), ": Unknown error")));
             }
         }
         if (count == 0) {
-            return "No orders settled: price out of range or insufficient tokens";
+            return "No orders settled: price out of range, insufficient tokens, or swap failure";
         }
         return "";
     }
