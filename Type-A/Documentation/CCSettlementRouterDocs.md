@@ -5,15 +5,15 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.11 (updated 2025-08-20)
+**Version:** 0.0.12 (updated 2025-08-21)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.1.9)
-- `CCMainPartial.sol` (v0.0.14)
-- `CCUniPartial.sol` (v0.0.20)
-- `CCSettlementPartial.sol` (v0.0.23)
+- `CCMainPartial.sol` (v0.0.15)
+- `CCUniPartial.sol` (v0.0.21)
+- `CCSettlementPartial.sol` (v0.0.24)
 
 ## Mappings
 - None defined directly in `CCSettlementRouter` or `CCSettlementPartial`. Relies on `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -48,7 +48,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
      - Skips if `pending == 0`.
   3. **Validate Pricing**: Calls `_checkPricing(listingAddress, orderId, isBuyOrder, pending)`:
      - Gets `maxPrice`, `minPrice` via `listingContract.getBuyOrderPricing` or `getSellOrderPricing`.
-     - Fetches `currentPrice` via `listingContract.prices(0)` (updated in `CCSettlementPartial.sol` v0.0.23).
+     - Fetches `currentPrice` via `listingContract.prices(0)` (updated in `CCSettlementPartial.sol` v0.0.22).
      - Returns `true` if `currentPrice <= maxPrice && currentPrice >= minPrice`, else skips.
   4. **Process Order**: Calls `_processBuyOrder` or `_processSellOrder` (from `CCSettlementPartial`):
      - **_processBuyOrder/_processSellOrder**:
@@ -57,7 +57,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
        - Calls `_computeMaxAmountIn` (from `CCUniPartial`) to get `maxAmountIn`.
        - Sets `swapAmount = min(maxAmountIn, pendingAmount)` with validation (`require(swapAmount <= pendingAmount)`).
        - Calls `_executePartialBuySwap` or `_executePartialSellSwap` (from `CCUniPartial`).
-       - Updates `UpdateType` structs to include `makerAddress` and `recipientAddress` for `structId == 0` (fixed in `CCSettlementPartial.sol` v0.0.23).
+       - Updates `UpdateType` structs to include `makerAddress` and `recipientAddress` for all updates (fixed in `CCSettlementPartial.sol` v0.0.24).
      - **_executePartialBuySwap/_executePartialSellSwap**:
        - Calls `_prepareSwapData` or `_prepareSellSwapData` to populate `SwapContext` and `path`.
        - Returns empty array if `context.price == 0`.
@@ -78,6 +78,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
        - Computes `amountReceived` via pre/post balance checks.
      - **_createBuyOrderUpdates/_createSellOrderUpdates**:
        - Returns `ICCListing.UpdateType[]` with updates for amount received and order status.
+       - Sets `makerAddress` and `recipient` for all updates (fixed in `CCUniPartial.sol` v0.0.21).
   5. **Update Listing**: Calls `listingContract.update(updates)` with try-catch, reverting with decoded error reasons (e.g., `"Update failed for order <orderId>: <reason>"`).
   6. **Validation**: Increments `count` on successful updates, returns "No orders settled: price out of range or insufficient tokens" if `count == 0`, else empty string.
 - **Error Handling**:
@@ -114,8 +115,8 @@ Uniswap V2 formulas (from `CCUniPartial.sol`):
 - **_checkPricing** (`CCSettlementPartial`): Validates `currentPrice` (from `listingContract.prices(0)`) against `maxPrice`/`minPrice`.
 - **_computeAmountSent** (`CCSettlementPartial`): Returns pre-transfer balance for recipient (ETH or token).
 - **_prepBuyOrderUpdate/_prepSellOrderUpdate** (`CCSettlementPartial`): Prepares `PrepOrderUpdateResult` with balance checks, calls `transactNative` or `transactToken`.
-- **_processBuyOrder/_processSellOrder** (`CCSettlementPartial`): Validates `pendingAmount`, `currentPrice` (from `listingContract.prices(0)`), and `swapAmount`, calls `_executePartialBuySwap` or `_executePartialSellSwap`, ensures `makerAddress` and `recipientAddress` in `UpdateType` structs (fixed in v0.0.23).
-- **_computeCurrentPrice**, **_computeSwapImpact**, **_fetchReserves**, **_computeImpactPercent**, **_computeMaxAmount**, **_prepareSwapData**, **_prepareSellSwapData**, **_prepareTokenSwap**, **_executeTokenSwap**, **_performETHBuySwap**, **_performETHSellSwap**, **_finalizeTokenSwap**, **_finalizeSellTokenSwap**, **_executeBuyETHSwap**, **_executeSellETHSwapInternal**, **_executeBuyTokenSwap**, **_executeSellTokenSwap**, **_executePartialBuySwap**, **_executePartialSellSwap**, **_createBuyOrderUpdates**, **_createSellOrderUpdates** (`CCUniPartial`): Handle swap logic, balance checks, and update generation.
+- **_processBuyOrder/_processSellOrder** (`CCSettlementPartial`): Validates `pendingAmount`, `currentPrice` (from `listingContract.prices(0)`), and `swapAmount`, calls `_executePartialBuySwap` or `_executePartialSellSwap`, ensures `makerAddress` and `recipientAddress` in all `UpdateType` structs (fixed in v0.0.24).
+- **_computeCurrentPrice**, **_computeSwapImpact**, **_fetchReserves**, **_computeImpactPercent**, **_computeMaxAmount**, **_prepareSwapData**, **_prepareSellSwapData**, **_prepareTokenSwap**, **_executeTokenSwap**, **_performETHBuySwap**, **_performETHSellSwap**, **_finalizeTokenSwap**, **_finalizeSellTokenSwap**, **_executeBuyETHSwap**, **_executeSellETHSwapInternal**, **_executeBuyTokenSwap**, **_executeSellTokenSwap**, **_executePartialBuySwap**, **_executePartialSellSwap**, **_createBuyOrderUpdates**, **_createSellOrderUpdates** (`CCUniPartial`): Handle swap logic, balance checks, and update generation, with `makerAddress` and `recipient` set for all updates in `_createBuyOrderUpdates` and `_createSellOrderUpdates` (fixed in v0.0.21).
 
 ## Limitations and Assumptions
 - **No Order Creation/Cancellation**: Handled by `CCOrderRouter`.
@@ -143,6 +144,6 @@ Uniswap V2 formulas (from `CCUniPartial.sol`):
   - `deadline`: `block.timestamp + 300`.
 - **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `update` with decoded reasons (updated in `CCUniPartial.sol` v0.0.20).
 - **Changes**:
-  - `CCSettlementRouter.sol` (v0.0.9): Ensured graceful degradation, removed `require(count > 0)`, added detailed return reasons.
-  - `CCSettlementPartial.sol` (v0.0.23): Fixed `makerAddress` in `UpdateType` structs for `listingContract.update`, ensuring compatibility with `CCListingTemplate.sol` (v0.1.9).
-  - `CCUniPartial.sol` (v0.0.20): Updated `_computeSwapImpact` to use `IERC20.balanceOf` for `tokenA` and `tokenB` from `listingAddress`.
+  - `CCSettlementRouter.sol` (v0.0.10): No changes since v0.0.9; ensured graceful degradation, removed `require(count > 0)`, added detailed return reasons.
+  - `CCSettlementPartial.sol` (v0.0.24): Fixed `makerAddress` and `recipientAddress` in all `UpdateType` structs for `listingContract.update`, ensuring compatibility with `CCListingTemplate.sol` (v0.1.9).
+  - `CCUniPartial.sol` (v0.0.21): Fixed `_createBuyOrderUpdates` and `_createSellOrderUpdates` to set `makerAddress` and `recipient` for all updates, addressing 'Update failed for order 0: Unknown error'.

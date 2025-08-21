@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.23
+// Version: 0.0.24
 // Changes:
+// - v0.0.24: Updated _processBuyOrder and _processSellOrder to set makerAddress and recipientAddress for all updates, not just Core updates, to ensure compatibility with CCListingTemplate.sol update function and prevent 'Update failed for order 0: Unknown error'.
 // - v0.0.23: Modified _processBuyOrder and _processSellOrder to include makerAddress in UpdateType structs, fixing 'Update failed for order 0: Unknown error' by ensuring valid maker address for registry updates in CCListingTemplate.sol.
 // - v0.0.22: Updated _checkPricing and _processBuyOrder/_processSellOrder to use listingContract.prices(0) instead of _computeCurrentPrice for price validation. Compatible with CCUniPartial.sol v0.0.19, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
 // - v0.0.21: Renamed amountOut to amountReceived in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect it’s the output amount from Uniswap swap. Moved amountIn <= pending validation to _processBuyOrder and _processSellOrder.
@@ -13,7 +14,7 @@ pragma solidity ^0.8.2;
 // - v0.0.16: Removed duplicated _prepareSellSwapData, added routers function to ICCLiquidity.
 // - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
 // - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
-// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.19), CCSettlementRouter.sol (v0.0.9), CCMainPartial.sol (v0.0.14).
+// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.21), CCSettlementRouter.sol (v0.0.10), CCMainPartial.sol (v0.0.15).
 
 import "./CCUniPartial.sol";
 import "./CCMainPartial.sol";
@@ -155,12 +156,10 @@ contract CCSettlementPartial is CCUniPartial {
             return new ICCListing.UpdateType[](0);
         }
         updates = _executePartialBuySwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
-        // Ensure makerAddress is included in updates
+        // Ensure makerAddress and recipientAddress are included in all updates
         for (uint256 i = 0; i < updates.length; i++) {
-            if (updates[i].structId == 0) {
-                updates[i].addr = makerAddress;
-                updates[i].recipient = recipientAddress;
-            }
+            updates[i].addr = makerAddress;
+            updates[i].recipient = recipientAddress;
         }
     }
 
@@ -187,12 +186,10 @@ contract CCSettlementPartial is CCUniPartial {
             return new ICCListing.UpdateType[](0);
         }
         updates = _executePartialSellSwap(listingAddress, orderIdentifier, swapAmount, pendingAmount);
-        // Ensure makerAddress is included in updates
+        // Ensure makerAddress and recipientAddress are included in all updates
         for (uint256 i = 0; i < updates.length; i++) {
-            if (updates[i].structId == 0) {
-                updates[i].addr = makerAddress;
-                updates[i].recipient = recipientAddress;
-            }
+            updates[i].addr = makerAddress;
+            updates[i].recipient = recipientAddress;
         }
     }
 
