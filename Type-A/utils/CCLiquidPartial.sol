@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.17
+// Version: 0.0.18
 // Changes:
+// - v0.0.18: Enhanced error logging in _prepBuyOrderUpdate, _prepSellOrderUpdate, _prepBuyLiquidUpdates, _prepSellLiquidUpdates with specific events for missing Uniswap router, failed token transfers, failed swaps due to slippage or insufficient liquidity, and failed approvals. Added try-catch for listingContract.prices(0) in _computeCurrentPrice. Ensured no fetching of settled orders by relying on pending amount checks before processing. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.0.14, CCLiquidRouter.sol v0.0.12.
 // - v0.0.17: Fixed issue in _createBuyOrderUpdates and _createSellOrderUpdates by setting addr to makerAddress for all updates (structId: 0 and 2) to prevent update function in CCListingTemplate.sol from extracting address(0) as maker, ensuring correct registry and globalizer calls.
 // - v0.0.16: Fixed issue in _prepBuyLiquidUpdates and _prepSellLiquidUpdates by setting addr to makerAddress in ICCListing.UpdateType structs to ensure correct maker address is passed for registry updates in listingContract.update call.
 // - v0.0.15: Updated _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Modified _computeSwapImpact to use balanceOf for Uniswap V2 LP tokens for reserve data. Added PriceOutOfBounds event emission in _processSingleOrder for graceful degradation when price is out of bounds.
 // - v0.0.14: Added missing _prepBuyLiquidUpdates and _prepSellLiquidUpdates functions to fix DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid (lines 326, 345).
 // - v0.0.13: Fixed TypeError in _processSingleOrder by converting ICCListing.UpdateType[] to ICCLiquidity.UpdateType[] for liquidityContract.update call. Retained flipped price calculation (reserveB / reserveA) and settlement logic from v0.0.12.
 // - v0.0.12: Updated _computeSwapImpact to align with flipped price calculation (reserveB / reserveA) from CCListingTemplate.sol v0.1.8. Adjusted _processSingleOrder to settle at current price if impact price is within max/min bounds, using _computeCurrentPrice from CCUniPartial.sol. Ensured pre/post balance checks in _prepBuyOrderUpdate and _prepSellOrderUpdate align with CCSettlementPartial.sol v0.0.21.
-// Compatible with CCListingTemplate.sol (v0.1.8), CCMainPartial.sol (v0.0.14), CCLiquidRouter.sol (v0.0.10), CCLiquidityTemplate.sol (v0.1.1).
+// Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.0.14), CCLiquidRouter.sol (v0.0.12), CCLiquidityTemplate.sol (v0.1.1).
 
 import "./CCMainPartial.sol";
 
@@ -76,6 +77,14 @@ contract CCLiquidPartial is CCMainPartial {
 
     // Emitted when price is out of bounds
     event PriceOutOfBounds(address indexed listingAddress, uint256 orderId, uint256 impactPrice, uint256 maxPrice, uint256 minPrice);
+    // Emitted when Uniswap router address is missing
+    event MissingUniswapRouter(address indexed listingAddress, uint256 orderId, string reason);
+    // Emitted when token transfer fails
+    event TokenTransferFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
+    // Emitted when Uniswap swap fails due to slippage or liquidity
+    event SwapFailed(address indexed listingAddress, uint256 orderId, uint256 amountIn, string reason);
+    // Emitted when token approval fails
+    event ApprovalFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
 
     function _getSwapReserves(address listingAddress, bool isBuyOrder) private view returns (SwapImpactContext memory context) {
         // Retrieves reserves and decimals for swap impact calculation using balanceOf
@@ -94,10 +103,16 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _computeCurrentPrice(address listingAddress) private view returns (uint256 price) {
-        // Fetches current price from listingContract.prices(0)
+        // Fetches current price from listingContract.prices(0) with try-catch
         ICCListing listingContract = ICCListing(listingAddress);
-        price = listingContract.prices(0);
-        require(price > 0, "Invalid price from listing");
+        try listingContract.prices(0) returns (uint256 _price) {
+            price = _price;
+            require(price > 0, "Invalid price from listing");
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Price fetch failed: ", reason)));
+        } catch {
+            revert("Price fetch failed: Unknown error");
+        }
     }
 
     function _computeSwapImpact(address listingAddress, uint256 amountIn, bool isBuyOrder) private view returns (uint256 price, uint256 amountOut) {
@@ -187,19 +202,32 @@ contract CCLiquidPartial is CCMainPartial {
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
         uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
+        if (uniswapV2Router == address(0)) {
+            emit MissingUniswapRouter(listingAddress, orderIdentifier, "Uniswap router not set");
+            return result;
+        }
+        if (result.tokenAddress != address(0)) {
+            try IERC20(result.tokenAddress).approve(uniswapV2Router, denormalizedAmount) {
+            } catch Error(string memory reason) {
+                emit ApprovalFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+                return result;
+            }
+        }
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
                 uint256 postBalance = result.recipientAddress.balance;
                 result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Native transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
+                emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+                return result;
             }
         } else {
             try listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress) {
                 uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
                 result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
+                emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+                return result;
             }
         }
         result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
@@ -219,19 +247,32 @@ contract CCLiquidPartial is CCMainPartial {
         (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
         uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
         uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
+        if (uniswapV2Router == address(0)) {
+            emit MissingUniswapRouter(listingAddress, orderIdentifier, "Uniswap router not set");
+            return result;
+        }
+        if (result.tokenAddress != address(0)) {
+            try IERC20(result.tokenAddress).approve(uniswapV2Router, denormalizedAmount) {
+            } catch Error(string memory reason) {
+                emit ApprovalFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+                return result;
+            }
+        }
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
                 uint256 postBalance = result.recipientAddress.balance;
                 result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Native transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
+                emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+                return result;
             }
         } else {
             try listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress) {
                 uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
                 result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
+                emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+                return result;
             }
         }
         result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, result.tokenDecimals) : 0;
@@ -250,7 +291,7 @@ contract CCLiquidPartial is CCMainPartial {
             structId: 2,
             index: orderIdentifier,
             value: updateContext.normalizedReceived,
-            addr: updateContext.makerAddress, // Set makerAddress for Amounts update
+            addr: updateContext.makerAddress,
             recipient: address(0),
             maxPrice: 0,
             minPrice: 0,
@@ -261,7 +302,7 @@ contract CCLiquidPartial is CCMainPartial {
             structId: 0,
             index: orderIdentifier,
             value: updateContext.status == 1 && updateContext.normalizedReceived >= pendingAmount ? 3 : 2,
-            addr: updateContext.makerAddress, // Set makerAddress for Core update
+            addr: updateContext.makerAddress,
             recipient: updateContext.recipient,
             maxPrice: 0,
             minPrice: 0,
@@ -282,7 +323,7 @@ contract CCLiquidPartial is CCMainPartial {
             structId: 2,
             index: orderIdentifier,
             value: updateContext.normalizedReceived,
-            addr: updateContext.makerAddress, // Set makerAddress for Amounts update
+            addr: updateContext.makerAddress,
             recipient: address(0),
             maxPrice: 0,
             minPrice: 0,
@@ -293,7 +334,7 @@ contract CCLiquidPartial is CCMainPartial {
             structId: 0,
             index: orderIdentifier,
             value: updateContext.status == 1 && updateContext.normalizedReceived >= pendingAmount ? 3 : 2,
-            addr: updateContext.makerAddress, // Set makerAddress for Core update
+            addr: updateContext.makerAddress,
             recipient: updateContext.recipient,
             maxPrice: 0,
             minPrice: 0,
@@ -315,8 +356,13 @@ contract CCLiquidPartial is CCMainPartial {
             return new ICCListing.UpdateType[](0);
         }
         (uint256 amountOut, , ) = _prepareLiquidityTransaction(address(context.listingContract), pendingAmount, true);
+        if (uniswapV2Router == address(0)) {
+            emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
+            return new ICCListing.UpdateType[](0);
+        }
         PrepOrderUpdateResult memory result = _prepBuyOrderUpdate(address(context.listingContract), orderIdentifier, amountOut);
         if (result.normalizedReceived == 0) {
+            emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received after swap");
             return new ICCListing.UpdateType[](0);
         }
         BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
@@ -343,8 +389,13 @@ contract CCLiquidPartial is CCMainPartial {
             return new ICCListing.UpdateType[](0);
         }
         (uint256 amountOut, , ) = _prepareLiquidityTransaction(address(context.listingContract), pendingAmount, false);
+        if (uniswapV2Router == address(0)) {
+            emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
+            return new ICCListing.UpdateType[](0);
+        }
         PrepOrderUpdateResult memory result = _prepSellOrderUpdate(address(context.listingContract), orderIdentifier, amountOut);
         if (result.normalizedReceived == 0) {
+            emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received after swap");
             return new ICCListing.UpdateType[](0);
         }
         SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
@@ -442,7 +493,8 @@ contract CCLiquidPartial is CCMainPartial {
                 });
                 try liquidityContract.update(address(this), liquidityUpdates) {
                 } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Liquidity update failed: ", reason)));
+                    emit SwapFailed(listingAddress, orderIdentifier, pendingAmount, string(abi.encodePacked("Liquidity update failed: ", reason)));
+                    updates = new ICCListing.UpdateType[](0);
                 }
             }
         } else {
@@ -473,6 +525,7 @@ contract CCLiquidPartial is CCMainPartial {
             (uint256 pendingAmount, , ) = batchContext.isBuyOrder
                 ? ICCListing(listingAddress).getBuyOrderAmounts(orderIdentifiers[i])
                 : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
+            if (pendingAmount == 0) continue; // Skip settled orders
             ICCListing.UpdateType[] memory updates = _processSingleOrder(
                 batchContext.listingAddress,
                 orderIdentifiers[i],
