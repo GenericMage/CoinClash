@@ -453,12 +453,13 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         _registryAddress = registryAddress;
     }
 
-    // Sets globalizer address
-    function setGlobalizer(address globalizerAddress) external {
+    // Sets globalizer contract address, callable once
+    function setGlobalizerAddress(address globalizerAddress_) external {
         require(!_globalizerSet, "Globalizer already set");
-        _globalizerAddress = globalizerAddress;
+        require(globalizerAddress_ != address(0), "Invalid globalizer address");
+        _globalizerAddress = globalizerAddress_;
         _globalizerSet = true;
-        emit GlobalizerAddressSet(globalizerAddress);
+        emit GlobalizerAddressSet(globalizerAddress_);
     }
 
     // Transfers tokens
