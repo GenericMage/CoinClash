@@ -1,22 +1,22 @@
 # CCLiquidRouter Contract Documentation
 
 ## Overview
-The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidity` for liquid settlement. It inherits from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair` for token operations and reserve data. It uses `ReentrancyGuard` (including `Ownable`) for security. The contract handles liquid settlement via `settleBuyLiquid` and `settleSellLiquid`, ensuring price impact stays within order bounds. State variables are hidden, accessed via view functions, and decimal precision is maintained. It avoids reserved keywords, uses explicit casting, and ensures graceful degradation with events for minor issues (e.g., no pending orders, price out of bounds, insufficient balance).
+The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidity` for liquid settlement. It inherits from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair` for token operations and reserve data. It uses `ReentrancyGuard` (including `Ownable`) for security. The contract handles liquid settlement via `settleBuyLiquid` and `settleSellLiquid`, ensuring _
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.12 (updated 2025-08-20)
+**Version:** 0.0.13 (updated 2025-08-21)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
 
-**Compatibility:** CCListingTemplate.sol (v0.1.8), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.16), CCLiquidityRouter.sol (v0.0.27), CCLiquidityTemplate.sol (v0.1.1).
+**Compatibility:** CCListingTemplate.sol (v0.1.8), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.17), CCLiquidityRouter.sol (v0.0.27), CCLiquidityTemplate.sol (v0.1.1).
 
 ## Mappings
 - None defined in `CCLiquidRouter`. Uses `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
 
 ## Structs
 - **OrderContext** (`CCLiquidPartial`): Holds `listingContract` (ICCListing), `tokenIn` (address), `tokenOut` (address), `liquidityAddr` (address).
-- **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `token Reel`, `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized).
+- **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized).
 - **BuyOrderUpdateContext** (`CCLiquidPartial`): Holds `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, tokenA for buy).
 - **SellOrderUpdateContext** (`CCLiquidPartial`): Same as `BuyOrderUpdateContext`, with `amountSent` (tokenB for sell).
 - **OrderBatchContext** (`CCLiquidPartial`): Holds `listingAddress` (address), `maxIterations` (uint256), `isBuyOrder` (bool).
@@ -35,7 +35,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
    - **Formula**:
      - `amountInAfterFee = (inputAmount * 997) / 1000` (0.3% Uniswap V2 fee).
      - `amountOut = (amountInAfterFee * normalizedReserveOut) / (normalizedReserveIn + amountInAfterFee)`.
-     - `price = (normalizedReserveIn + amountInAfterFee) * 1e18 / (normalizedReserveOut - amountOut)`.
+     - `price = ((normalizedReserveIn + amountInAfterFee) * 1e18) / (normalizedReserveOut - amountOut)`.
    - **Used in**: `_computeSwapImpact`, `_processSingleOrder`, `_checkPricing`.
    - **Description**: Calculates output and hypothetical price impact for buy (input tokenB, output tokenA) or sell (input tokenA, output tokenB) orders using `balanceOf` for Uniswap V2 LP reserves, ensuring `minPrice <= price <= maxPrice`.
    - **Usage**: Restricts settlement if price impact exceeds bounds; emits `PriceOutOfBounds` for graceful degradation.
