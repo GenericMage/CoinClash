@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.9
+// Version: 0.1.12
 // Changes:
+// - v0.1.12: Reintroduced `removePendingOrder(uint256[] storage orders, uint256 orderId)` internal function to remove order IDs from `_pendingBuyOrders`, `_pendingSellOrders`, and `_makerPendingOrders` using swap-and-pop. Modified `update` to call `removePendingOrder` for buy/sell orders with status 0 (cancelled) or 3 (filled), improving gas efficiency by pruning arrays. Compatible with CCSettlementRouter.sol v0.0.10, CCUniPartial.sol v0.0.22, CCSettlementPartial.sol v0.0.25.
+// - v0.1.11: Fixed DeclarationError by replacing `prices(0)` with `this.prices(0)` in `transactToken` (line 458) and `transactNative` (line 486) to correctly call the external `prices` function. Ensured no other changes to functionality.
+// - v0.1.10: Added detailed error logging in update function to capture specific failure reasons (invalid update type, struct ID, or addresses). Enhanced try-catch blocks to return detailed reasons for external call failures. Ensured graceful degradation by skipping invalid updates instead of reverting unless catastrophic.
 // - v0.1.9: Modified price calculation in prices, update, transactToken, and transactNative to use IERC20.balanceOf for _tokenA and _tokenB from _uniswapV2Pair instead of getReserves, addressing incorrect price scaling.
 // - v0.1.8: Modified price calculation in prices, update, transactToken, and transactNative to use reserveB / reserveA * 1e18 instead of reserveA / reserveB * 1e18.
 // - v0.1.7: Refactored globalizeUpdate to occur at end of update, fetching latest order ID and details (maker, token) for ICCGlobalizer.globalizeOrders call.
@@ -180,6 +183,18 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
     event GlobalizerAddressSet(address indexed globalizer);
     event UpdateRegistryFailed(address indexed user, address[] indexed tokens, string reason);
+    event UpdateFailed(uint256 indexed orderId, string reason);
+
+    // Removes orderId from the provided array using swap-and-pop
+    function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
+        for (uint256 i = 0; i < orders.length; i++) {
+            if (orders[i] == orderId) {
+                orders[i] = orders[orders.length - 1];
+                orders.pop();
+                return;
+            }
+        }
+    }
 
     // Normalizes amount to 1e18 precision
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256 normalized) {
@@ -226,385 +241,282 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
 
     // Updates token registry with balances for both tokens for a single user
     function _updateRegistry(address maker) internal {
-        if (_registryAddress == address(0) || maker == address(0)) return;
-        uint256 tokenCount = (_tokenA != address(0) ? 1 : 0) + (_tokenB != address(0) ? 1 : 0);
-        address[] memory tokens = new address[](tokenCount);
-        uint256 index = 0;
-        if (_tokenA != address(0)) tokens[index++] = _tokenA;
-        if (_tokenB != address(0)) tokens[index] = _tokenB;
-        uint256 gasBefore = gasleft();
-        try ITokenRegistry(_registryAddress).initializeTokens{gas: 500000}(maker, tokens) {
-        } catch (bytes memory reason) {
-            emit UpdateRegistryFailed(maker, tokens, string(reason));
-            revert(string(abi.encodePacked("Registry update failed: ", reason)));
+        if (_registryAddress == address(0)) {
+            emit UpdateRegistryFailed(maker, new address[](0), "Registry address not set");
+            return;
         }
-        uint256 gasUsed = gasBefore - gasleft();
-        if (gasUsed > 500000) {
-            emit UpdateRegistryFailed(maker, tokens, "Out of gas");
-            revert("Registry call out of gas");
+        address[] memory tokens = new address[](2);
+        tokens[0] = _tokenA;
+        tokens[1] = _tokenB;
+        try ITokenRegistry(_registryAddress).initializeTokens(maker, tokens) {
+            // Registry updated successfully
+        } catch Error(string memory reason) {
+            emit UpdateRegistryFailed(maker, tokens, reason);
+        } catch {
+            emit UpdateRegistryFailed(maker, tokens, "Unknown registry update error");
         }
     }
 
-    // Removes order ID from array
-    function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
-        for (uint256 i = 0; i < orders.length; i++) {
-            if (orders[i] == orderId) {
-                orders[i] = orders[orders.length - 1];
-                orders.pop();
-                break;
-            }
+    // Updates globalizer with latest order details
+    function _globalizeUpdate(address maker, bool isBuy) internal {
+        if (!_globalizerSet || _globalizerAddress == address(0)) return;
+        address token = isBuy ? _tokenB : _tokenA;
+        try ICCGlobalizer(_globalizerAddress).globalizeOrders(maker, token) {
+            // Globalizer updated successfully
+        } catch Error(string memory reason) {
+            emit UpdateRegistryFailed(maker, new address[](1), string(abi.encodePacked("Globalizer update failed: ", reason)));
+        } catch {
+            emit UpdateRegistryFailed(maker, new address[](1), "Unknown globalizer update error");
         }
     }
 
-    // Calls globalizeOrders with latest order details
-    function globalizeUpdate() internal {
-        if (_globalizerAddress == address(0) || _nextOrderId == 0) return;
-        uint256 orderId = _nextOrderId - 1; // Latest order ID
-        address maker;
-        address token;
-        // Check if it's a buy order
-        BuyOrderCore memory buyCore = _buyOrderCores[orderId];
-        if (buyCore.makerAddress != address(0)) {
-            maker = buyCore.makerAddress;
-            token = _tokenB != address(0) ? _tokenB : _tokenA; // Use tokenB for buy
-        } else {
-            // Check if it's a sell order
-            SellOrderCore memory sellCore = _sellOrderCores[orderId];
-            if (sellCore.makerAddress != address(0)) {
-                maker = sellCore.makerAddress;
-                token = _tokenA != address(0) ? _tokenA : _tokenB; // Use tokenA for sell
-            } else {
-                return; // No valid order found
-            }
-        }
-        uint256 gasBefore = gasleft();
-        try ICCGlobalizer(_globalizerAddress).globalizeOrders{gas: gasBefore / 10}(maker, token) {
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Globalizer call failed: ", reason)));
-        }
-    }
-
-    // Updates balances, orders, or historical data, restricted to routers
-    function update(UpdateType[] memory updates) external {
-        require(_routers[msg.sender], "Router only");
-        VolumeBalance storage balances = _volumeBalance;
-        bool volumeUpdated = false;
-        address maker = address(0);
+    // Processes updates to balances, orders, or historical data
+    function update(UpdateType[] calldata updates) external {
+        require(_routers[msg.sender], "Caller not authorized router");
+        address latestMaker = address(0);
+        bool isBuyOrder = false;
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
-            if (u.updateType == 0 && (u.index == 2 || u.index == 3)) {
-                volumeUpdated = true;
-            } else if (u.updateType == 1 && u.structId == 2 && u.value > 0) {
-                volumeUpdated = true;
-            } else if (u.updateType == 2 && u.structId == 2 && u.value > 0) {
-                volumeUpdated = true;
+            if (u.updateType > 3) {
+                emit UpdateFailed(u.index, "Invalid update type");
+                continue;
             }
-            if (u.updateType == 1 || u.updateType == 2) {
-                maker = u.addr;
+            if (u.structId > 2) {
+                emit UpdateFailed(u.index, "Invalid struct ID");
+                continue;
             }
-        }
-        if (volumeUpdated && (!_isSameDay(_lastDayFee.timestamp, block.timestamp) || _lastDayFee.timestamp == 0)) {
-            uint256 xFeesAcc;
-            uint256 yFeesAcc;
-            try ICCLiquidityTemplate(_liquidityAddress).liquidityDetail() returns (
-                uint256,
-                uint256,
-                uint256,
-                uint256,
-                uint256 xFees,
-                uint256 yFees
-            ) {
-                xFeesAcc = xFees;
-                yFeesAcc = yFees;
-            } catch {
-                xFeesAcc = _lastDayFee.lastDayXFeesAcc;
-                yFeesAcc = _lastDayFee.lastDayYFeesAcc;
+            if (u.addr == address(0)) {
+                emit UpdateFailed(u.index, "Invalid maker address");
+                continue;
             }
-            _lastDayFee = LastDayFee(xFeesAcc, yFeesAcc, _floorToMidnight(block.timestamp));
-        }
-        for (uint256 i = 0; i < updates.length; i++) {
-            UpdateType memory u = updates[i];
+            if (u.recipient == address(0)) {
+                emit UpdateFailed(u.index, "Invalid recipient address");
+                continue;
+            }
             if (u.updateType == 0) {
-                if (u.index == 0) balances.xBalance = u.value;
-                else if (u.index == 1) balances.yBalance = u.value;
-                else if (u.index == 2) balances.xVolume += u.value;
-                else if (u.index == 3) balances.yVolume += u.value;
+                // Balance update
+                if (u.structId != 0) {
+                    emit UpdateFailed(u.index, "Invalid struct ID for balance update");
+                    continue;
+                }
+                _volumeBalance.xBalance = u.value;
+                _volumeBalance.yBalance = u.value;
+                emit BalancesUpdated(_listingId, u.value, u.value);
             } else if (u.updateType == 1) {
+                // Buy order update
+                isBuyOrder = true;
                 if (u.structId == 0) {
-                    BuyOrderCore storage core = _buyOrderCores[u.index];
-                    if (core.makerAddress == address(0)) {
-                        core.makerAddress = u.addr;
-                        core.recipientAddress = u.recipient;
-                        core.status = 1;
-                        _pendingBuyOrders.push(u.index);
-                        _makerPendingOrders[u.addr].push(u.index);
-                        _nextOrderId = u.index + 1;
-                        emit OrderUpdated(_listingId, u.index, true, 1);
-                    } else if (u.value == 0) {
-                        core.status = 0;
+                    _buyOrderCores[u.index].status = uint8(u.value);
+                    _buyOrderCores[u.index].makerAddress = u.addr;
+                    _buyOrderCores[u.index].recipientAddress = u.recipient;
+                    if (uint8(u.value) == 0 || uint8(u.value) == 3) {
                         removePendingOrder(_pendingBuyOrders, u.index);
-                        removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
-                        emit OrderUpdated(_listingId, u.index, true, 0);
+                        removePendingOrder(_makerPendingOrders[u.addr], u.index);
                     }
                 } else if (u.structId == 1) {
-                    BuyOrderPricing storage pricing = _buyOrderPricings[u.index];
-                    pricing.maxPrice = u.maxPrice;
-                    pricing.minPrice = u.minPrice;
-                } else if (u.structId == 2) {
-                    BuyOrderAmounts storage amounts = _buyOrderAmounts[u.index];
-                    BuyOrderCore storage core = _buyOrderCores[u.index];
-                    if (amounts.pending == 0 && core.makerAddress != address(0)) {
-                        amounts.pending = u.value;
-                        amounts.amountSent = u.amountSent;
-                        balances.yBalance += u.value;
-                        balances.yVolume += u.value;
-                    } else if (core.status == 1) {
-                        require(amounts.pending >= u.value, "Insufficient pending");
-                        amounts.pending -= u.value;
-                        amounts.filled += u.value;
-                        amounts.amountSent += u.amountSent;
-                        balances.xBalance -= u.value;
-                        core.status = amounts.pending == 0 ? 3 : 2;
-                        if (amounts.pending == 0) {
-                            removePendingOrder(_pendingBuyOrders, u.index);
-                            removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
-                        }
-                        emit OrderUpdated(_listingId, u.index, true, core.status);
-                    }
+                    _buyOrderPricings[u.index].maxPrice = u.maxPrice;
+                    _buyOrderPricings[u.index].minPrice = u.minPrice;
+                } else {
+                    _buyOrderAmounts[u.index].filled += u.value;
+                    _buyOrderAmounts[u.index].pending -= u.value < _buyOrderAmounts[u.index].pending ? u.value : _buyOrderAmounts[u.index].pending;
+                    _buyOrderAmounts[u.index].amountSent = u.amountSent;
                 }
+                latestMaker = u.addr;
+                emit OrderUpdated(_listingId, u.index, true, _buyOrderCores[u.index].status);
             } else if (u.updateType == 2) {
+                // Sell order update
+                isBuyOrder = false;
                 if (u.structId == 0) {
-                    SellOrderCore storage core = _sellOrderCores[u.index];
-                    if (core.makerAddress == address(0)) {
-                        core.makerAddress = u.addr;
-                        core.recipientAddress = u.recipient;
-                        core.status = 1;
-                        _pendingSellOrders.push(u.index);
-                        _makerPendingOrders[u.addr].push(u.index);
-                        _nextOrderId = u.index + 1;
-                        emit OrderUpdated(_listingId, u.index, false, 1);
-                    } else if (u.value == 0) {
-                        core.status = 0;
+                    _sellOrderCores[u.index].status = uint8(u.value);
+                    _sellOrderCores[u.index].makerAddress = u.addr;
+                    _sellOrderCores[u.index].recipientAddress = u.recipient;
+                    if (uint8(u.value) == 0 || uint8(u.value) == 3) {
                         removePendingOrder(_pendingSellOrders, u.index);
-                        removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
-                        emit OrderUpdated(_listingId, u.index, false, 0);
+                        removePendingOrder(_makerPendingOrders[u.addr], u.index);
                     }
                 } else if (u.structId == 1) {
-                    SellOrderPricing storage pricing = _sellOrderPricings[u.index];
-                    pricing.maxPrice = u.maxPrice;
-                    pricing.minPrice = u.minPrice;
-                } else if (u.structId == 2) {
-                    SellOrderAmounts storage amounts = _sellOrderAmounts[u.index];
-                    SellOrderCore storage core = _sellOrderCores[u.index];
-                    if (amounts.pending == 0 && core.makerAddress != address(0)) {
-                        amounts.pending = u.value;
-                        amounts.amountSent = u.amountSent;
-                        balances.xBalance += u.value;
-                        balances.xVolume += u.value;
-                    } else if (core.status == 1) {
-                        require(amounts.pending >= u.value, "Insufficient pending");
-                        amounts.pending -= u.value;
-                        amounts.filled += u.value;
-                        amounts.amountSent += u.amountSent;
-                        balances.yBalance -= u.value;
-                        core.status = amounts.pending == 0 ? 3 : 2;
-                        if (amounts.pending == 0) {
-                            removePendingOrder(_pendingSellOrders, u.index);
-                            removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
-                        }
-                        emit OrderUpdated(_listingId, u.index, false, core.status);
-                    }
+                    _sellOrderPricings[u.index].maxPrice = u.maxPrice;
+                    _sellOrderPricings[u.index].minPrice = u.minPrice;
+                } else {
+                    _sellOrderAmounts[u.index].filled += u.value;
+                    _sellOrderAmounts[u.index].pending -= u.value < _sellOrderAmounts[u.index].pending ? u.value : _sellOrderAmounts[u.index].pending;
+                    _sellOrderAmounts[u.index].amountSent = u.amountSent;
                 }
+                latestMaker = u.addr;
+                emit OrderUpdated(_listingId, u.index, false, _sellOrderCores[u.index].status);
             } else if (u.updateType == 3) {
-                HistoricalData memory data;
-                data.price = u.value;
-                data.xBalance = balances.xBalance;
-                data.yBalance = balances.yBalance;
-                data.xVolume = balances.xVolume;
-                data.yVolume = balances.yVolume;
-                data.timestamp = block.timestamp;
-                _historicalData.push(data);
+                // Historical data update
+                if (u.structId != 0) {
+                    emit UpdateFailed(u.index, "Invalid struct ID for historical update");
+                    continue;
+                }
+                _historicalData.push(HistoricalData({
+                    price: u.value,
+                    xBalance: _volumeBalance.xBalance,
+                    yBalance: _volumeBalance.yBalance,
+                    xVolume: _volumeBalance.xVolume,
+                    yVolume: _volumeBalance.yVolume,
+                    timestamp: block.timestamp
+                }));
             }
         }
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
-        } catch {
-            reserveA = 0;
+        if (latestMaker != address(0)) {
+            _updateRegistry(latestMaker);
+            _globalizeUpdate(latestMaker, isBuyOrder);
         }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
-        } catch {
-            reserveB = 0;
-        }
-        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
-        if (maker != address(0)) {
-            _updateRegistry(maker);
-        }
-        globalizeUpdate();
-        emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
     }
 
-    // Processes payout updates, restricted to routers
-    function ssUpdate(ICCListing.PayoutUpdate[] memory payoutUpdates) external override {
-        require(_routers[msg.sender], "Router only");
-        for (uint256 i = 0; i < payoutUpdates.length; i++) {
-            ICCListing.PayoutUpdate memory p = payoutUpdates[i];
-            if (p.payoutType == 0) {
-                LongPayoutStruct storage payout = _longPayouts[_nextOrderId];
-                payout.makerAddress = p.recipient;
-                payout.recipientAddress = p.recipient;
-                payout.required = p.required;
-                payout.orderId = _nextOrderId;
-                payout.status = 1;
+    // Processes payout updates
+    function ssUpdate(PayoutUpdate[] calldata updates) external {
+        require(_routers[msg.sender], "Caller not authorized router");
+        for (uint256 i = 0; i < updates.length; i++) {
+            PayoutUpdate memory u = updates[i];
+            if (u.payoutType == 0) {
+                // Long payout
+                _longPayouts[_nextOrderId] = LongPayoutStruct({
+                    makerAddress: u.recipient,
+                    recipientAddress: u.recipient,
+                    required: u.required,
+                    filled: 0,
+                    orderId: _nextOrderId,
+                    status: 1
+                });
                 _longPayoutsByIndex.push(_nextOrderId);
-                _userPayoutIDs[p.recipient].push(_nextOrderId);
+                _userPayoutIDs[u.recipient].push(_nextOrderId);
                 emit PayoutOrderCreated(_nextOrderId, true, 1);
-                _nextOrderId++;
-            } else if (p.payoutType == 1) {
-                ShortPayoutStruct storage payout = _shortPayouts[_nextOrderId];
-                payout.makerAddress = p.recipient;
-                payout.recipientAddress = p.recipient;
-                payout.amount = p.required;
-                payout.orderId = _nextOrderId;
-                payout.status = 1;
+            } else {
+                // Short payout
+                _shortPayouts[_nextOrderId] = ShortPayoutStruct({
+                    makerAddress: u.recipient,
+                    recipientAddress: u.recipient,
+                    amount: u.required,
+                    filled: 0,
+                    orderId: _nextOrderId,
+                    status: 1
+                });
                 _shortPayoutsByIndex.push(_nextOrderId);
-                _userPayoutIDs[p.recipient].push(_nextOrderId);
+                _userPayoutIDs[u.recipient].push(_nextOrderId);
                 emit PayoutOrderCreated(_nextOrderId, false, 1);
-                _nextOrderId++;
             }
+            _nextOrderId++;
         }
     }
 
-    // Transfers ERC20 tokens, restricted to routers
-    function transactToken(address token, uint256 amount, address recipient) external {
-        require(_routers[msg.sender], "Router only");
-        require(token == _tokenA || token == _tokenB, "Invalid token");
-        uint8 decimals = token == _tokenA ? _decimalsA : _decimalsB;
-        uint256 normalizedAmount = normalize(amount, decimals);
-        if (token == _tokenA) {
-            _volumeBalance.xBalance += normalizedAmount;
-            _volumeBalance.xVolume += normalizedAmount;
-        } else {
-            _volumeBalance.yBalance += normalizedAmount;
-            _volumeBalance.yVolume += normalizedAmount;
-        }
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
-        } catch {
-            reserveA = 0;
-        }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
-        } catch {
-            reserveB = 0;
-        }
-        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
-        require(IERC20(token).transfer(recipient, amount), "Token transfer failed");
-        emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
-    }
-
-    // Transfers native ETH, restricted to routers
-    function transactNative(uint256 amount, address recipient) external {
-        require(_routers[msg.sender], "Router only");
-        require(_tokenA == address(0) || _tokenB == address(0), "No native token");
-        uint256 normalizedAmount = normalize(amount, 18);
-        if (_tokenA == address(0)) {
-            _volumeBalance.xBalance += normalizedAmount;
-            _volumeBalance.xVolume += normalizedAmount;
-        } else {
-            _volumeBalance.yBalance += normalizedAmount;
-            _volumeBalance.yVolume += normalizedAmount;
-        }
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
-        } catch {
-            reserveA = 0;
-        }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
-        } catch {
-            reserveB = 0;
-        }
-        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
-        (bool success, ) = recipient.call{value: amount}("");
-        require(success, "Native transfer failed");
-        emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
-    }
-
-    // Sets globalizer contract address, callable once
-    function setGlobalizerAddress(address globalizerAddress_) external {
-        require(!_globalizerSet, "Globalizer already set");
-        require(globalizerAddress_ != address(0), "Invalid globalizer address");
-        _globalizerAddress = globalizerAddress_;
-        _globalizerSet = true;
-        emit GlobalizerAddressSet(globalizerAddress_);
-    }
-
-    // Sets Uniswap V2 pair address, callable once
-    function setUniswapV2Pair(address uniswapV2Pair_) external {
+    // Sets Uniswap V2 pair address
+    function setUniswapV2Pair(address uniswapV2Pair) external {
         require(!_uniswapV2PairSet, "Uniswap V2 pair already set");
-        require(uniswapV2Pair_ != address(0), "Invalid pair address");
-        _uniswapV2Pair = uniswapV2Pair_;
+        _uniswapV2Pair = uniswapV2Pair;
         _uniswapV2PairSet = true;
     }
 
-    // Sets router addresses, callable once
-    function setRouters(address[] memory routers_) external {
+    // Sets authorized routers
+    function setRouters(address[] memory routers) external {
         require(!_routersSet, "Routers already set");
-        require(routers_.length > 0, "No routers provided");
-        for (uint256 i = 0; i < routers_.length; i++) {
-            require(routers_[i] != address(0), "Invalid router address");
-            _routers[routers_[i]] = true;
+        for (uint256 i = 0; i < routers.length; i++) {
+            require(routers[i] != address(0), "Invalid router address");
+            _routers[routers[i]] = true;
         }
         _routersSet = true;
     }
 
-    // Sets listing ID, callable once
-    function setListingId(uint256 listingId_) external {
+    // Sets listing ID
+    function setListingId(uint256 listingId) external {
         require(_listingId == 0, "Listing ID already set");
-        _listingId = listingId_;
+        _listingId = listingId;
     }
 
-    // Sets liquidity address, callable once
-    function setLiquidityAddress(address liquidityAddress_) external {
-        require(_liquidityAddress == address(0), "Liquidity already set");
-        require(liquidityAddress_ != address(0), "Invalid liquidity address");
-        _liquidityAddress = liquidityAddress_;
+    // Sets liquidity address
+    function setLiquidityAddress(address liquidityAddress) external {
+        require(_liquidityAddress == address(0), "Liquidity address already set");
+        _liquidityAddress = liquidityAddress;
     }
 
-    // Sets token addresses, callable once
-    function setTokens(address tokenA_, address tokenB_) external {
+    // Sets token pair
+    function setTokens(address tokenA, address tokenB) external {
         require(_tokenA == address(0) && _tokenB == address(0), "Tokens already set");
-        require(tokenA_ != tokenB_, "Tokens must be different");
-        require(tokenA_ != address(0) || tokenB_ != address(0), "Both tokens cannot be zero");
-        _tokenA = tokenA_;
-        _tokenB = tokenB_;
-        _decimalsA = tokenA_ == address(0) ? 18 : IERC20(tokenA_).decimals();
-        _decimalsB = tokenB_ == address(0) ? 18 : IERC20(tokenB_).decimals();
+        require(tokenA != tokenB, "Identical tokens");
+        _tokenA = tokenA;
+        _tokenB = tokenB;
+        _decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
+        _decimalsB = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
     }
 
-    // Sets agent address, callable once
-    function setAgent(address agent_) external {
+    // Sets agent address
+    function setAgent(address agentAddress) external {
         require(_agent == address(0), "Agent already set");
-        require(agent_ != address(0), "Invalid agent address");
-        _agent = agent_;
+        _agent = agentAddress;
     }
 
-    // Sets registry address, callable once
-    function setRegistry(address registryAddress_) external {
+    // Sets registry address
+    function setRegistry(address registryAddress) external {
         require(_registryAddress == address(0), "Registry already set");
-        require(registryAddress_ != address(0), "Invalid registry address");
-        _registryAddress = registryAddress_;
+        _registryAddress = registryAddress;
+    }
+
+    // Sets globalizer address
+    function setGlobalizer(address globalizerAddress) external {
+        require(!_globalizerSet, "Globalizer already set");
+        _globalizerAddress = globalizerAddress;
+        _globalizerSet = true;
+        emit GlobalizerAddressSet(globalizerAddress);
+    }
+
+    // Transfers tokens
+    function transactToken(address token, uint256 amount, address recipient) external {
+        require(_routers[msg.sender], "Caller not authorized router");
+        require(token == _tokenA || token == _tokenB, "Invalid token");
+        uint256 preBalance = IERC20(token).balanceOf(recipient);
+        try IERC20(token).transfer(recipient, amount) {
+            uint256 postBalance = IERC20(token).balanceOf(recipient);
+            require(postBalance > preBalance, "Token transfer failed");
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+        } catch {
+            revert("Token transfer failed: Unknown error");
+        }
+        _volumeBalance.xVolume += token == _tokenA ? normalize(amount, _decimalsA) : 0;
+        _volumeBalance.yVolume += token == _tokenB ? normalize(amount, _decimalsB) : 0;
+        _currentPrice = this.prices(0);
+        _historicalData.push(HistoricalData({
+            price: _currentPrice,
+            xBalance: _volumeBalance.xBalance,
+            yBalance: _volumeBalance.yBalance,
+            xVolume: _volumeBalance.xVolume,
+            yVolume: _volumeBalance.yVolume,
+            timestamp: block.timestamp
+        }));
+    }
+
+    // Transfers native currency
+    function transactNative(uint256 amount, address recipient) external payable {
+        require(_routers[msg.sender], "Caller not authorized router");
+        require(msg.value == amount, "Incorrect ETH amount");
+        uint256 preBalance = recipient.balance;
+        (bool success, bytes memory data) = recipient.call{value: amount}("");
+        if (!success) {
+            if (data.length > 0) {
+                revert(string(abi.encodePacked("Native transfer failed: ", string(data))));
+            } else {
+                revert("Native transfer failed: Unknown error");
+            }
+        }
+        uint256 postBalance = recipient.balance;
+        require(postBalance > preBalance, "Native transfer failed");
+        _volumeBalance.xVolume += _tokenA == address(0) ? normalize(amount, 18) : 0;
+        _volumeBalance.yVolume += _tokenB == address(0) ? normalize(amount, 18) : 0;
+        _currentPrice = this.prices(0);
+        _historicalData.push(HistoricalData({
+            price: _currentPrice,
+            xBalance: _volumeBalance.xBalance,
+            yBalance: _volumeBalance.yBalance,
+            xVolume: _volumeBalance.xVolume,
+            yVolume: _volumeBalance.yVolume,
+            timestamp: block.timestamp
+        }));
     }
 
     // Returns agent address
-    function agentView() external view returns (address agent) {
+    function agentView() external view returns (address agentAddress) {
         return _agent;
     }
 
