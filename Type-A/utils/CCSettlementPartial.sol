@@ -1,22 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.27
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.27: Fixed TypeError by removing `try` from `_executePartialBuySwap` and `_executePartialSellSwap` calls in `_processBuyOrder` and `_processSellOrder`, as they are internal functions. Ensured direct calls to internal functions inherited from CCUniPartial.sol. Maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals. Ensured compatibility with CCListingTemplate.sol v0.1.12.
 // - v0.0.26: Fixed TypeError by removing `this.` from `_executePartialBuySwap` and `_executePartialSellSwap` calls, as they are internal functions inherited from CCUniPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
 // - v0.0.25: Enhanced error logging in _processBuyOrder and _processSellOrder to capture specific failure reasons: failed token transfer, Uniswap swap failures (slippage, insufficient liquidity), failed approval. Added validation for non-zero swap amount and token addresses. Ensured compatibility with CCListingTemplate.sol v0.1.12 update function clearing pending orders. Replaced "Unknown error" with detailed revert reasons.
-// - v0.0.24: Updated _processBuyOrder and _processSellOrder to set makerAddress and recipientAddress for all updates, not just Core updates, to ensure compatibility with CCListingTemplate.sol update function and prevent 'Update failed for order 0: Unknown error'.
-// - v0.0.23: Modified _processBuyOrder and _processSellOrder to include makerAddress in UpdateType structs, fixing 'Update failed for order 0: Unknown error' by ensuring valid maker address for registry updates in CCListingTemplate.sol.
-// - v0.0.22: Updated _checkPricing and _processBuyOrder/_processSellOrder to use listingContract.prices(0) instead of _computeCurrentPrice for price validation. Compatible with CCUniPartial.sol v0.0.19, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
-// - v0.0.21: Renamed amountOut to amountReceived in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect it’s the output amount from Uniswap swap. Moved amountIn <= pending validation to _processBuyOrder and _processSellOrder.
-// - v0.0.20: Added validation in _prepBuyOrderUpdate and _prepSellOrderUpdate to check pending amount before transfer. Enhanced error logging with specific revert reasons for insufficient pending amounts and transfer failures. Updated _computeAmountSent to return full context for pre/post balance checks.
-// - v0.0.19: Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to use 'depositor' instead of 'caller' in transactToken and transactNative calls to align with ICCListing.sol v0.0.7 and ICCLiquidity.sol v0.0.4. Ensured pre/post balance checks in _computeAmountSent and transfer functions.
-// - v0.0.18: Removed SafeERC20 usage, rely on IERC20 from CCMainPartial.sol, completed _computeAmountSent with pre/post balance checks, removed transfer success checks in _prepBuyOrderUpdate and _prepSellOrderUpdate, added pre/post balance checks for transactToken.
-// - v0.0.17: Removed liquid settlement functions and ICCLiquidity interface, retained Uniswap V2 settlement logic.
-// - v0.0.16: Removed duplicated _prepareSellSwapData, added routers function to ICCLiquidity.
-// - v0.0.15: Added ICCLiquidity interface, removed duplicated swap and update functions.
-// - v0.0.14: Replaced ISSListingTemplate with ICCListing, ISSLiquidityTemplate with ICCLiquidity, split transact/deposit.
 // Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.22), CCSettlementRouter.sol (v0.0.11), CCMainPartial.sol (v0.0.15).
 
 import "./CCUniPartial.sol";

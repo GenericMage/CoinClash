@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.19
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.19: Removed pool check (xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0) in _validateDeposit to allow deposits in any pool state. Updated compatibility comments.
 // - v0.0.18: Removed redundant isRouter checks in _validateDeposit, _prepWithdrawal, _executeWithdrawal, _validateFeeClaim, as CCLiquidityTemplate validates routers[msg.sender]. Updated _executeTokenTransfer to use receivedAmount for transfer and balance checks, handling tax-on-transfer tokens.
 // - v0.0.17: Removed listingId from FeeClaimContext and FeesClaimed event, updated _validateFeeClaim to remove getListingId call, as it’s unnecessary with onlyValidListing validation.

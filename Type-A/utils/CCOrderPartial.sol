@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.04
+// Version: 0.1.0
 // Changes:
-// - v0.0.04: Moved payout-related functionality (PayoutContext, payoutPendingAmounts, _prepPayoutContext, _checkLiquidityBalance, _transferNative, _transferToken, _createPayoutUpdate, settleSingleLongLiquid, settleSingleShortLiquid) from CCLiquidityPartial.sol v0.0.11. Ensured PayoutContext defined before use. Added TransferFailed event and InsufficientAllowance error.
-// - v0.0.03: Removed caller parameter from listingContract.update and transact calls to align with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.10. Updated _executeSingleOrder to pass msg.sender as depositor.
-// - v0.0.02: Replaced invalid try-catch in _clearOrderData with conditional for native/ERC20 transfer.
-// - v0.0.01: Updated to use ICCListing interface from CCMainPartial.sol v0.0.26.
+// - v0.1.0: Bumped version
+// - v0.0.4: Moved payout-related functionality (PayoutContext, payoutPendingAmounts, _prepPayoutContext, _checkLiquidityBalance, _transferNative, _transferToken, _createPayoutUpdate, settleSingleLongLiquid, settleSingleShortLiquid) from CCLiquidityPartial.sol v0.0.11. Ensured PayoutContext defined before use. Added TransferFailed event and InsufficientAllowance error.
+// - v0.0.3: Removed caller parameter from listingContract.update and transact calls to align with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.10. Updated _executeSingleOrder to pass msg.sender as depositor.
+// - v0.0.2: Replaced invalid try-catch in _clearOrderData with conditional for native/ERC20 transfer.
+// - v0.0.1: Updated to use ICCListing interface from CCMainPartial.sol v0.0.26.
 // Compatible with CCListing.sol (v0.0.3), CCOrderRouter.sol (v0.0.11).
 
 import "./CCMainPartial.sol";

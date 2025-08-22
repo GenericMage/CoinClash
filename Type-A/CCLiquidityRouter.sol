@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.25
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.25: Removed invalid try-catch in depositNativeToken and depositToken, as _depositNative and _depositToken are internal. Errors are handled by internal reverts and DepositFailed event in CCLiquidityPartial. Updated compatibility comments.
 // - v0.0.24: Fixed TypeError by removing 'this' from _depositNative and _depositToken calls.
 // - v0.0.23: Updated to use CCLiquidityPartial.sol v0.0.17, removed listingId from FeesClaimed event.

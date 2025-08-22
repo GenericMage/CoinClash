@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.13
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.13: Refactored settleOrders to resolve stack-too-deep error per "do x64" instruction. Split into helper functions (_validateOrder, _processOrder, _updateOrder) with OrderContext struct (orderId, pending, status, updates) to manage at most 4 variables per function. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
 // - v0.0.12: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
 // - v0.0.11: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
-// - v0.0.10: Enhanced error logging in settleOrders to capture specific failure reasons: missing router address, failed token transfer, Uniswap swap failures (slippage, insufficient liquidity), failed approval. Added validation for router address and order existence before processing. Ensured compatibility with CCListingTemplate.sol v0.1.12 update function clearing pending orders by checking order status post-update. Removed "Unknown error" messages with detailed revert reasons.
-// - v0.0.9: Modified settleOrders to avoid reverting unless catastrophic failure. Added detailed return string for reasons no orders are settled (e.g., no pending orders, price out of range, zero swap amount). Removed require(count > 0) to allow graceful degradation.
-// - v0.0.8: Removed redundant uint2str function to avoid override conflict, inheriting from CCSettlementPartial.sol. Maintained pending amount validation and error logging in settleOrders.
-// - v0.0.7: Added validation for pending amounts in settleOrders before calling _processBuyOrder/_processSellOrder. Enhanced error logging in settleOrders with specific revert reasons for failed updates. Added try-catch for listingContract.update to capture and log detailed errors. Added iteration over pending orders with maxIterations check.
-// - v0.0.6: Initial implementation of settleOrders function to iterate over pending orders.
 // Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.0.15), CCUniPartial.sol (v0.0.22), CCSettlementPartial.sol (v0.0.27).
 
 import "./utils/CCSettlementPartial.sol";

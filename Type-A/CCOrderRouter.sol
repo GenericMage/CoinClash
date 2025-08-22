@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.11
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.11: Moved payout-related functions (executeLongPayouts, executeShortPayouts, executeLongPayout, executeShortPayout, settleLongLiquid, settleShortLiquid) from CCLiquidityRouter.sol v0.0.16 and CCLiquidityPartial.sol v0.0.11. Updated compatibility to CCOrderPartial.sol v0.0.04.
 // - v0.0.10: Fixed shadowing declaration of 'maker' in clearOrders by reusing the same variable for getBuyOrderCore and getSellOrderCore destructuring.
 // - v0.0.9: Removed caller parameter from listingContract.update and transact calls to align with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.10. Updated _executeSingleOrder to pass msg.sender as depositor.
-// - v0.0.8: Fixed TypeError in clearOrders by correcting tuple destructuring for getSellOrderCore from (,,address maker) to (address maker,,).
-// - v0.0.7: Removed SafeERC20 usage, replaced with IERC20 interface. Removed require success checks for transfers, relying on pre/post balance checks.
 // Compatible with CCListing.sol (v0.0.3), CCOrderPartial.sol (v0.0.04), CCMainPartial.sol (v0.0.10).
 
 import "./utils/CCOrderPartial.sol";

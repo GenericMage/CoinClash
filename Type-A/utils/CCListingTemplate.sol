@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.10
+// Version: 0.2.0
 // Changes:
-// - v0.1.10: Added error logging in update, transactToken, transactNative with new events ExternalCallFailed, UpdateFailed, TransactionFailed. Emitted decoded reasons from external calls and added specific revert messages.
-// - v0.1.9: Modified price calculation in prices, update, transactToken, and transactNative to use IERC20.balanceOf for _tokenA and _tokenB from _uniswapV2Pair instead of getReserves, addressing incorrect price scaling.
-// - v0.1.8: Modified price calculation in prices, update, transactToken, and transactNative to use reserveB / reserveA * 1e18 instead of reserveA / reserveB * 1e18.
-// - v0.1.7: Refactored globalizeUpdate to occur at end of update, fetching latest order ID and details (maker, token) for ICCGlobalizer.globalizeOrders call.
-// - v0.1.6: Modified globalizeUpdate to always call ICCGlobalizer.globalizeOrders for the maker with appropriate token, removing all checks for order existence.
-// - v0.1.5: Updated globalizeUpdate to call ICCGlobalizer.globalizeOrders with token (_tokenB for buy, _tokenA for sell) instead of listing address, aligning with new ICCGlobalizer interface (v0.2.1).
-// - v0.1.4: Updated _updateRegistry to use ITokenRegistry.initializeTokens, passing both _tokenA and _tokenB (if non-zero) for a single maker, replacing initializeBalances calls.
-// - v0.1.3: Updated _updateRegistry to initialize balances for both _tokenA and _tokenB (if non-zero), removing block.timestamp % 2 token selection.
-// - v0.1.2: Modified LastDayFee struct to use lastDayXFeesAcc, lastDayYFeesAcc. Updated queryYield to accept depositAmount, isTokenA, fetching xFeesAcc, yFeesAcc from CCLiquidityTemplate.liquidityDetail. Updated update function to set lastDayXFeesAcc, lastDayYFeesAcc on day change.
-// - v0.1.1: Removed _updateRegistry calls from transactToken, transactNative. Added UpdateRegistryFailed event.
+// - v0.2.0: Bumped version
+// - v0.1.18: Fixed inconsistent volume tracking in sell order settlement to align with buy order logic. xVolume now tracks tokenA traded, yVolume tracks tokenB traded.
+// - v0.1.17: Fixed balance update logic to adjust incrementally. Corrected order settlement to use exchange rate from Uniswap pair balanceOf. Updated volume tracking to reflect actual token amounts during settlement only.
+// - v0.1.16: Fixed TypeError in setRouters by using address as key for _routers mapping
+// - v0.1.15: Fixed ParserError in queryDurationVolume by renaming 'days' parameter to 'durationDays' to avoid potential keyword conflict and ensure clear syntax.
+// - v0.1.14: Fixed ParserError in queryDurationVolume by explicitly casting days parameter to uint256.
+// - v0.1.13: Removed redundant view functions and made corresponding state variables/mappings public.
+// - v0.1.12: Restored queryYield to calculate annualized yield, adjusted dayStart 
+// - v0.1.11: Fixed order settlement in update
 // Compatible with CCLiquidityTemplate.sol (v0.1.1), CCMainPartial.sol (v0.0.12), CCLiquidityPartial.sol (v0.0.21), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCOrderRouter.sol (v0.0.11), TokenRegistry.sol (2025-08-04).
 
 interface IERC20 {
@@ -22,11 +21,6 @@ interface IERC20 {
 }
 
 interface ICCListing {
-    struct PayoutUpdate {
-        uint8 payoutType; // 0: Long, 1: Short
-        address recipient;
-        uint256 required;
-    }
     function prices(uint256) external view returns (uint256 price);
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
     function liquidityAddressView() external view returns (address);
@@ -34,19 +28,11 @@ interface ICCListing {
     function tokenB() external view returns (address);
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
-    function ssUpdate(PayoutUpdate[] calldata updates) external;
 }
 
 interface IUniswapV2Pair {
     function token0() external view returns (address);
     function token1() external view returns (address);
-}
-
-interface ICCListingTemplate {
-    function getTokens() external view returns (address tokenA, address tokenB);
-    function globalizerAddressView() external view returns (address);
-    function makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds);
-    function makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds);
 }
 
 interface ICCLiquidityTemplate {
@@ -61,45 +47,48 @@ interface ICCGlobalizer {
     function globalizeOrders(address maker, address token) external;
 }
 
-contract CCListingTemplate is ICCListing, ICCListingTemplate {
+contract CCListingTemplate {
     mapping(address => bool) private _routers;
     bool private _routersSet;
-    address private _tokenA;
-    address private _tokenB;
-    uint8 private _decimalsA;
-    uint8 private _decimalsB;
-    address private _uniswapV2Pair;
+    address public tokenA; // Returns address token
+    address public tokenB; // Returns address token
+    uint8 public decimalsA; // Returns uint8 decimals
+    uint8 public decimalsB; // Returns uint8 decimals
+    address public uniswapV2PairView; // Returns address pair
     bool private _uniswapV2PairSet;
-    uint256 private _listingId;
-    address private _agent;
+    uint256 public getListingId; // Returns uint256 listingId
+    address public agentView; // Returns address agent
     address private _registryAddress;
-    address private _liquidityAddress;
+    address public liquidityAddressView; // Returns address liquidityAddress
     address private _globalizerAddress;
     bool private _globalizerSet;
-    uint256 private _nextOrderId;
+    uint256 public getNextOrderId; // Returns uint256 nextOrderId
 
-    struct LastDayFee {
-        uint256 lastDayXFeesAcc; // Tracks xFeesAcc at midnight
-        uint256 lastDayYFeesAcc; // Tracks yFeesAcc at midnight
+    struct PayoutUpdate {
+        uint8 payoutType; // 0: Long, 1: Short
+        address recipient;
+        uint256 required;
+    }
+    struct DayStartFee {
+        uint256 dayStartXFeesAcc; // Tracks xFeesAcc at midnight
+        uint256 dayStartYFeesAcc; // Tracks yFeesAcc at midnight
         uint256 timestamp; // Midnight timestamp
     }
-    LastDayFee private _lastDayFee;
+    DayStartFee public dayStartFee; // Returns DayStartFee memory fee
 
-    struct VolumeBalance {
+    struct Balance {
         uint256 xBalance;
         uint256 yBalance;
-        uint256 xVolume;
-        uint256 yVolume;
     }
-    VolumeBalance private _volumeBalance;
+    Balance private _balance;
 
-    uint256 private _currentPrice;
-    uint256[] private _pendingBuyOrders;
-    uint256[] private _pendingSellOrders;
-    uint256[] private _longPayoutsByIndex;
-    uint256[] private _shortPayoutsByIndex;
-    mapping(address => uint256[]) private _makerPendingOrders;
-    mapping(address => uint256[]) private _userPayoutIDs;
+    uint256 public listingPriceView; // Returns uint256 price
+    uint256[] public pendingBuyOrdersView; // Returns uint256[] memory orderIds
+    uint256[] public pendingSellOrdersView; // Returns uint256[] memory orderIds
+    mapping(address => uint256[]) public makerPendingOrdersView; // Returns uint256[] memory orderIds
+    uint256[] public longPayoutByIndexView; // Returns uint256[] memory orderIds
+    uint256[] public shortPayoutByIndexView; // Returns uint256[] memory orderIds
+    mapping(address => uint256[]) public userPayoutIDsView; // Returns uint256[] memory orderIds
 
     struct HistoricalData {
         uint256 price;
@@ -110,6 +99,9 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         uint256 timestamp;
     }
     HistoricalData[] private _historicalData;
+
+    // Maps midnight timestamps to historical data indices
+    mapping(uint256 => uint256) private _dayStartIndices;
 
     struct BuyOrderCore {
         address makerAddress;
@@ -167,14 +159,14 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         uint256 amountSent; // Amount of opposite token sent during settlement
     }
 
-    mapping(uint256 => BuyOrderCore) private _buyOrderCores;
-    mapping(uint256 => BuyOrderPricing) private _buyOrderPricings;
-    mapping(uint256 => BuyOrderAmounts) private _buyOrderAmounts;
-    mapping(uint256 => SellOrderCore) private _sellOrderCores;
-    mapping(uint256 => SellOrderPricing) private _sellOrderPricings;
-    mapping(uint256 => SellOrderAmounts) private _sellOrderAmounts;
-    mapping(uint256 => LongPayoutStruct) private _longPayouts;
-    mapping(uint256 => ShortPayoutStruct) private _shortPayouts;
+    mapping(uint256 => BuyOrderCore) public getBuyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 => BuyOrderPricing) public getBuyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 => BuyOrderAmounts) public getBuyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 => SellOrderCore) public getSellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 => SellOrderPricing) public getSellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 => SellOrderAmounts) public getSellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 => LongPayoutStruct) public getLongPayout; // Returns LongPayoutStruct memory payout
+    mapping(uint256 => ShortPayoutStruct) public getShortPayout; // Returns ShortPayoutStruct memory payout
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
@@ -209,21 +201,20 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         return (timestamp / 86400) * 86400;
     }
 
-    // Calculates volume change since startTime
+    // Calculates volume change since startTime using historical data
     function _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) internal view returns (uint256 volumeChange) {
-        uint256 currentVolume = isA ? _volumeBalance.xVolume : _volumeBalance.yVolume;
         uint256 iterationsLeft = maxIterations;
         if (_historicalData.length == 0) return 0;
         for (uint256 i = _historicalData.length; i > 0 && iterationsLeft > 0; i--) {
             HistoricalData memory data = _historicalData[i - 1];
             iterationsLeft--;
             if (data.timestamp >= startTime) {
-                return currentVolume - (isA ? data.xVolume : data.yVolume);
+                return isA ? data.xVolume : data.yVolume;
             }
         }
         if (iterationsLeft == 0 || _historicalData.length <= maxIterations) {
             HistoricalData memory earliest = _historicalData[0];
-            return currentVolume - (isA ? earliest.xVolume : earliest.yVolume);
+            return isA ? earliest.xVolume : earliest.yVolume;
         }
         return 0;
     }
@@ -231,25 +222,23 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
     // Updates token registry with balances for both tokens for a single user
     function _updateRegistry(address maker) internal {
         if (_registryAddress == address(0) || maker == address(0)) return;
-        uint256 tokenCount = (_tokenA != address(0) ? 1 : 0) + (_tokenB != address(0) ? 1 : 0);
+        uint256 tokenCount = (tokenA != address(0) ? 1 : 0) + (tokenB != address(0) ? 1 : 0);
         address[] memory tokens = new address[](tokenCount);
         uint256 index = 0;
-        if (_tokenA != address(0)) tokens[index++] = _tokenA;
-        if (_tokenB != address(0)) tokens[index] = _tokenB;
+        if (tokenA != address(0)) tokens[index++] = tokenA;
+        if (tokenB != address(0)) tokens[index] = tokenB;
         uint256 gasBefore = gasleft();
         try ITokenRegistry(_registryAddress).initializeTokens{gas: 500000}(maker, tokens) {
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
             emit UpdateRegistryFailed(maker, tokens, decodedReason);
             emit ExternalCallFailed(_registryAddress, "initializeTokens", decodedReason);
-            revert(string(abi.encodePacked("Registry update failed: ", decodedReason)));
         }
         uint256 gasUsed = gasBefore - gasleft();
         if (gasUsed > 500000) {
             string memory reason = "Out of gas in registry call";
             emit UpdateRegistryFailed(maker, tokens, reason);
-            emit UpdateFailed(_listingId, reason);
-            revert(string(abi.encodePacked("Registry call failed: ", reason)));
+            emit UpdateFailed(getListingId, reason);
         }
     }
 
@@ -266,21 +255,21 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
 
     // Calls globalizeOrders with latest order details
     function globalizeUpdate() internal {
-        if (_globalizerAddress == address(0) || _nextOrderId == 0) return;
-        uint256 orderId = _nextOrderId - 1; // Latest order ID
+        if (_globalizerAddress == address(0) || getNextOrderId == 0) return;
+        uint256 orderId = getNextOrderId - 1; // Latest order ID
         address maker;
         address token;
         // Check if it's a buy order
-        BuyOrderCore memory buyCore = _buyOrderCores[orderId];
+        BuyOrderCore memory buyCore = getBuyOrderCore[orderId];
         if (buyCore.makerAddress != address(0)) {
             maker = buyCore.makerAddress;
-            token = _tokenB != address(0) ? _tokenB : _tokenA; // Use tokenB for buy
+            token = tokenB != address(0) ? tokenB : tokenA; // Use tokenB for buy
         } else {
             // Check if it's a sell order
-            SellOrderCore memory sellCore = _sellOrderCores[orderId];
+            SellOrderCore memory sellCore = getSellOrderCore[orderId];
             if (sellCore.makerAddress != address(0)) {
                 maker = sellCore.makerAddress;
-                token = _tokenA != address(0) ? _tokenA : _tokenB; // Use tokenA for sell
+                token = tokenA != address(0) ? tokenA : tokenB; // Use tokenA for sell
             } else {
                 return; // No valid order found
             }
@@ -290,33 +279,80 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
             emit ExternalCallFailed(_globalizerAddress, "globalizeOrders", decodedReason);
-            revert(string(abi.encodePacked("Globalizer call failed: ", decodedReason)));
         }
+    }
+
+    // Captures live price, balances, and volumes into historical data
+    function _captureHistoricalData() internal {
+        uint256 balanceA;
+        uint256 balanceB;
+        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+            balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
+        } catch (bytes memory reason) {
+            string memory decodedReason = string(reason);
+            emit ExternalCallFailed(tokenA, "balanceOf", decodedReason);
+            balanceA = 0;
+        }
+        try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+            balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
+        } catch (bytes memory reason) {
+            string memory decodedReason = string(reason);
+            emit ExternalCallFailed(tokenB, "balanceOf", decodedReason);
+            balanceB = 0;
+        }
+        uint256 price = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+        uint256 midnight = _floorToMidnight(block.timestamp);
+        if (_historicalData.length == 0 || !_isSameDay(_historicalData[_historicalData.length - 1].timestamp, block.timestamp)) {
+            _dayStartIndices[midnight] = _historicalData.length;
+        }
+        _historicalData.push(HistoricalData({
+            price: price,
+            xBalance: _balance.xBalance,
+            yBalance: _balance.yBalance,
+            xVolume: 0, // Updated during settlement
+            yVolume: 0, // Updated during settlement
+            timestamp: block.timestamp
+        }));
+    }
+
+    // Computes current exchange rate from Uniswap pair balanceOf
+    function _getExchangeRate() internal view returns (uint256 price) {
+        uint256 balanceA;
+        uint256 balanceB;
+        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+            balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
+        } catch {
+            return listingPriceView;
+        }
+        try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+            balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
+        } catch {
+            return listingPriceView;
+        }
+        return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
     }
 
     // Updates balances, orders, or historical data, restricted to routers
     function update(UpdateType[] memory updates) external {
         require(_routers[msg.sender], "Router only");
-        VolumeBalance storage balances = _volumeBalance;
+        Balance storage balances = _balance;
         bool volumeUpdated = false;
         address maker = address(0);
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
-            if (u.updateType == 0 && (u.index == 2 || u.index == 3)) {
+            if (u.updateType == 1 && u.structId == 2 && u.value > 0 && u.amountSent > 0) {
                 volumeUpdated = true;
-            } else if (u.updateType == 1 && u.structId == 2 && u.value > 0) {
-                volumeUpdated = true;
-            } else if (u.updateType == 2 && u.structId == 2 && u.value > 0) {
+            } else if (u.updateType == 2 && u.structId == 2 && u.value > 0 && u.amountSent > 0) {
                 volumeUpdated = true;
             }
             if (u.updateType == 1 || u.updateType == 2) {
                 maker = u.addr;
             }
         }
-        if (volumeUpdated && (!_isSameDay(_lastDayFee.timestamp, block.timestamp) || _lastDayFee.timestamp == 0)) {
+        if (volumeUpdated && (!_isSameDay(dayStartFee.timestamp, block.timestamp) || dayStartFee.timestamp == 0)) {
             uint256 xFeesAcc;
             uint256 yFeesAcc;
-            try ICCLiquidityTemplate(_liquidityAddress).liquidityDetail() returns (
+            try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
                 uint256,
                 uint256,
                 uint256,
@@ -328,175 +364,166 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
                 yFeesAcc = yFees;
             } catch (bytes memory reason) {
                 string memory decodedReason = string(reason);
-                emit ExternalCallFailed(_liquidityAddress, "liquidityDetail", decodedReason);
-                xFeesAcc = _lastDayFee.lastDayXFeesAcc;
-                yFeesAcc = _lastDayFee.lastDayYFeesAcc;
+                emit ExternalCallFailed(liquidityAddressView, "liquidityDetail", decodedReason);
+                xFeesAcc = dayStartFee.dayStartXFeesAcc;
+                yFeesAcc = dayStartFee.dayStartYFeesAcc;
             }
-            _lastDayFee = LastDayFee(xFeesAcc, yFeesAcc, _floorToMidnight(block.timestamp));
+            dayStartFee = DayStartFee(xFeesAcc, yFeesAcc, _floorToMidnight(block.timestamp));
         }
+        uint256 xVolume = 0;
+        uint256 yVolume = 0;
+        uint256 exchangeRate = _getExchangeRate();
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0) {
-                if (u.index == 0) balances.xBalance = u.value;
-                else if (u.index == 1) balances.yBalance = u.value;
-                else if (u.index == 2) balances.xVolume += u.value;
-                else if (u.index == 3) balances.yVolume += u.value;
+                if (u.index == 0) balances.xBalance += u.value; // Incremental update for tokenA
+                else if (u.index == 1) balances.yBalance += u.value; // Incremental update for tokenB
             } else if (u.updateType == 1) {
                 if (u.structId == 0) {
-                    BuyOrderCore storage core = _buyOrderCores[u.index];
+                    BuyOrderCore storage core = getBuyOrderCore[u.index];
                     if (core.makerAddress == address(0)) {
                         core.makerAddress = u.addr;
                         core.recipientAddress = u.recipient;
                         core.status = 1;
-                        _pendingBuyOrders.push(u.index);
-                        _makerPendingOrders[u.addr].push(u.index);
-                        _nextOrderId = u.index + 1;
-                        emit OrderUpdated(_listingId, u.index, true, 1);
+                        pendingBuyOrdersView.push(u.index);
+                        makerPendingOrdersView[u.addr].push(u.index);
+                        getNextOrderId = u.index + 1;
+                        emit OrderUpdated(getListingId, u.index, true, 1);
                     } else if (u.value == 0) {
                         core.status = 0;
-                        removePendingOrder(_pendingBuyOrders, u.index);
-                        removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
-                        emit OrderUpdated(_listingId, u.index, true, 0);
+                        removePendingOrder(pendingBuyOrdersView, u.index);
+                        removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
+                        emit OrderUpdated(getListingId, u.index, true, 0);
                     }
                 } else if (u.structId == 1) {
-                    BuyOrderPricing storage pricing = _buyOrderPricings[u.index];
+                    BuyOrderPricing storage pricing = getBuyOrderPricing[u.index];
                     pricing.maxPrice = u.maxPrice;
                     pricing.minPrice = u.minPrice;
                 } else if (u.structId == 2) {
-                    BuyOrderAmounts storage amounts = _buyOrderAmounts[u.index];
-                    BuyOrderCore storage core = _buyOrderCores[u.index];
+                    BuyOrderAmounts storage amounts = getBuyOrderAmounts[u.index];
+                    BuyOrderCore storage core = getBuyOrderCore[u.index];
                     if (amounts.pending == 0 && core.makerAddress != address(0)) {
-                        amounts.pending = u.value;
-                        amounts.amountSent = u.amountSent;
-                        balances.yBalance += u.value;
-                        balances.yVolume += u.value;
-                    } else if (core.status == 1) {
+                        amounts.pending = u.value; // tokenB pending
+                        amounts.amountSent = u.amountSent; // tokenA sent
+                        balances.yBalance += u.value; // tokenB received
+                    } else if (core.status == 1 && u.value > 0 && u.amountSent > 0) {
                         if (amounts.pending < u.value) {
                             string memory reason = "Insufficient pending amount for buy order";
-                            emit UpdateFailed(_listingId, reason);
+                            emit UpdateFailed(getListingId, reason);
                             revert(string(abi.encodePacked("Update failed: ", reason)));
                         }
                         amounts.pending -= u.value;
                         amounts.filled += u.value;
                         amounts.amountSent += u.amountSent;
-                        balances.xBalance -= u.value;
-                        core.status = amounts.pending == 0 ? 3 : 2;
+                        balances.xBalance += u.amountSent; // tokenA received
+                        balances.yBalance -= u.value; // tokenB spent
+                        xVolume += u.amountSent; // tokenA volume
+                        yVolume += u.value; // tokenB volume
                         if (amounts.pending == 0) {
-                            removePendingOrder(_pendingBuyOrders, u.index);
-                            removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
+                            core.status = 3;
+                            removePendingOrder(pendingBuyOrdersView, u.index);
+                            removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
+                            emit OrderUpdated(getListingId, u.index, true, 3);
+                        } else {
+                            core.status = 2;
+                            emit OrderUpdated(getListingId, u.index, true, 2);
                         }
-                        emit OrderUpdated(_listingId, u.index, true, core.status);
                     }
                 }
             } else if (u.updateType == 2) {
                 if (u.structId == 0) {
-                    SellOrderCore storage core = _sellOrderCores[u.index];
+                    SellOrderCore storage core = getSellOrderCore[u.index];
                     if (core.makerAddress == address(0)) {
                         core.makerAddress = u.addr;
                         core.recipientAddress = u.recipient;
                         core.status = 1;
-                        _pendingSellOrders.push(u.index);
-                        _makerPendingOrders[u.addr].push(u.index);
-                        _nextOrderId = u.index + 1;
-                        emit OrderUpdated(_listingId, u.index, false, 1);
+                        pendingSellOrdersView.push(u.index);
+                        makerPendingOrdersView[u.addr].push(u.index);
+                        getNextOrderId = u.index + 1;
+                        emit OrderUpdated(getListingId, u.index, false, 1);
                     } else if (u.value == 0) {
                         core.status = 0;
-                        removePendingOrder(_pendingSellOrders, u.index);
-                        removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
-                        emit OrderUpdated(_listingId, u.index, false, 0);
+                        removePendingOrder(pendingSellOrdersView, u.index);
+                        removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
+                        emit OrderUpdated(getListingId, u.index, false, 0);
                     }
                 } else if (u.structId == 1) {
-                    SellOrderPricing storage pricing = _sellOrderPricings[u.index];
+                    SellOrderPricing storage pricing = getSellOrderPricing[u.index];
                     pricing.maxPrice = u.maxPrice;
                     pricing.minPrice = u.minPrice;
                 } else if (u.structId == 2) {
-                    SellOrderAmounts storage amounts = _sellOrderAmounts[u.index];
-                    SellOrderCore storage core = _sellOrderCores[u.index];
+                    SellOrderAmounts storage amounts = getSellOrderAmounts[u.index];
+                    SellOrderCore storage core = getSellOrderCore[u.index];
                     if (amounts.pending == 0 && core.makerAddress != address(0)) {
-                        amounts.pending = u.value;
-                        amounts.amountSent = u.amountSent;
-                        balances.xBalance += u.value;
-                        balances.xVolume += u.value;
-                    } else if (core.status == 1) {
+                        amounts.pending = u.value; // tokenA pending
+                        amounts.amountSent = u.amountSent; // tokenB sent
+                        balances.xBalance += u.value; // tokenA received
+                    } else if (core.status == 1 && u.value > 0 && u.amountSent > 0) {
                         if (amounts.pending < u.value) {
                             string memory reason = "Insufficient pending amount for sell order";
-                            emit UpdateFailed(_listingId, reason);
+                            emit UpdateFailed(getListingId, reason);
                             revert(string(abi.encodePacked("Update failed: ", reason)));
                         }
                         amounts.pending -= u.value;
                         amounts.filled += u.value;
                         amounts.amountSent += u.amountSent;
-                        balances.yBalance -= u.value;
-                        core.status = amounts.pending == 0 ? 3 : 2;
+                        balances.xBalance -= u.value; // tokenA spent
+                        balances.yBalance += u.amountSent; // tokenB received
+                        xVolume += u.value; // tokenA volume
+                        yVolume += u.amountSent; // tokenB volume
                         if (amounts.pending == 0) {
-                            removePendingOrder(_pendingSellOrders, u.index);
-                            removePendingOrder(_makerPendingOrders[core.makerAddress], u.index);
+                            core.status = 3;
+                            removePendingOrder(pendingSellOrdersView, u.index);
+                            removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
+                            emit OrderUpdated(getListingId, u.index, false, 3);
+                        } else {
+                            core.status = 2;
+                            emit OrderUpdated(getListingId, u.index, false, 2);
                         }
-                        emit OrderUpdated(_listingId, u.index, false, core.status);
                     }
                 }
-            } else if (u.updateType == 3) {
-                HistoricalData memory data;
-                data.price = u.value;
-                data.xBalance = balances.xBalance;
-                data.yBalance = balances.yBalance;
-                data.xVolume = balances.xVolume;
-                data.yVolume = balances.yVolume;
-                data.timestamp = block.timestamp;
-                _historicalData.push(data);
             }
         }
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
-        } catch (bytes memory reason) {
-            string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_tokenA, "balanceOf", decodedReason);
-            reserveA = 0;
+        if (xVolume > 0 || yVolume > 0) {
+            HistoricalData storage latest = _historicalData[_historicalData.length - 1];
+            latest.xVolume += xVolume;
+            latest.yVolume += yVolume;
+            _captureHistoricalData();
         }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
-        } catch (bytes memory reason) {
-            string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_tokenB, "balanceOf", decodedReason);
-            reserveB = 0;
-        }
-        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
         if (maker != address(0)) {
             _updateRegistry(maker);
+            globalizeUpdate();
         }
-        globalizeUpdate();
-        emit BalancesUpdated(_listingId, balances.xBalance, balances.yBalance);
+        emit BalancesUpdated(getListingId, balances.xBalance, balances.yBalance);
     }
 
-    // Processes payout updates, restricted to routers
-    function ssUpdate(ICCListing.PayoutUpdate[] memory payoutUpdates) external override {
+    // Processes long and short payout updates, restricted to routers
+    function ssUpdate(PayoutUpdate[] memory payoutUpdates) external {
         require(_routers[msg.sender], "Router only");
         for (uint256 i = 0; i < payoutUpdates.length; i++) {
-            ICCListing.PayoutUpdate memory p = payoutUpdates[i];
+            PayoutUpdate memory p = payoutUpdates[i];
             if (p.payoutType == 0) {
-                LongPayoutStruct storage payout = _longPayouts[_nextOrderId];
+                LongPayoutStruct storage payout = getLongPayout[getNextOrderId];
                 payout.makerAddress = p.recipient;
                 payout.recipientAddress = p.recipient;
                 payout.required = p.required;
-                payout.orderId = _nextOrderId;
+                payout.orderId = getNextOrderId;
                 payout.status = 1;
-                _longPayoutsByIndex.push(_nextOrderId);
-                _userPayoutIDs[p.recipient].push(_nextOrderId);
-                emit PayoutOrderCreated(_nextOrderId, true, 1);
-                _nextOrderId++;
+                longPayoutByIndexView.push(getNextOrderId);
+                userPayoutIDsView[p.recipient].push(getNextOrderId);
+                emit PayoutOrderCreated(getNextOrderId, true, 1);
+                getNextOrderId++;
             } else if (p.payoutType == 1) {
-                ShortPayoutStruct storage payout = _shortPayouts[_nextOrderId];
+                ShortPayoutStruct storage payout = getShortPayout[getNextOrderId];
                 payout.makerAddress = p.recipient;
                 payout.recipientAddress = p.recipient;
                 payout.amount = p.required;
-                payout.orderId = _nextOrderId;
+                payout.orderId = getNextOrderId;
                 payout.status = 1;
-                _shortPayoutsByIndex.push(_nextOrderId);
-                _userPayoutIDs[p.recipient].push(_nextOrderId);
-                emit PayoutOrderCreated(_nextOrderId, false, 1);
-                _nextOrderId++;
+                shortPayoutByIndexView.push(getNextOrderId);
+                userPayoutIDsView[p.recipient].push(getNextOrderId);
+                emit PayoutOrderCreated(getNextOrderId, false, 1);
+                getNextOrderId++;
             }
         }
     }
@@ -504,33 +531,31 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
     // Transfers ERC20 tokens, restricted to routers
     function transactToken(address token, uint256 amount, address recipient) external {
         require(_routers[msg.sender], "Router only");
-        require(token == _tokenA || token == _tokenB, "Invalid token");
-        uint8 decimals = token == _tokenA ? _decimalsA : _decimalsB;
+        require(token == tokenA || token == tokenB, "Invalid token");
+        uint8 decimals = token == tokenA ? decimalsA : decimalsB;
         uint256 normalizedAmount = normalize(amount, decimals);
-        if (token == _tokenA) {
-            _volumeBalance.xBalance += normalizedAmount;
-            _volumeBalance.xVolume += normalizedAmount;
+        if (token == tokenA) {
+            _balance.xBalance += normalizedAmount;
         } else {
-            _volumeBalance.yBalance += normalizedAmount;
-            _volumeBalance.yVolume += normalizedAmount;
+            _balance.yBalance += normalizedAmount;
         }
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
+        uint256 balanceA;
+        uint256 balanceB;
+        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+            balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_tokenA, "balanceOf", decodedReason);
-            reserveA = 0;
+            emit ExternalCallFailed(tokenA, "balanceOf", decodedReason);
+            balanceA = 0;
         }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+            balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_tokenB, "balanceOf", decodedReason);
-            reserveB = 0;
+            emit ExternalCallFailed(tokenB, "balanceOf", decodedReason);
+            balanceB = 0;
         }
-        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        listingPriceView = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
         try IERC20(token).transfer(recipient, amount) returns (bool success) {
             if (!success) {
                 string memory reason = "Token transfer returned false";
@@ -543,45 +568,125 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
             emit TransactionFailed(recipient, decodedReason);
             revert(string(abi.encodePacked("Token transfer failed: ", decodedReason)));
         }
-        emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
+        emit BalancesUpdated(getListingId, _balance.xBalance, _balance.yBalance);
     }
 
     // Transfers native ETH, restricted to routers
-    function transactNative(uint256 amount, address recipient) external {
+    function transactNative(uint256 amount, address recipient) external payable {
         require(_routers[msg.sender], "Router only");
-        require(_tokenA == address(0) || _tokenB == address(0), "No native token");
+        require(tokenA == address(0) || tokenB == address(0), "No native token");
         uint256 normalizedAmount = normalize(amount, 18);
-        if (_tokenA == address(0)) {
-            _volumeBalance.xBalance += normalizedAmount;
-            _volumeBalance.xVolume += normalizedAmount;
+        if (tokenA == address(0)) {
+            _balance.xBalance += normalizedAmount;
         } else {
-            _volumeBalance.yBalance += normalizedAmount;
-            _volumeBalance.yVolume += normalizedAmount;
+            _balance.yBalance += normalizedAmount;
         }
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
+        uint256 balanceA;
+        uint256 balanceB;
+        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+            balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_tokenA, "balanceOf", decodedReason);
-            reserveA = 0;
+            emit ExternalCallFailed(tokenA, "balanceOf", decodedReason);
+            balanceA = 0;
         }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+            balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_tokenB, "balanceOf", decodedReason);
-            reserveB = 0;
+            emit ExternalCallFailed(tokenB, "balanceOf", decodedReason);
+            balanceB = 0;
         }
-        _currentPrice = reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        listingPriceView = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
         (bool success, bytes memory data) = recipient.call{value: amount}("");
         if (!success) {
             string memory reason = data.length > 0 ? string(data) : "Native transfer call failed";
             emit TransactionFailed(recipient, reason);
             revert(string(abi.encodePacked("Native transfer failed: ", reason)));
         }
-        emit BalancesUpdated(_listingId, _volumeBalance.xBalance, _volumeBalance.yBalance);
+        emit BalancesUpdated(getListingId, _balance.xBalance, _balance.yBalance);
+    }
+
+    // Calculates annualized yield based on liquidity fees
+    function queryYield(bool isA, uint256 maxIterations, uint256 depositAmount, bool isTokenA) external view returns (uint256 yieldAnnualized) {
+        require(maxIterations > 0, "Invalid maxIterations");
+        if (liquidityAddressView == address(0)) return 0;
+        uint256 xLiquid;
+        uint256 yLiquid;
+        uint256 xFeesAcc;
+        uint256 yFeesAcc;
+        try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
+            uint256 xLiq,
+            uint256 yLiq,
+            uint256,
+            uint256,
+            uint256 xFees,
+            uint256 yFees
+        ) {
+            xLiquid = xLiq;
+            yLiquid = yLiq;
+            xFeesAcc = xFees;
+            yFeesAcc = yFees;
+        } catch {
+            return 0;
+        }
+        DayStartFee memory dayStart = dayStartFee;
+        if (dayStart.timestamp == 0 || !_isSameDay(dayStart.timestamp, block.timestamp)) return 0;
+        uint256 fees = isTokenA ? xFeesAcc : yFeesAcc;
+        uint256 dFeesAcc = isTokenA ? dayStart.dayStartXFeesAcc : dayStart.dayStartYFeesAcc;
+        uint256 liquid = isTokenA ? xLiquid : yLiquid;
+        uint256 contributedFees = fees > dFeesAcc ? fees - dFeesAcc : 0;
+        uint256 liquidityContribution = liquid > 0 ? (depositAmount * 1e18) / (liquid + depositAmount) : 0;
+        uint256 feeShare = (contributedFees * liquidityContribution) / 1e18;
+        feeShare = feeShare > contributedFees ? contributedFees : feeShare;
+        uint256 dailyFees = feeShare;
+        yieldAnnualized = (dailyFees * 365 * 10000) / (depositAmount > 0 ? depositAmount : 1);
+        return yieldAnnualized;
+    }
+
+    // Approximates volume over a specified number of days
+    function queryDurationVolume(bool isA, uint256 durationDays, uint256 maxIterations) external view returns (uint256 volume) {
+        require(durationDays > 0, "Invalid durationDays");
+        require(maxIterations > 0, "Invalid maxIterations");
+        if (_historicalData.length == 0) return 0;
+        uint256 currentMidnight = _floorToMidnight(block.timestamp);
+        uint256 startMidnight = currentMidnight - (durationDays * 86400);
+        uint256 totalVolume = 0;
+        uint256 iterationsLeft = maxIterations;
+        for (uint256 i = _historicalData.length; i > 0 && iterationsLeft > 0; i--) {
+            HistoricalData memory data = _historicalData[i - 1];
+            if (data.timestamp >= startMidnight && data.timestamp <= currentMidnight) {
+                totalVolume += isA ? data.xVolume : data.yVolume;
+            }
+            iterationsLeft--;
+        }
+        return totalVolume;
+    }
+
+    // Returns up to count day boundary indices and timestamps
+    function getLastDays(uint256 count, uint256 maxIterations) external view returns (uint256[] memory indices, uint256[] memory timestamps) {
+        require(maxIterations > 0, "Invalid maxIterations");
+        uint256 currentMidnight = _floorToMidnight(block.timestamp);
+        uint256[] memory tempIndices = new uint256[](maxIterations);
+        uint256[] memory tempTimestamps = new uint256[](maxIterations);
+        uint256 found = 0;
+        uint256 iterationsLeft = maxIterations;
+        for (uint256 i = 0; i < count && iterationsLeft > 0; i++) {
+            uint256 dayTimestamp = currentMidnight - (i * 86400);
+            uint256 index = _dayStartIndices[dayTimestamp];
+            if (_historicalData.length > index && _historicalData[index].timestamp == dayTimestamp) {
+                tempIndices[found] = index;
+                tempTimestamps[found] = dayTimestamp;
+                found++;
+            }
+            iterationsLeft--;
+        }
+        indices = new uint256[](found);
+        timestamps = new uint256[](found);
+        for (uint256 i = 0; i < found; i++) {
+            indices[i] = tempIndices[i];
+            timestamps[i] = tempTimestamps[i];
+        }
     }
 
     // Sets globalizer contract address, callable once
@@ -594,10 +699,10 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
     }
 
     // Sets Uniswap V2 pair address, callable once
-    function setUniswapV2Pair(address uniswapV2Pair_) external {
+    function setUniswapV2Pair(address _uniswapV2Pair) external {
         require(!_uniswapV2PairSet, "Uniswap V2 pair already set");
-        require(uniswapV2Pair_ != address(0), "Invalid pair address");
-        _uniswapV2Pair = uniswapV2Pair_;
+        require(_uniswapV2Pair != address(0), "Invalid pair address");
+        uniswapV2PairView = _uniswapV2Pair;
         _uniswapV2PairSet = true;
     }
 
@@ -613,200 +718,153 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
     }
 
     // Sets listing ID, callable once
-    function setListingId(uint256 listingId_) external {
-        require(_listingId == 0, "Listing ID already set");
-        _listingId = listingId_;
+    function setListingId(uint256 _listingId) external {
+        require(getListingId == 0, "Listing ID already set");
+        getListingId = _listingId;
     }
 
     // Sets liquidity address, callable once
-    function setLiquidityAddress(address liquidityAddress_) external {
-        require(_liquidityAddress == address(0), "Liquidity already set");
-        require(liquidityAddress_ != address(0), "Invalid liquidity address");
-        _liquidityAddress = liquidityAddress_;
+    function setLiquidityAddress(address _liquidityAddress) external {
+        require(liquidityAddressView == address(0), "Liquidity already set");
+        require(_liquidityAddress != address(0), "Invalid liquidity address");
+        liquidityAddressView = _liquidityAddress;
     }
 
     // Sets token addresses, callable once
-    function setTokens(address tokenA_, address tokenB_) external {
-        require(_tokenA == address(0) && _tokenB == address(0), "Tokens already set");
-        require(tokenA_ != tokenB_, "Tokens must be different");
-        require(tokenA_ != address(0) || tokenB_ != address(0), "Both tokens cannot be zero");
-        _tokenA = tokenA_;
-        _tokenB = tokenB_;
-        _decimalsA = tokenA_ == address(0) ? 18 : IERC20(tokenA_).decimals();
-        _decimalsB = tokenB_ == address(0) ? 18 : IERC20(tokenB_).decimals();
+    function setTokens(address _tokenA, address _tokenB) external {
+        require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
+        require(_tokenA != _tokenB, "Tokens must be different");
+        require(_tokenA != address(0) || _tokenB != address(0), "Both tokens cannot be zero");
+        tokenA = _tokenA;
+        tokenB = _tokenB;
+        decimalsA = _tokenA == address(0) ? 18 : IERC20(_tokenA).decimals();
+        decimalsB = _tokenB == address(0) ? 18 : IERC20(_tokenB).decimals();
     }
 
     // Sets agent address, callable once
-    function setAgent(address agent_) external {
-        require(_agent == address(0), "Agent already set");
-        require(agent_ != address(0), "Invalid agent address");
-        _agent = agent_;
+    function setAgent(address _agent) external {
+        require(agentView == address(0), "Agent already set");
+        require(_agent != address(0), "Invalid agent address");
+        agentView = _agent;
     }
 
     // Sets registry address, callable once
-    function setRegistry(address registryAddress_) external {
+    function setRegistry(address _registryAddress) external {
         require(_registryAddress == address(0), "Registry already set");
-        require(registryAddress_ != address(0), "Invalid registry address");
-        _registryAddress = registryAddress_;
+        require(_registryAddress != address(0), "Invalid registry address");
+        _registryAddress = _registryAddress;
     }
 
-    // Returns agent address
-    function agentView() external view returns (address agent) {
-        return _agent;
-    }
-
-    // Returns Uniswap V2 pair address
-    function uniswapV2PairView() external view returns (address pair) {
-        return _uniswapV2Pair;
+    // Returns token pair
+    function getTokens() external view returns (address tokenA_, address tokenB_) {
+        require(tokenA != address(0) || tokenB != address(0), "Tokens not set");
+        return (tokenA, tokenB);
     }
 
     // Computes current price from Uniswap V2 pair token balances
     function prices(uint256) external view returns (uint256 price) {
-        uint256 reserveA;
-        uint256 reserveB;
-        try IERC20(_tokenA).balanceOf(_uniswapV2Pair) returns (uint256 balanceA) {
-            reserveA = _tokenA == address(0) ? 0 : normalize(balanceA, _decimalsA);
+        uint256 balanceA;
+        uint256 balanceB;
+        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+            balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
         } catch {
-            return _currentPrice;
+            return listingPriceView;
         }
-        try IERC20(_tokenB).balanceOf(_uniswapV2Pair) returns (uint256 balanceB) {
-            reserveB = _tokenB == address(0) ? 0 : normalize(balanceB, _decimalsB);
+        try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+            balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
         } catch {
-            return _currentPrice;
+            return listingPriceView;
         }
-        return reserveA == 0 ? 0 : (reserveB * 1e18) / reserveA;
+        return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
     }
 
-    // Returns token pair
-    function getTokens() external view returns (address tokenA, address tokenB) {
-        require(_tokenA != address(0) || _tokenB != address(0), "Tokens not set");
-        return (_tokenA, _tokenB);
-    }
-
-    // Returns volume balances
+    // Returns balances
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
-        return (_volumeBalance.xBalance, _volumeBalance.yBalance);
+        return (_balance.xBalance, _balance.yBalance);
     }
 
-    // Returns liquidity address
-    function liquidityAddressView() external view returns (address liquidityAddress) {
-        return _liquidityAddress;
-    }
-
-    // Returns tokenA address
-    function tokenA() external view returns (address token) {
-        return _tokenA;
-    }
-
-    // Returns tokenB address
-    function tokenB() external view returns (address token) {
-        return _tokenB;
-    }
-
-    // Returns decimalsA
-    function decimalsA() external view returns (uint8 decimals) {
-        return _decimalsA;
-    }
-
-    // Returns decimalsB
-    function decimalsB() external view returns (uint8 decimals) {
-        return _decimalsB;
-    }
-
-    // Returns listing ID
-    function getListingId() external view returns (uint256 listingId) {
-        return _listingId;
-    }
-
-    // Returns next order ID
-    function getNextOrderId() external view returns (uint256 nextOrderId) {
-        return _nextOrderId;
-    }
-
-    // Returns volume balance details
+    // Returns balance and volume details
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
-        return (_volumeBalance.xBalance, _volumeBalance.yBalance, _volumeBalance.xVolume, _volumeBalance.yVolume);
+        xBalance = _balance.xBalance;
+        yBalance = _balance.yBalance;
+        if (_historicalData.length > 0) {
+            HistoricalData memory latest = _historicalData[_historicalData.length - 1];
+            xVolume = latest.xVolume;
+            yVolume = latest.yVolume;
+        } else {
+            xVolume = 0;
+            yVolume = 0;
+        }
     }
 
-    // Returns current price
-    function listingPriceView() external view returns (uint256 price) {
-        return _currentPrice;
+    // Returns up to maxIterations pending buy order IDs for a maker, starting from step
+    function makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
+        uint256[] memory allOrders = makerPendingOrdersView[maker];
+        uint256 count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (getBuyOrderCore[allOrders[i]].makerAddress == maker && getBuyOrderCore[allOrders[i]].status == 1) {
+                count++;
+            }
+        }
+        orderIds = new uint256[](count);
+        count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (getBuyOrderCore[allOrders[i]].makerAddress == maker && getBuyOrderCore[allOrders[i]].status == 1) {
+                orderIds[count++] = allOrders[i];
+            }
+        }
     }
 
-    // Returns pending buy order IDs
-    function pendingBuyOrdersView() external view returns (uint256[] memory orderIds) {
-        return _pendingBuyOrders;
+    // Returns up to maxIterations pending sell order IDs for a maker, starting from step
+    function makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
+        uint256[] memory allOrders = makerPendingOrdersView[maker];
+        uint256 count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (getSellOrderCore[allOrders[i]].makerAddress == maker && getSellOrderCore[allOrders[i]].status == 1) {
+                count++;
+            }
+        }
+        orderIds = new uint256[](count);
+        count = 0;
+        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
+            if (getSellOrderCore[allOrders[i]].makerAddress == maker && getSellOrderCore[allOrders[i]].status == 1) {
+                orderIds[count++] = allOrders[i];
+            }
+        }
     }
 
-    // Returns pending sell order IDs
-    function pendingSellOrdersView() external view returns (uint256[] memory orderIds) {
-        return _pendingSellOrders;
+    // Returns full buy order details
+    function getFullBuyOrderDetails(uint256 orderId) external view returns (
+        BuyOrderCore memory core,
+        BuyOrderPricing memory pricing,
+        BuyOrderAmounts memory amounts
+    ) {
+        core = getBuyOrderCore[orderId];
+        pricing = getBuyOrderPricing[orderId];
+        amounts = getBuyOrderAmounts[orderId];
     }
 
-    // Returns all order IDs for a maker
-    function makerPendingOrdersView(address maker) external view returns (uint256[] memory orderIds) {
-        return _makerPendingOrders[maker];
+    // Returns full sell order details
+    function getFullSellOrderDetails(uint256 orderId) external view returns (
+        SellOrderCore memory core,
+        SellOrderPricing memory pricing,
+        SellOrderAmounts memory amounts
+    ) {
+        core = getSellOrderCore[orderId];
+        pricing = getSellOrderPricing[orderId];
+        amounts = getSellOrderAmounts[orderId];
     }
 
-    // Returns long payout IDs
-    function longPayoutByIndexView() external view returns (uint256[] memory orderIds) {
-        return _longPayoutsByIndex;
-    }
-
-    // Returns short payout IDs
-    function shortPayoutByIndexView() external view returns (uint256[] memory orderIds) {
-        return _shortPayoutsByIndex;
-    }
-
-    // Returns payout IDs for a user
-    function userPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
-        return _userPayoutIDs[user];
-    }
-
-    // Returns long payout details
-    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory payout) {
-        return _longPayouts[orderId];
-    }
-
-    // Returns short payout details
-    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory payout) {
-        return _shortPayouts[orderId];
-    }
-
-    // Returns buy order core details
-    function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
-        BuyOrderCore memory core = _buyOrderCores[orderId];
-        return (core.makerAddress, core.recipientAddress, core.status);
-    }
-
-    // Returns buy order pricing details
-    function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
-        BuyOrderPricing memory pricing = _buyOrderPricings[orderId];
-        return (pricing.maxPrice, pricing.minPrice);
-    }
-
-    // Returns buy order amounts
-    function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
-        BuyOrderAmounts memory amounts = _buyOrderAmounts[orderId];
-        return (amounts.pending, amounts.filled, amounts.amountSent);
-    }
-
-    // Returns sell order core details
-    function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
-        SellOrderCore memory core = _sellOrderCores[orderId];
-        return (core.makerAddress, core.recipientAddress, core.status);
-    }
-
-    // Returns sell order pricing details
-    function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
-        SellOrderPricing memory pricing = _sellOrderPricings[orderId];
-        return (pricing.maxPrice, pricing.minPrice);
-    }
-
-    // Returns sell order amounts
-    function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
-        SellOrderAmounts memory amounts = _sellOrderAmounts[orderId];
-        return (amounts.pending, amounts.filled, amounts.amountSent);
+    // Returns up to maxIterations order IDs for a maker, starting from step
+    function makerOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
+        uint256[] memory allOrders = makerPendingOrdersView[maker];
+        uint256 length = allOrders.length;
+        if (step >= length) return new uint256[](0);
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        orderIds = new uint256[](limit);
+        for (uint256 i = 0; i < limit; i++) {
+            orderIds[i] = allOrders[step + i];
+        }
     }
 
     // Returns historical data at index
@@ -840,75 +898,5 @@ contract CCListingTemplate is ICCListing, ICCListingTemplate {
     // Returns globalizer address
     function globalizerAddressView() external view returns (address globalizerAddress) {
         return _globalizerAddress;
-    }
-
-    // Returns up to maxIterations pending buy order IDs for a maker, starting from step
-    function makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
-        uint256[] memory allOrders = _makerPendingOrders[maker];
-        uint256 count = 0;
-        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (_buyOrderCores[allOrders[i]].makerAddress == maker && _buyOrderCores[allOrders[i]].status == 1) {
-                count++;
-            }
-        }
-        orderIds = new uint256[](count);
-        count = 0;
-        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (_buyOrderCores[allOrders[i]].makerAddress == maker && _buyOrderCores[allOrders[i]].status == 1) {
-                orderIds[count++] = allOrders[i];
-            }
-        }
-    }
-
-    // Returns up to maxIterations pending sell order IDs for a maker, starting from step
-    function makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
-        uint256[] memory allOrders = _makerPendingOrders[maker];
-        uint256 count = 0;
-        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (_sellOrderCores[allOrders[i]].makerAddress == maker && _sellOrderCores[allOrders[i]].status == 1) {
-                count++;
-            }
-        }
-        orderIds = new uint256[](count);
-        count = 0;
-        for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (_sellOrderCores[allOrders[i]].makerAddress == maker && _sellOrderCores[allOrders[i]].status == 1) {
-                orderIds[count++] = allOrders[i];
-            }
-        }
-    }
-
-    // Returns full buy order details
-    function getFullBuyOrderDetails(uint256 orderId) external view returns (
-        BuyOrderCore memory core,
-        BuyOrderPricing memory pricing,
-        BuyOrderAmounts memory amounts
-    ) {
-        core = _buyOrderCores[orderId];
-        pricing = _buyOrderPricings[orderId];
-        amounts = _buyOrderAmounts[orderId];
-    }
-
-    // Returns full sell order details
-    function getFullSellOrderDetails(uint256 orderId) external view returns (
-        SellOrderCore memory core,
-        SellOrderPricing memory pricing,
-        SellOrderAmounts memory amounts
-    ) {
-        core = _sellOrderCores[orderId];
-        pricing = _sellOrderPricings[orderId];
-        amounts = _sellOrderAmounts[orderId];
-    }
-
-    // Returns up to maxIterations order IDs for a maker, starting from step
-    function makerOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
-        uint256[] memory allOrders = _makerPendingOrders[maker];
-        uint256 length = allOrders.length;
-        if (step >= length) return new uint256[](0);
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        orderIds = new uint256[](limit);
-        for (uint256 i = 0; i < limit; i++) {
-            orderIds[i] = allOrders[step + i];
-        }
     }
 }

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.14
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.14: Updated onlyValidListing modifier to use try-catch for ICCAgent.isValidListing, explicitly destructure ListingDetails, and validate non-zero addresses. Added detailed revert reason for debugging. Updated compatibility comments.
 // - v0.0.13: Added nextXSlotIDView and nextYSlotIDView to ICCLiquidity interface for CCLiquidityTemplate.sol v0.1.1 compatibility.
 // - v0.0.12: Added userXIndexView and userYIndexView to ICCLiquidity interface.

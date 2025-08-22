@@ -1,28 +1,13 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.21
+// Version: 0.1.0
 // Changes:
+// - v0.1.0: Bumped version
 // - v0.0.21: Updated _createBuyOrderUpdates and _createSellOrderUpdates to set makerAddress and recipient for all updates, not just Core updates, to fix 'Update failed for order 0: Unknown error' by ensuring valid maker address for all updates processed by CCListingTemplate.sol update function.
 // - v0.0.20: Updated _computeSwapImpact to use IERC20 balanceOf for tokenA and tokenB from listing contract instead of Uniswap V2 reserves for impact price calculations. Ensured decimals normalization aligns with listing contract's tokenA and tokenB decimals. Compatible with CCSettlementPartial.sol v0.0.23, CCSettlementRouter.sol v0.0.10, CCMainPartial.sol v0.0.15.
 // - v0.0.19: Modified _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Updated _computeSwapImpact to use prices(0) for consistency. Compatible with CCSettlementPartial.sol v0.0.22, CCSettlementRouter.sol v0.0.9, CCMainPartial.sol v0.0.14.
 // - v0.0.18: Updated _computeCurrentPrice to use reserveB / reserveA to align with flipped price calculation in CCListingTemplate. Adjusted _computeSwapImpact to use (normalizedReserveIn + amountInAfterFee) / (normalizedReserveOut - amountOut) for buy orders and inverse for sell orders.
-// - v0.0.17: Fixed DeclarationError in _performETHBuySwap at line 372 by correcting `preBalanceOut` to `data.preBalanceOut`.
-// - v0.0.16: Refactored _computeMaxAmountIn to resolve stack-too-deep error.
-// - v0.0.15: Fixed _computeSwapImpact to calculate impactPrice correctly.
-// - v0.0.14: Fixed TypeError in swap functions.
-// - v0.0.13: Added amountInReceived to ETHSwapData struct.
-// - v0.0.12: Modified _executeTokenSwap to use amountInReceived.
-// - v0.0.11: Refactored _executeBuyETHSwap to resolve stack too deep.
-// - v0.0.10: Renamed _executeSellETHSwap to _executeSellETHSwapInternal.
-// - v0.0.9: Introduced SwapContext struct.
-// - v0.0.8: Refactored _executeBuyTokenSwap to use internal call tree.
-// - v0.0.7: Removed SafeERC20, added pre/post balance checks.
-// - v0.0.6: Removed inlined ICCListing.
-// - v0.0.5: Marked transactNative as payable (reverted).
-// - v0.0.4: Replaced ISSListingTemplate with ICCListing.
-// - v0.0.3: Refactored _computeSwapImpact to use SwapImpactContext.
-// - v0.0.2: Refactored _executePartialSellSwap to use SellSwapContext.
 // Compatible with CCMainPartial.sol (v0.0.15), CCSettlementPartial.sol (v0.0.24), CCSettlementRouter.sol (v0.0.10).
 
 import "./CCMainPartial.sol";
