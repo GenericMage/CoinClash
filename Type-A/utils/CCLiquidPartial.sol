@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.21
+// Version: 0.0.22
 // Changes:
-// - v0.0.21: Added step parameter to _collectOrderIdentifiers to start iteration from a user-specified index in pendingBuyOrdersView or pendingSellOrdersView, enabling gas-efficient order settlement. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.0.14, CCLiquidRouter.sol v0.0.15, CCLiquidityTemplate.sol v0.1.1.
-// - v0.0.20: Fixed DeclarationError in _processSingleOrder by declaring listingContract as ICCListing(listingAddress) for decimalsA/B access. Added liquidityAddr via listingContract.liquidityAddressView() in _prepBuyOrderUpdate and _prepSellOrderUpdate.
-// - v0.0.19: Fixed liquidity updates in _processSingleOrder: corrected index logic (buy: index 0 for xLiquid, sell: index 1 for yLiquid), added bidirectional balance updates for opposite token (yLiquid for buy, xLiquid for sell). Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to calculate amountSent from _prepareLiquidityTransaction's amountOut. Enhanced settlement logic with liquidity balance validation and try-catch for transfers.
-// - v0.0.18: Enhanced error logging in _prepBuyOrderUpdate, _prepSellOrderUpdate, _prepBuyLiquidUpdates, _prepSellLiquidUpdates with specific events for missing Uniswap router, failed token transfers, failed swaps due to slippage or insufficient liquidity, and failed approvals. Added try-catch for listingContract.prices(0) in _computeCurrentPrice. Ensured no fetching of settled orders by relying on pending amount checks before processing.
-// - v0.0.17: Fixed issue in _createBuyOrderUpdates and _createSellOrderUpdates by setting addr to makerAddress for all updates (structId: 0 and 2) to prevent update function in CCListingTemplate.sol from extracting address(0) as maker, ensuring correct registry and globalizer calls.
-// - v0.0.16: Fixed issue in _prepBuyLiquidUpdates and _prepSellLiquidUpdates by setting addr to makerAddress in ICCListing.UpdateType structs to ensure correct maker address is passed for registry updates in listingContract.update call.
-// - v0.0.15: Updated _computeCurrentPrice to use listingContract.prices(0) instead of reserve-based calculation. Modified _computeSwapImpact to use balanceOf for Uniswap V2 LP tokens for reserve data. Added PriceOutOfBounds event emission in _processSingleOrder for graceful degradation when price is out of bounds.
-// - v0.0.14: Added missing _prepBuyLiquidUpdates and _prepSellLiquidUpdates functions to fix DeclarationError in executeSingleBuyLiquid and executeSingleSellLiquid (lines 326, 345).
-// - v0.0.13: Fixed TypeError in _processSingleOrder by converting ICCListing.UpdateType[] to ICCLiquidity.UpdateType[] for liquidityContract.update call. Retained flipped price calculation (reserveB / reserveA) and settlement logic from v0.0.12.
-// - v0.0.12: Updated _computeSwapImpact to align with flipped price calculation (reserveB / reserveA) from CCListingTemplate.sol v0.1.8. Adjusted _processSingleOrder to settle at current price if impact price is within max/min bounds, using _computeCurrentPrice from CCUniPartial.sol. Ensured pre/post balance checks in _prepBuyOrderUpdate and _prepSellOrderUpdate align with CCSettlementPartial.sol v0.0.21.
+// - v0.0.22: Fixed liquidity update logic in _processSingleOrder to decrease liquidity balances (xLiquid/yLiquid) correctly for buy/sell orders. Added output token liquidity validation in _prepareLiquidityTransaction. Corrected amountSent in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect received token amount. Ensured settlement flow decreases outgoing token balance and updates amountSent correctly in listing template. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.0.14, CCLiquidRouter.sol v0.0.16, CCLiquidityTemplate.sol v0.1.1.
+// - v0.0.21: Added step parameter to _collectOrderIdentifiers for gas-efficient order settlement.
+// - v0.0.20: Fixed DeclarationError in _processSingleOrder by declaring listingContract as ICCListing.
+// - v0.0.19: Fixed liquidity updates in _processSingleOrder and enhanced settlement logic.
+// - v0.0.18: Enhanced error logging in _prepBuyOrderUpdate and _prepSellOrderUpdate.
+// - v0.0.17: Fixed makerAddress in _createBuyOrderUpdates and _createSellOrderUpdates.
+// - v0.0.16: Fixed makerAddress in _prepBuyLiquidUpdates and _prepSellLiquidUpdates.
+// - v0.0.15: Updated _computeCurrentPrice to use listingContract.prices(0).
+// - v0.0.14: Added _prepBuyLiquidUpdates and _prepSellLiquidUpdates.
+// - v0.0.13: Fixed TypeError in _processSingleOrder for liquidityContract.update.
+// - v0.0.12: Updated _computeSwapImpact for flipped price calculation.
 
 import "./CCMainPartial.sol";
 
@@ -77,15 +78,10 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 amountOut;
     }
 
-    // Emitted when price is out of bounds
     event PriceOutOfBounds(address indexed listingAddress, uint256 orderId, uint256 impactPrice, uint256 maxPrice, uint256 minPrice);
-    // Emitted when Uniswap router address is missing
     event MissingUniswapRouter(address indexed listingAddress, uint256 orderId, string reason);
-    // Emitted when token transfer fails
     event TokenTransferFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
-    // Emitted when Uniswap swap fails due to slippage or liquidity
     event SwapFailed(address indexed listingAddress, uint256 orderId, uint256 amountIn, string reason);
-    // Emitted when token approval fails
     event ApprovalFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
 
     function _getSwapReserves(address listingAddress, bool isBuyOrder) private view returns (SwapImpactContext memory context) {
@@ -175,20 +171,22 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 inputAmount,
         bool isBuyOrder
     ) internal view returns (uint256 amountOut, address tokenIn, address tokenOut) {
-        // Prepares liquidity transaction, calculating output amount
+        // Prepares liquidity transaction, calculating output amount with full validation
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
         (uint256 price, uint256 computedAmountOut) = _computeSwapImpact(listingAddress, inputAmount, isBuyOrder);
-        amountOut = computedAmountOut; // Use computed swap output
+        amountOut = computedAmountOut;
         tokenIn = isBuyOrder ? listingContract.tokenB() : listingContract.tokenA();
         tokenOut = isBuyOrder ? listingContract.tokenA() : listingContract.tokenB();
-        // Validate sufficient liquidity
+        // Validate sufficient liquidity for both input and output tokens
         if (isBuyOrder) {
             require(yAmount >= inputAmount, "Insufficient y liquidity");
+            require(xAmount >= amountOut, "Insufficient x liquidity for output");
         } else {
             require(xAmount >= inputAmount, "Insufficient x liquidity");
+            require(yAmount >= amountOut, "Insufficient y liquidity for output");
         }
     }
 
@@ -197,7 +195,7 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountReceived
     ) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares buy order update data, including token transfer with validation
+        // Prepares buy order update data, setting amountSent to tokenA received
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
         require(amountReceived <= pending, "Amount exceeds pending");
@@ -237,7 +235,7 @@ contract CCLiquidPartial is CCMainPartial {
             }
         }
         result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, listingContract.decimalsA()) : 0;
-        result.amountSent = normalize(amountOut, listingContract.decimalsA());
+        result.amountSent = result.normalizedReceived; // amountSent is tokenA received by recipient
     }
 
     function _prepSellOrderUpdate(
@@ -245,7 +243,7 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountReceived
     ) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares sell order update data, including token transfer with validation
+        // Prepares sell order update data, setting amountSent to tokenB received
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
         require(amountReceived <= pending, "Amount exceeds pending");
@@ -285,7 +283,7 @@ contract CCLiquidPartial is CCMainPartial {
             }
         }
         result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, listingContract.decimalsB()) : 0;
-        result.amountSent = normalize(amountOut, listingContract.decimalsB());
+        result.amountSent = result.normalizedReceived; // amountSent is tokenB received by recipient
     }
 
     function _createBuyOrderUpdates(
@@ -494,20 +492,20 @@ contract CCLiquidPartial is CCMainPartial {
                 ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
                 : executeSingleSellLiquid(listingAddress, orderIdentifier);
             if (updates.length > 0) {
-                // Update liquidity amounts for both tokens
+                // Update liquidity amounts: decrease outgoing, increase incoming
                 ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
                 ICCLiquidity.UpdateType[] memory liquidityUpdates = new ICCLiquidity.UpdateType[](2);
                 liquidityUpdates[0] = ICCLiquidity.UpdateType({
                     updateType: 0,
-                    index: isBuyOrder ? 0 : 1, // Buy: xLiquid (tokenA), Sell: yLiquid (tokenB)
-                    value: normalize(settleAmount, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB()),
+                    index: isBuyOrder ? 1 : 0, // Buy: decrease yLiquid (tokenB), Sell: decrease xLiquid (tokenA)
+                    value: normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA()),
                     addr: address(this),
                     recipient: address(0)
                 });
                 liquidityUpdates[1] = ICCLiquidity.UpdateType({
                     updateType: 0,
-                    index: isBuyOrder ? 1 : 0, // Buy: yLiquid (tokenB), Sell: xLiquid (tokenA)
-                    value: normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA()),
+                    index: isBuyOrder ? 0 : 1, // Buy: decrease xLiquid (tokenA), Sell: decrease yLiquid (tokenB)
+                    value: normalize(settleAmount, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB()),
                     addr: address(this),
                     recipient: address(0)
                 });
@@ -538,7 +536,7 @@ contract CCLiquidPartial is CCMainPartial {
             batchContext.listingAddress,
             batchContext.maxIterations,
             batchContext.isBuyOrder,
-            0 // Default step of 0 for backward compatibility
+            0
         );
         ICCListing.UpdateType[] memory tempUpdates = new ICCListing.UpdateType[](iterationCount * 3);
         uint256 updateIndex = 0;
@@ -546,7 +544,7 @@ contract CCLiquidPartial is CCMainPartial {
             (uint256 pendingAmount, , ) = batchContext.isBuyOrder
                 ? ICCListing(listingAddress).getBuyOrderAmounts(orderIdentifiers[i])
                 : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
-            if (pendingAmount == 0) continue; // Skip settled orders
+            if (pendingAmount == 0) continue;
             ICCListing.UpdateType[] memory updates = _processSingleOrder(
                 batchContext.listingAddress,
                 orderIdentifiers[i],
