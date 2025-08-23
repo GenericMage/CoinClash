@@ -1,8 +1,10 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- Version: 0.1.1
+ Version: 0.1.3
  Changes:
+ - v0.1.3: Removed duplicate subtraction in transactToken and transactNative, as xExecuteOut/yExecuteOut already handle subtraction via update calls. Modified balance checks in transactToken and transactNative to use xLiquid/yLiquid instead of total contract balance, ensuring fees are excluded from liquidity operations. Maintained compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
+ - v0.1.2: Integrated update function calls with updateType == 0 for subtraction. No new updateType added. Maintained fee segregation and compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
  - v0.1.1: Added globalizeUpdate internal function to encapsulate globalization calls, extracted from transactToken and transactNative. Integrated into update function to handle deposits from liquidity router. No other changes to maintain compatibility.
  - Removed globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address directly from ICCAgent(agent).globalizerAddress() within each call, aligning with registry update pattern in update function. Compatible with CCGlobalizer.sol v0.2.1.
  - v0.1.0: Added globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address from agent and call ICCGlobalizer.globalizeLiquidity. Maintained compatibility with CCSEntryPartial.sol v0.0.18 and ICCGlobalizer v0.2.1.
@@ -171,9 +173,13 @@ contract CCLiquidityTemplate {
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 0) {
-                if (u.index == 0) details.xLiquid = u.value;
-                else if (u.index == 1) details.yLiquid = u.value;
-                else revert("Invalid balance index");
+                if (u.index == 0) {
+                    require(details.xLiquid >= u.value, "Insufficient xLiquid");
+                    details.xLiquid = u.value;
+                } else if (u.index == 1) {
+                    require(details.yLiquid >= u.value, "Insufficient yLiquid");
+                    details.yLiquid = u.value;
+                } else revert("Invalid balance index");
             } else if (u.updateType == 1) {
                 if (u.index == 0) {
                     details.xFees += u.value;
@@ -275,7 +281,7 @@ contract CCLiquidityTemplate {
     }
 
     function transactToken(address depositor, address token, uint256 amount, address recipient) external {
-        // Transfers ERC20 tokens to recipient
+        // Transfers ERC20 tokens to recipient for withdrawal
         require(routers[msg.sender], "Router only");
         require(token != address(0), "Invalid token address");
         uint8 decimals = IERC20(token).decimals();
@@ -283,42 +289,42 @@ contract CCLiquidityTemplate {
         LiquidityDetails storage details = liquidityDetail;
         bool isTokenA = token == tokenA;
         if (isTokenA) {
-            details.xLiquid += normalizedAmount;
+            require(details.xLiquid >= normalizedAmount, "Insufficient xLiquid");
         } else {
-            details.yLiquid += normalizedAmount;
+            require(details.yLiquid >= normalizedAmount, "Insufficient yLiquid");
         }
         if (IERC20(token).balanceOf(address(this)) < amount) {
-            emit TransactFailed(depositor, token, amount, "Insufficient balance");
-            revert("Insufficient balance");
+            emit TransactFailed(depositor, token, amount, "Insufficient contract balance");
+            revert("Insufficient contract balance");
         }
         if (!IERC20(token).transfer(recipient, amount)) {
             emit TransactFailed(depositor, token, amount, "Transfer failed");
             revert("Transfer failed");
         }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
+        globalizeUpdate(depositor, token, isTokenA, normalizedAmount);
     }
 
     function transactNative(address depositor, uint256 amount, address recipient) external payable {
-        // Transfers native tokens (ETH) to recipient
+        // Transfers native tokens (ETH) to recipient for withdrawal
         require(routers[msg.sender], "Router only");
         uint256 normalizedAmount = normalize(amount, 18);
         LiquidityDetails storage details = liquidityDetail;
         bool isTokenA = tokenA == address(0);
         if (isTokenA) {
-            details.xLiquid += normalizedAmount;
+            require(details.xLiquid >= normalizedAmount, "Insufficient xLiquid");
         } else {
-            details.yLiquid += normalizedAmount;
+            require(details.yLiquid >= normalizedAmount, "Insufficient yLiquid");
         }
         if (address(this).balance < amount) {
-            emit TransactFailed(depositor, address(0), amount, "Insufficient balance");
-            revert("Insufficient balance");
+            emit TransactFailed(depositor, address(0), amount, "Insufficient contract balance");
+            revert("Insufficient contract balance");
         }
         (bool success, bytes memory reason) = recipient.call{value: amount}("");
         if (!success) {
             emit TransactFailed(depositor, address(0), amount, string(reason));
             revert(string(abi.encodePacked("Native transfer failed: ", reason)));
         }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
+        globalizeUpdate(depositor, address(0), isTokenA, normalizedAmount);
     }
 
     function updateLiquidity(address depositor, bool isX, uint256 amount) external {
@@ -526,7 +532,7 @@ contract CCLiquidityTemplate {
     }
 
     function getYSlotView(uint256 index) external view returns (Slot memory slot) {
-        // Returns y liquid slot details
+        // Returns yLiquidity slot details
         return yLiquiditySlots[index];
     }
 
