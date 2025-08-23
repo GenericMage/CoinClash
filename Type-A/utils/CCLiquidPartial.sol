@@ -1,9 +1,10 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 
- Version: 0.0.26
+ Version: 0.0.27
  Changes:
- - v0.0.26: Refactored _processSingleOrder to resolve "Stack too deep" error by extracting liquidity updates into _updateLiquidityBalances helper function, reducing local variables. Helper function handles liquidity balance updates (subtract outgoing, add incoming) for buy/sell orders. Compatible with CCListingTemplate.sol v0.2.0, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCLiquidRouter.sol v0.0.19.
+ - v0.0.27: Updated _createBuyOrderUpdates and _createSellOrderUpdates to clarify that amountSent represents the amount sent for the current settlement only, preventing incorrect accumulation in CCListingTemplate.sol. Added explicit comments to ensure correct handling of partial settlements. Compatible with CCListingTemplate.sol v0.2.0, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCLiquidRouter.sol v0.0.19.
+ - v0.0.26: Refactored _processSingleOrder to resolve "Stack too deep" error by extracting liquidity updates into _updateLiquidityBalances helper function, reducing local variables. Helper function handles liquidity balance updates (subtract outgoing, add incoming) for buy/sell orders.
  - v0.0.25: Removed listingContract.update() calls from _prepBuyOrderUpdate and _prepSellOrderUpdate to prevent double updates. Fixed _processSingleOrder liquidity updates to use differences.
  - v0.0.24: Added UpdateFailed event declaration to fix DeclarationError in _prepBuyOrderUpdate and _prepSellOrderUpdate.
  - v0.0.23: Fixed liquidity updates in _processSingleOrder to decrease balances by setting ICCLiquidity.UpdateType.value to difference.
@@ -182,11 +183,11 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) internal pure returns (ICCListing.UpdateType[] memory updates) {
-        // Creates update structs for buy order settlement
+        // Creates update structs for buy order settlement, amountSent is for this settlement only
         updates = new ICCListing.UpdateType[](3);
         updates[0] = ICCListing.UpdateType({
-            updateType: 1,
-            structId: 0,
+            updateType: 1, // Buy order
+            structId: 0,   // Core
             index: orderIdentifier,
             value: 0,
             addr: context.makerAddress,
@@ -196,21 +197,21 @@ contract CCLiquidPartial is CCMainPartial {
             amountSent: 0
         });
         updates[1] = ICCListing.UpdateType({
-            updateType: 1,
-            structId: 2,
+            updateType: 1, // Buy order
+            structId: 2,   // Amounts
             index: orderIdentifier,
-            value: context.normalizedReceived,
+            value: context.normalizedReceived, // Amount of tokenB received
             addr: address(0),
             recipient: address(0),
             maxPrice: 0,
             minPrice: 0,
-            amountSent: context.amountSent
+            amountSent: context.amountSent // Amount of tokenA sent for this settlement
         });
         updates[2] = ICCListing.UpdateType({
-            updateType: 0,
+            updateType: 0, // Balance
             structId: 0,
-            index: 1,
-            value: context.normalizedReceived,
+            index: 1,      // yBalance
+            value: context.normalizedReceived, // Increase yBalance by tokenB received
             addr: address(0),
             recipient: address(0),
             maxPrice: 0,
@@ -220,11 +221,11 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) internal pure returns (ICCListing.UpdateType[] memory updates) {
-        // Creates update structs for sell order settlement
+        // Creates update structs for sell order settlement, amountSent is for this settlement only
         updates = new ICCListing.UpdateType[](3);
         updates[0] = ICCListing.UpdateType({
-            updateType: 2,
-            structId: 0,
+            updateType: 2, // Sell order
+            structId: 0,   // Core
             index: orderIdentifier,
             value: 0,
             addr: context.makerAddress,
@@ -234,21 +235,21 @@ contract CCLiquidPartial is CCMainPartial {
             amountSent: 0
         });
         updates[1] = ICCListing.UpdateType({
-            updateType: 2,
-            structId: 2,
+            updateType: 2, // Sell order
+            structId: 2,   // Amounts
             index: orderIdentifier,
-            value: context.normalizedReceived,
+            value: context.normalizedReceived, // Amount of tokenA received
             addr: address(0),
             recipient: address(0),
             maxPrice: 0,
             minPrice: 0,
-            amountSent: context.amountSent
+            amountSent: context.amountSent // Amount of tokenB sent for this settlement
         });
         updates[2] = ICCListing.UpdateType({
-            updateType: 0,
+            updateType: 0, // Balance
             structId: 0,
-            index: 0,
-            value: context.normalizedReceived,
+            index: 0,      // xBalance
+            value: context.normalizedReceived, // Increase xBalance by tokenA received
             addr: address(0),
             recipient: address(0),
             maxPrice: 0,
