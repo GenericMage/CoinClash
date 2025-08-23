@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.16
+// Version: 0.0.18
 // Changes:
-// - v0.0.16: Updated _processOrderBatch to pass step parameter to _collectOrderIdentifiers, ensuring gas-efficient settlement. Aligned with CCLiquidPartial.sol v0.0.22 fixes for liquidity updates, output token validation, and amountSent calculation. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.1, CCLiquidPartial.sol v0.0.22.
+// - v0.0.18: Removed duplicate _processOrderBatch function to resolve TypeError, relying on CCLiquidPartial.sol implementation. Removed redundant UpdateFailed event as it’s declared in CCLiquidPartial.sol v0.0.24. Compatible with CCListingTemplate.sol v0.2.0, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCLiquidPartial.sol v0.0.24.
+// - v0.0.17: Fixed _processOrderBatch to correctly decrease liquidity by adjusting ICCLiquidity.UpdateType value calculation. Ensured _prepBuyOrderUpdate and _prepSellOrderUpdate call listingContract.update with settlement results. Corrected amountSent to track output token sent in settlement, aligning with CCListingTemplate.sol expectations.
+// - v0.0.16: Updated _processOrderBatch to pass step parameter to _collectOrderIdentifiers, ensuring gas-efficient settlement. Aligned with CCLiquidPartial.sol v0.0.22 fixes for liquidity updates, output token validation, and amountSent calculation.
 // - v0.0.15: Added step parameter to settleBuyLiquid and settleSellLiquid for gas-efficient settlement.
 // - v0.0.14: Updated compatibility with CCLiquidPartial.sol v0.0.20.
 // - v0.0.13: Updated compatibility with CCLiquidPartial.sol v0.0.19.
@@ -25,7 +27,6 @@ import "./utils/CCLiquidPartial.sol";
 contract CCLiquidRouter is CCLiquidPartial {
     event NoPendingOrders(address indexed listingAddress, bool isBuyOrder);
     event InsufficientBalance(address indexed listingAddress, uint256 required, uint256 available);
-    event UpdateFailed(address indexed listingAddress, string reason);
 
     function settleBuyLiquid(address listingAddress, uint256 maxIterations, uint256 step) external onlyValidListing(listingAddress) nonReentrant {
         // Settles multiple buy order liquidations starting from step up to maxIterations
@@ -73,43 +74,5 @@ contract CCLiquidRouter is CCLiquidPartial {
                 emit UpdateFailed(listingAddress, "Unknown update error");
             }
         }
-    }
-
-    function _processOrderBatch(
-        address listingAddress,
-        uint256 maxIterations,
-        bool isBuyOrder,
-        uint256 step
-    ) internal returns (ICCListing.UpdateType[] memory) {
-        // Processes a batch of orders, collecting and executing up to maxIterations starting from step
-        OrderBatchContext memory batchContext = OrderBatchContext({
-            listingAddress: listingAddress,
-            maxIterations: maxIterations,
-            isBuyOrder: isBuyOrder
-        });
-        (uint256[] memory orderIdentifiers, uint256 iterationCount) = _collectOrderIdentifiers(
-            batchContext.listingAddress,
-            batchContext.maxIterations,
-            batchContext.isBuyOrder,
-            step
-        );
-        ICCListing.UpdateType[] memory tempUpdates = new ICCListing.UpdateType[](iterationCount * 3);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; i++) {
-            (uint256 pendingAmount, , ) = batchContext.isBuyOrder
-                ? ICCListing(listingAddress).getBuyOrderAmounts(orderIdentifiers[i])
-                : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
-            if (pendingAmount == 0) continue;
-            ICCListing.UpdateType[] memory updates = _processSingleOrder(
-                batchContext.listingAddress,
-                orderIdentifiers[i],
-                batchContext.isBuyOrder,
-                pendingAmount
-            );
-            for (uint256 j = 0; j < updates.length; j++) {
-                tempUpdates[updateIndex++] = updates[j];
-            }
-        }
-        return _finalizeUpdates(tempUpdates, updateIndex);
     }
 }

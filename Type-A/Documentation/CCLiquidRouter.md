@@ -5,11 +5,11 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.16 (updated 2025-08-23)
+**Version:** 0.0.18 (updated 2025-08-23)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` → `CCMainPartial`
 
-**Compatibility:** CCListingTemplate.sol (v0.1.12), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.22), CCLiquidityTemplate.sol (v0.1.1).
+**Compatibility:** CCListingTemplate.sol (v0.2.0), ICCLiquidity.sol (v0.0.4), CCMainPartial.sol (v0.0.14), CCLiquidPartial.sol (v0.0.24), CCLiquidityTemplate.sol (v0.1.3).
 
 ## Mappings
 - None defined in `CCLiquidRouter`. Uses `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -26,7 +26,7 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculations.
 
 1. **Current Price**:
-   - **Formula**: `price = listingContract.prices(0)`
+   - **Formula**: `price = listingContract.prices(0)`.
    - **Used in**: `_computeCurrentPrice`, `_processSingleOrder`.
    - **Description**: Fetches price from `ICCListing.prices(0)` with try-catch, ensuring settlement price is within `minPrice` and `maxPrice`. Reverts with detailed reason if fetch fails.
    - **Usage**: Ensures settlement price aligns with listing template in `_processSingleOrder`.
@@ -63,19 +63,19 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
   - `listingAddress` (address): `ICCListing` contract address for order book.
   - `maxIterations` (uint256): Limits orders processed to control gas.
   - `step` (uint256): Starting index in `pendingBuyOrdersView` for gas-efficient iteration.
-- **Behavior**: Settles up to `maxIterations` pending buy orders starting from `step` by transferring principal (tokenB) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenA) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (yBalance). Decreases `yLiquid` (tokenB) by `pendingAmount` and `xLiquid` (tokenA) by `amountOut` via `ICCLiquidity.update`. Emits `NoPendingOrders`, `InsufficientBalance`, or `UpdateFailed` and returns if no orders, `step` exceeds orders, insufficient yBalance, or update failure. Ensures price impact (`_computeSwapImpact`) and current price (`_computeCurrentPrice`) are within `minPrice` and `maxPrice`.
+- **Behavior**: Settles up to `maxIterations` pending buy orders starting from `step` by transferring principal (tokenB) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenA) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (yBalance). Decreases `yLiquid` (tokenB) by `pendingAmount` and increases `xLiquid` (tokenA) by `amountOut` via `ICCLiquidity.update`. Emits `NoPendingOrders`, `InsufficientBalance`, or `UpdateFailed` and returns if no orders, `step` exceeds orders, insufficient yBalance, or update failure. Ensures price impact (`_computeSwapImpact`) and current price (`_computeCurrentPrice`) are within `minPrice` and `maxPrice`.
 - **Internal Call Flow**:
   1. Validates `listingAddress` via `onlyValidListing` (calls `ICCAgent.isValidListing` with try-catch, verifies non-zero addresses).
   2. Fetches `pendingBuyOrdersView`; emits `NoPendingOrders` if empty or `step >= length`.
   3. Fetches `(xBalance, yBalance, xVolume, yVolume)` via `listingVolumeBalancesView`; emits `InsufficientBalance` if `yBalance == 0`.
-  4. Calls `_processOrderBatch(listingAddress, maxIterations, true, step)`:
+  4. Calls `this._processOrderBatch(listingAddress, maxIterations, true, step)` (from `CCLiquidPartial`):
      - Creates `OrderBatchContext` (`listingAddress`, `maxIterations`, `isBuyOrder = true`).
      - Calls `_collectOrderIdentifiers(listingAddress, maxIterations, true, step)`:
        - Fetches `pendingBuyOrdersView`, checks `step <= length`.
        - Collects up to `maxIterations` order IDs starting from `step` (e.g., for IDs `[2, 22, 23, 24, 30]`, `step=2`, `maxIterations=3`, collects `[23, 24, 30]`).
        - Returns `orderIdentifiers` and `iterationCount`.
      - Iterates up to `iterationCount`:
-       - Fetches `(pendingAmount, , )` via `getBuyOrderAmounts`; skips if `pendingAmount == 0` (avoids settled orders).
+       - Fetches `(pendingAmount, filled, )` via `getBuyOrderAmounts`; skips if `pendingAmount == 0` (avoids settled orders).
        - Calls `_processSingleOrder(listingAddress, orderId, true, pendingAmount)`:
          - Declares `listingContract = ICCListing(listingAddress)` for `decimalsA/B`, `liquidityAddressView`.
          - Fetches `(maxPrice, minPrice)` via `getBuyOrderPricing`.
@@ -87,42 +87,42 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
            - Applies 0.3% fee, computes `amountOut` and `price`.
          - If `minPrice <= {currentPrice, impactPrice} <= maxPrice`, calls `executeSingleBuyLiquid(listingAddress, orderId)`:
            - Fetches `(pendingAmount, , )` via `getBuyOrderAmounts`.
-           - Creates `OrderContext` with `listingContract`, `tokenIn=tokenB`, `tokenOut=tokenA`, `liquidityAddr`.
+           - Creates `OrderContext` with `tokenIn=tokenB`, `tokenOut=tokenA`, `liquidityAddr`.
            - Calls `_prepBuyLiquidUpdates(context, orderId, pendingAmount)`:
              - Validates pricing via `_checkPricing`; emits `PriceOutOfBounds` if invalid.
-             - Checks `uniswapV2Router` non-zero; emits `MissingUniswapRouter` if unset.
+             - Checks `uniswapV2Router`; emits `MissingUniswapRouter` if unset.
              - Calls `_prepareLiquidityTransaction(listingAddress, pendingAmount, true)`:
-               - Fetches `liquidityAddr`, checks `yAmount >= pendingAmount` (tokenB) and `xAmount >= amountOut` (tokenA).
-               - Computes `amountOut` via `_computeSwapImpact`.
+               - Checks `yAmount >= pendingAmount` (tokenB) and `xAmount >= amountOut` (tokenA).
+               - Computes `amountOut`.
              - Calls `_prepBuyOrderUpdate(listingAddress, orderId, pendingAmount)`:
                - Fetches `tokenB`, `decimalsB` via `_getTokenAndDecimals(listingAddress, true)`.
                - Fetches `(makerAddress, recipientAddress, orderStatus)` via `getBuyOrderCore`.
-               - Denormalizes `pendingAmount` and `amountOut` using `denormalize`.
-               - Approves tokenB if needed; emits `ApprovalFailed` if approval fails.
-               - Transfers tokenB to `liquidityAddr` via `transactToken` or `transactNative` with pre/post balance checks; emits `TokenTransferFailed` if transfer fails.
-               - Transfers tokenA to recipient via `liquidityContract.transactToken` or `transactNative`, capturing actual amount sent as `amountSent` (tokenA); emits `SwapFailed` if no tokens received.
-               - Returns `PrepOrderUpdateResult` with `normalizedReceived`, `amountSent`.
-             - Creates `BuyOrderUpdateContext` and calls `_createBuyOrderUpdates(orderId, updateContext, pendingAmount)`:
+               - Approves tokenB to `uniswapV2Router`; emits `ApprovalFailed` if fails.
+               - Calls `listingContract.update` with `UpdateType[]` from `_createBuyOrderUpdates`.
+               - Transfers tokenB to `liquidityAddr` via `transactToken` or `transactNative`; emits `TokenTransferFailed` if fails.
+               - Captures `amountSent` (tokenA) via pre/post balance checks; emits `SwapFailed` if no tokens received.
+               - Returns `PrepOrderUpdateResult`.
+             - Creates `BuyOrderUpdateContext` and calls `_createBuyOrderUpdates`:
                - Returns `UpdateType[]` with `addr = makerAddress`, `value = normalizedReceived`, `amountSent` (tokenA), and status (`3` if filled, `2` if partial).
-         - Updates liquidity via `ICCLiquidity.update` with `depositor = address(this)`:
-           - Creates `UpdateType[]` to decrease `yLiquid` (tokenB, `pendingAmount`) and `xLiquid` (tokenA, `amountOut`).
+         - Updates liquidity via `ICCLiquidity.update`:
+           - Decreases `yLiquid` (tokenB, `pendingAmount`), increases `xLiquid` (tokenA, `amountOut`).
            - Emits `SwapFailed` if update fails.
          - Returns empty `UpdateType[]` if price out of bounds or swap fails.
      - Resizes updates via `_finalizeUpdates`.
-  5. Calls `listingContract.update(updates)` if updates exist; catches errors and emits `UpdateFailed` with reason.
+  5. Calls `listingContract.update(updates)`; emits `UpdateFailed` on error.
 - **Graceful Degradation**: Returns without reverting if no orders, `step` exceeds orders, insufficient balance, price out of bounds, or update failure, emitting appropriate events.
 
 ### settleSellLiquid(address listingAddress, uint256 maxIterations, uint256 step)
 - **Parameters**:
   - `listingAddress` (address): `ICCListing` contract address for order book.
   - `maxIterations` (uint256): Limits orders processed to control gas.
-  - `step` (uint256): Starting index in `pendingSellOrdersView` for iteration.
-- **Behavior**: Settles up to `maxIterations` pending sell orders starting from `step` by transferring principal (tokenA) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenB) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (xBalance). Decreases `xLiquid` (tokenA) by `pendingAmount` and `yLiquid` (tokenB) by `amountOut` via `ICCLiquidity.update`. Emits `NoPendingOrders`, `InsufficientBalance`, or `UpdateFailed` and returns if no orders, `step` exceeds orders, insufficient xBalance, or update failure. Ensures price impact and current price are within `minPrice` and `maxPrice`.
+  - `step` (uint256): Starting index in `pendingSellOrdersView` for gas-efficient iteration.
+- **Behavior**: Settles up to `maxIterations` pending sell orders starting from `step` by transferring principal (tokenA) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenB) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (xBalance). Decreases `xLiquid` (tokenA) by `pendingAmount` and increases `yLiquid` (tokenB) by `amountOut` via `ICCLiquidity.update`. Emits `NoPendingOrders`, `InsufficientBalance`, or `UpdateFailed` and returns if no orders, `step` exceeds orders, insufficient xBalance, or update failure. Ensures price impact and current price are within `minPrice` and `maxPrice`.
 - **Internal Call Flow**:
   1. Validates `listingAddress` via `onlyValidListing`.
   2. Fetches `pendingSellOrdersView`; emits `NoPendingOrders` if empty or `step >= length`.
   3. Fetches `(xBalance, yBalance, xVolume, yVolume)` via `listingVolumeBalancesView`; emits `InsufficientBalance` if `xBalance == 0`.
-  4. Calls `_processOrderBatch(listingAddress, maxIterations, false, step)`:
+  4. Calls `this._processOrderBatch(listingAddress, maxIterations, false, step)` (from `CCLiquidPartial`):
      - Creates `OrderBatchContext` (`listingAddress`, `maxIterations`, `isBuyOrder = false`).
      - Calls `_collectOrderIdentifiers(listingAddress, maxIterations, false, step)`:
        - Fetches `pendingSellOrdersView`, checks `step <= length`.
@@ -151,13 +151,14 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
              - Calls `_prepSellOrderUpdate(listingAddress, orderId, pendingAmount)`:
                - Fetches `tokenA`, `decimalsA` via `_getTokenAndDecimals(listingAddress, false)`.
                - Approves tokenA; emits `ApprovalFailed` if fails.
+               - Calls `listingContract.update` with `UpdateType[]` from `_createSellOrderUpdates`.
                - Transfers tokenA to `liquidityAddr`; emits `TokenTransferFailed` if fails.
                - Transfers tokenB to recipient, capturing `amountSent` (tokenB); emits `SwapFailed` if no tokens received.
                - Returns `PrepOrderUpdateResult`.
              - Creates `SellOrderUpdateContext` and calls `_createSellOrderUpdates`:
                - Returns `UpdateType[]` with `addr = makerAddress`, `value = normalizedReceived`, `amountSent` (tokenB), and status (`3` if filled, `2` if partial).
          - Updates liquidity via `ICCLiquidity.update`:
-           - Decreases `xLiquid` (tokenA, `pendingAmount`) and `yLiquid` (tokenB, `amountOut`).
+           - Decreases `xLiquid` (tokenA, `pendingAmount`), increases `yLiquid` (tokenB, `amountOut`).
            - Emits `SwapFailed` if update fails.
          - Returns empty `UpdateType[]` if price out of bounds or swap fails.
      - Resizes updates via `_finalizeUpdates`.
@@ -170,11 +171,11 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 - **_computeSwapImpact**: Calculates output and price impact with 0.3% fee using `balanceOf` reserves.
 - **_checkPricing**: Validates `impactPrice` within `minPrice` and `maxPrice`.
 - **_prepareLiquidityTransaction**: Computes `amountOut`, checks liquidity (`xAmount` and `yAmount` for both input and output tokens).
-- **_prepBuy/SellOrderUpdate**: Handles transfers (principal to liquidity, settlement to recipient) with pre/post balance checks, sets `amountSent` to received token (tokenA for buy, tokenB for sell), emits `MissingUniswapRouter`, `ApprovalFailed`, `TokenTransferFailed` on failure, returns `PrepOrderUpdateResult`.
+- **_prepBuy/SellOrderUpdate**: Handles transfers (principal to liquidity, settlement to recipient) with pre/post balance checks, sets `amountSent` to received token (tokenA for buy, tokenB for sell), calls `listingContract.update`, emits `MissingUniswapRouter`, `ApprovalFailed`, `TokenTransferFailed`, `UpdateFailed` on failure, returns `PrepOrderUpdateResult`.
 - **_prepBuy/SellLiquidUpdates**: Validates pricing, checks `uniswapV2Router`, computes `amountOut`, prepares `UpdateType[]` with `addr = makerAddress`; emits `PriceOutOfBounds`, `MissingUniswapRouter`, `SwapFailed` if invalid.
 - **_createBuy/SellOrderUpdates**: Builds `UpdateType[]` for order updates with `addr = makerAddress` for registry updates.
 - **_collectOrderIdentifiers**: Fetches order IDs starting from `step` up to `maxIterations`, checks `step <= identifiers.length`.
-- **_processSingleOrder**: Validates prices, executes order, decreases liquidity (`yLiquid` and `xLiquid` for buy, `xLiquid` and `yLiquid` for sell); emits `PriceOutOfBounds` or `SwapFailed` if invalid.
+- **_processSingleOrder**: Validates prices, executes order, updates liquidity (`yLiquid` and `xLiquid` for buy, `xLiquid` and `yLiquid` for sell); emits `PriceOutOfBounds` or `SwapFailed` if invalid.
 - **_processOrderBatch**: Iterates orders, skips settled orders (`pendingAmount == 0`), collects updates.
 - **_finalizeUpdates**: Resizes update array.
 - **uint2str**: Converts uint to string for revert messages.
@@ -205,7 +206,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 ## Differences from CCSettlementRouter
 - Focuses on `ICCLiquidity`-based settlements, excludes Uniswap V2 swaps.
 - Inherits `CCLiquidPartial`, omits `CCUniPartial`, `CCSettlementPartial`.
-- Uses helper functions (`_processOrderBatch`, `_processSingleOrder`) for stack management.
+- Uses helper functions for stack management.
 - Enhanced error logging with `UpdateFailed`, `MissingUniswapRouter`, `ApprovalFailed`, `TokenTransferFailed`, `SwapFailed`.
 - Avoids re-fetching settled orders via `pendingAmount == 0` check.
 - Supports `step` parameter for gas-efficient iteration starting from a specified index.

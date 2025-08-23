@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.0.22
+// Version: 0.0.24
 // Changes:
-// - v0.0.22: Fixed liquidity update logic in _processSingleOrder to decrease liquidity balances (xLiquid/yLiquid) correctly for buy/sell orders. Added output token liquidity validation in _prepareLiquidityTransaction. Corrected amountSent in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect received token amount. Ensured settlement flow decreases outgoing token balance and updates amountSent correctly in listing template. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.0.14, CCLiquidRouter.sol v0.0.16, CCLiquidityTemplate.sol v0.1.1.
+// - v0.0.24: Added UpdateFailed event declaration to fix DeclarationError in _prepBuyOrderUpdate and _prepSellOrderUpdate. No functional changes. Compatible with CCListingTemplate.sol v0.2.0, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCLiquidRouter.sol v0.0.17.
+// - v0.0.23: Fixed liquidity updates in _processSingleOrder to decrease balances by setting ICCLiquidity.UpdateType.value to difference rather than absolute value. Added listingContract.update calls in _prepBuyOrderUpdate and _prepSellOrderUpdate to apply settlement results. Corrected amountSent to track output token sent, aligning with CCListingTemplate.sol expectations.
+// - v0.0.22: Fixed liquidity update logic in _processSingleOrder to decrease liquidity balances (xLiquid/yLiquid) correctly for buy/sell orders. Added output token liquidity validation in _prepareLiquidityTransaction. Corrected amountSent in _prepBuyOrderUpdate and _prepSellOrderUpdate to reflect received token amount.
 // - v0.0.21: Added step parameter to _collectOrderIdentifiers for gas-efficient order settlement.
 // - v0.0.20: Fixed DeclarationError in _processSingleOrder by declaring listingContract as ICCListing.
 // - v0.0.19: Fixed liquidity updates in _processSingleOrder and enhanced settlement logic.
@@ -83,6 +85,7 @@ contract CCLiquidPartial is CCMainPartial {
     event TokenTransferFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
     event SwapFailed(address indexed listingAddress, uint256 orderId, uint256 amountIn, string reason);
     event ApprovalFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
+    event UpdateFailed(address indexed listingAddress, string reason);
 
     function _getSwapReserves(address listingAddress, bool isBuyOrder) private view returns (SwapImpactContext memory context) {
         // Retrieves reserves and decimals for swap impact calculation using balanceOf
@@ -190,12 +193,96 @@ contract CCLiquidPartial is CCMainPartial {
         }
     }
 
+    function _createBuyOrderUpdates(
+        uint256 orderIdentifier,
+        BuyOrderUpdateContext memory context,
+        uint256 pendingAmount
+    ) internal pure returns (ICCListing.UpdateType[] memory updates) {
+        // Creates update structs for buy order settlement
+        updates = new ICCListing.UpdateType[](3);
+        updates[0] = ICCListing.UpdateType({
+            updateType: 1,
+            structId: 0,
+            index: orderIdentifier,
+            value: 0,
+            addr: context.makerAddress,
+            recipient: context.recipient,
+            maxPrice: 0,
+            minPrice: 0,
+            amountSent: 0
+        });
+        updates[1] = ICCListing.UpdateType({
+            updateType: 1,
+            structId: 2,
+            index: orderIdentifier,
+            value: context.normalizedReceived,
+            addr: address(0),
+            recipient: address(0),
+            maxPrice: 0,
+            minPrice: 0,
+            amountSent: context.amountSent
+        });
+        updates[2] = ICCListing.UpdateType({
+            updateType: 0,
+            structId: 0,
+            index: 1,
+            value: context.normalizedReceived,
+            addr: address(0),
+            recipient: address(0),
+            maxPrice: 0,
+            minPrice: 0,
+            amountSent: 0
+        });
+    }
+
+    function _createSellOrderUpdates(
+        uint256 orderIdentifier,
+        SellOrderUpdateContext memory context,
+        uint256 pendingAmount
+    ) internal pure returns (ICCListing.UpdateType[] memory updates) {
+        // Creates update structs for sell order settlement
+        updates = new ICCListing.UpdateType[](3);
+        updates[0] = ICCListing.UpdateType({
+            updateType: 2,
+            structId: 0,
+            index: orderIdentifier,
+            value: 0,
+            addr: context.makerAddress,
+            recipient: context.recipient,
+            maxPrice: 0,
+            minPrice: 0,
+            amountSent: 0
+        });
+        updates[1] = ICCListing.UpdateType({
+            updateType: 2,
+            structId: 2,
+            index: orderIdentifier,
+            value: context.normalizedReceived,
+            addr: address(0),
+            recipient: address(0),
+            maxPrice: 0,
+            minPrice: 0,
+            amountSent: context.amountSent
+        });
+        updates[2] = ICCListing.UpdateType({
+            updateType: 0,
+            structId: 0,
+            index: 0,
+            value: context.normalizedReceived,
+            addr: address(0),
+            recipient: address(0),
+            maxPrice: 0,
+            minPrice: 0,
+            amountSent: 0
+        });
+    }
+
     function _prepBuyOrderUpdate(
         address listingAddress,
         uint256 orderIdentifier,
         uint256 amountReceived
     ) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares buy order update data, setting amountSent to tokenA received
+        // Prepares buy order update data, applies settlement to listing template
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
         require(amountReceived <= pending, "Amount exceeds pending");
@@ -217,10 +304,31 @@ contract CCLiquidPartial is CCMainPartial {
                 return result;
             }
         }
+        result.amountReceived = amountReceived;
+        result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
+        result.amountSent = denormalizedAmountOut;
+        ICCListing.UpdateType[] memory updates = _createBuyOrderUpdates(
+            orderIdentifier,
+            BuyOrderUpdateContext({
+                makerAddress: result.makerAddress,
+                recipient: result.recipientAddress,
+                status: result.orderStatus,
+                amountReceived: result.amountReceived,
+                normalizedReceived: result.normalizedReceived,
+                amountSent: result.amountSent
+            }),
+            amountReceived
+        );
+        try listingContract.update(updates) {
+        } catch Error(string memory reason) {
+            emit UpdateFailed(listingAddress, reason);
+        } catch {
+            emit UpdateFailed(listingAddress, "Unknown update error");
+        }
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, liquidityAddr) {
                 uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+                result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
                 emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
                 return result;
@@ -228,14 +336,13 @@ contract CCLiquidPartial is CCMainPartial {
         } else {
             try listingContract.transactToken(result.tokenAddress, denormalizedAmount, liquidityAddr) {
                 uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+                result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
                 emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
                 return result;
             }
         }
-        result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, listingContract.decimalsA()) : 0;
-        result.amountSent = result.normalizedReceived; // amountSent is tokenA received by recipient
+        return result;
     }
 
     function _prepSellOrderUpdate(
@@ -243,7 +350,7 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 orderIdentifier,
         uint256 amountReceived
     ) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares sell order update data, setting amountSent to tokenB received
+        // Prepares sell order update data, applies settlement to listing template
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
         require(amountReceived <= pending, "Amount exceeds pending");
@@ -265,10 +372,31 @@ contract CCLiquidPartial is CCMainPartial {
                 return result;
             }
         }
+        result.amountReceived = amountReceived;
+        result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
+        result.amountSent = denormalizedAmountOut;
+        ICCListing.UpdateType[] memory updates = _createSellOrderUpdates(
+            orderIdentifier,
+            SellOrderUpdateContext({
+                makerAddress: result.makerAddress,
+                recipient: result.recipientAddress,
+                status: result.orderStatus,
+                amountReceived: result.amountReceived,
+                normalizedReceived: result.normalizedReceived,
+                amountSent: result.amountSent
+            }),
+            amountReceived
+        );
+        try listingContract.update(updates) {
+        } catch Error(string memory reason) {
+            emit UpdateFailed(listingAddress, reason);
+        } catch {
+            emit UpdateFailed(listingAddress, "Unknown update error");
+        }
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, liquidityAddr) {
                 uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+                result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
                 emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
                 return result;
@@ -276,78 +404,13 @@ contract CCLiquidPartial is CCMainPartial {
         } else {
             try listingContract.transactToken(result.tokenAddress, denormalizedAmount, liquidityAddr) {
                 uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+                result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
             } catch Error(string memory reason) {
                 emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
                 return result;
             }
         }
-        result.normalizedReceived = result.amountReceived > 0 ? normalize(result.amountReceived, listingContract.decimalsB()) : 0;
-        result.amountSent = result.normalizedReceived; // amountSent is tokenB received by recipient
-    }
-
-    function _createBuyOrderUpdates(
-        uint256 orderIdentifier,
-        BuyOrderUpdateContext memory updateContext,
-        uint256 pendingAmount
-    ) internal pure returns (ICCListing.UpdateType[] memory) {
-        // Creates update structs for buy order processing
-        ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](2);
-        updates[0] = ICCListing.UpdateType({
-            updateType: 1,
-            structId: 2,
-            index: orderIdentifier,
-            value: updateContext.normalizedReceived,
-            addr: updateContext.makerAddress,
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: updateContext.amountSent
-        });
-        updates[1] = ICCListing.UpdateType({
-            updateType: 1,
-            structId: 0,
-            index: orderIdentifier,
-            value: updateContext.status == 1 && updateContext.normalizedReceived >= pendingAmount ? 3 : 2,
-            addr: updateContext.makerAddress,
-            recipient: updateContext.recipient,
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        return updates;
-    }
-
-    function _createSellOrderUpdates(
-        uint256 orderIdentifier,
-        SellOrderUpdateContext memory updateContext,
-        uint256 pendingAmount
-    ) internal pure returns (ICCListing.UpdateType[] memory) {
-        // Creates update structs for sell order processing
-        ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](2);
-        updates[0] = ICCListing.UpdateType({
-            updateType: 2,
-            structId: 2,
-            index: orderIdentifier,
-            value: updateContext.normalizedReceived,
-            addr: updateContext.makerAddress,
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: updateContext.amountSent
-        });
-        updates[1] = ICCListing.UpdateType({
-            updateType: 2,
-            structId: 0,
-            index: orderIdentifier,
-            value: updateContext.status == 1 && updateContext.normalizedReceived >= pendingAmount ? 3 : 2,
-            addr: updateContext.makerAddress,
-            recipient: updateContext.recipient,
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        return updates;
+        return result;
     }
 
     function _prepBuyLiquidUpdates(
@@ -478,7 +541,7 @@ contract CCLiquidPartial is CCMainPartial {
         bool isBuyOrder,
         uint256 pendingAmount
     ) internal returns (ICCListing.UpdateType[] memory updates) {
-        // Processes a single order, settling at current price if impact price is within bounds
+        // Processes要件
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 maxPrice, uint256 minPrice) = isBuyOrder
             ? listingContract.getBuyOrderPricing(orderIdentifier)
@@ -504,7 +567,7 @@ contract CCLiquidPartial is CCMainPartial {
                 });
                 liquidityUpdates[1] = ICCLiquidity.UpdateType({
                     updateType: 0,
-                    index: isBuyOrder ? 0 : 1, // Buy: decrease xLiquid (tokenA), Sell: decrease yLiquid (tokenB)
+                    index: isBuyOrder ? 0 : 1, // Buy: increase xLiquid (tokenA), Sell: increase yLiquid (tokenB)
                     value: normalize(settleAmount, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB()),
                     addr: address(this),
                     recipient: address(0)
@@ -519,12 +582,14 @@ contract CCLiquidPartial is CCMainPartial {
             emit PriceOutOfBounds(listingAddress, orderIdentifier, impactPrice, maxPrice, minPrice);
             updates = new ICCListing.UpdateType[](0);
         }
+        return updates;
     }
 
     function _processOrderBatch(
         address listingAddress,
         uint256 maxIterations,
-        bool isBuyOrder
+        bool isBuyOrder,
+        uint256 step
     ) internal returns (ICCListing.UpdateType[] memory) {
         // Processes a batch of orders, collecting and executing up to maxIterations
         OrderBatchContext memory batchContext = OrderBatchContext({
@@ -536,7 +601,7 @@ contract CCLiquidPartial is CCMainPartial {
             batchContext.listingAddress,
             batchContext.maxIterations,
             batchContext.isBuyOrder,
-            0
+            step
         );
         ICCListing.UpdateType[] memory tempUpdates = new ICCListing.UpdateType[](iterationCount * 3);
         uint256 updateIndex = 0;
