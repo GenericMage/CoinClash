@@ -325,3 +325,17 @@ The following formulas, implemented in `CCSExitPartial`, drive payout and margin
 - **Try-Catch**: External calls (`ISSListing.prices`, `ssUpdate`, `ICSStorage.CSUpdate`, `removePositionIndex`) use try-catch, reverting with decoded reasons.
 - **Hyx Override**: `closeLongPosition` and `closeShortPosition` allow Hyx callers to close any maker’s position, non-Hyx restricted to `msg.sender == maker`.
 - **Drift Refactor**: `drift` uses `closeLongPosition`/`closeShortPosition`, reducing code duplication and size.
+**Role of Excess Margin**:
+   - **Excess margin** is included in the position entry.
+   - It contributes to `totalMargin` in the payout calculations.
+   - However, the payout is not **scaled** by excess margin in a proportional or linear way; it is simply an additive component in the total margin considered.
+**Impact of High Excess Margin and Low Initial Margin**:
+   - A high **excess margin** increases `totalMargin`, which can boost the payout for both long and short positions.
+   - A low **initial margin** reduces `margin1.taxedMargin` and `leverageAmount` (since `leverageAmount = initialMargin * leverage`), which limits the profit potential, especially for short positions where profit depends heavily on `initialMargin * leverage`.
+   - For long positions, a high `totalMargin` (including excess margin) can still result in a significant payout if the price movement is favorable, as it offsets the `initialLoan`.
+   - For short positions, the payout is more sensitive to `initialMargin` due to the `priceDiff * initialMargin * leverage` term, so a low initial margin may limit the profit even with high excess margin.
+**Trade-offs of Closing a Cross-Margin Position**
+   - Profitability: `totalMargin` makes a position more profitable than an isolated one by increasing the payout through its inclusion in `baseValue` (longs) or the additive term (shorts). A high `marginExcess` boosts this effect.
+- Trade-offs: Closing a position reduces `makerTokenMargin`, increasing liquidation risk for other positions (by adjusting liquidation prices closer to current prices) and reducing potential profits (by lowering `totalMargin` in payout calculations).
+- Taking Out More: Users can take out more than they put in due to leveraged returns from favorable price movements, but `totalMargin` itself does not scale the profit multiplicatively—it adds to the payout base. The system ensures payouts are constrained by liquidity and margin availability, but leverage allows for amplified returns.
+
