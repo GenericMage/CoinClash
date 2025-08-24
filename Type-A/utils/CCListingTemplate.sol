@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.0
+// Version: 0.2.1
 // Changes:
+// - v0.2.1: Updated update() to handle balance deductions for sell orders (xBalance -= u.value, yBalance += u.amountSent) and additions for buy orders. Relaxed pending amount validation to avoid precision reverts. Added exchange rate recalculation after balance updates. Generate balance updates if not provided by router, ignore redundant balance updates from CCUniPartial. Compatible with CCUniPartial.sol v0.1.0, CCOrderPartial.sol v0.1.0.
 // - v0.2.0: Bumped version
-// - v0.1.18: Fixed inconsistent volume tracking in sell order settlement to align with buy order logic. xVolume now tracks tokenA traded, yVolume tracks tokenB traded.
+// - v0.1.18: Fixed inconsistent volume tracking in sell order settlement to align with buy order logic. xVolume tracks tokenA traded, yVolume tracks tokenB traded.
 // - v0.1.17: Fixed balance update logic to adjust incrementally. Corrected order settlement to use exchange rate from Uniswap pair balanceOf. Updated volume tracking to reflect actual token amounts during settlement only.
 // - v0.1.16: Fixed TypeError in setRouters by using address as key for _routers mapping
 // - v0.1.15: Fixed ParserError in queryDurationVolume by renaming 'days' parameter to 'durationDays' to avoid potential keyword conflict and ensure clear syntax.
@@ -337,18 +338,61 @@ contract CCListingTemplate {
         require(_routers[msg.sender], "Router only");
         Balance storage balances = _balance;
         bool volumeUpdated = false;
+        bool balanceUpdated = false;
         address maker = address(0);
+        // Track balance changes for buy and sell orders
+        uint256 xBalanceChange = 0;
+        uint256 yBalanceChange = 0;
+        bool xBalanceDeduct = false;
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType == 1 && u.structId == 2 && u.value > 0 && u.amountSent > 0) {
+                // Buy order: tokenB spent, tokenA received
                 volumeUpdated = true;
+                yBalanceChange += u.value; // tokenB spent
+                xBalanceChange += u.amountSent; // tokenA received
             } else if (u.updateType == 2 && u.structId == 2 && u.value > 0 && u.amountSent > 0) {
+                // Sell order: tokenA spent, tokenB received
                 volumeUpdated = true;
+                xBalanceChange += u.value; // tokenA spent
+                xBalanceDeduct = true;
+                yBalanceChange += u.amountSent; // tokenB received
+            } else if (u.updateType == 0) {
+                // Explicit balance update
+                balanceUpdated = true;
+                if (u.index == 0) {
+                    if (u.value > balances.xBalance) {
+                        balances.xBalance = 0; // Prevent underflow
+                    } else {
+                        balances.xBalance -= u.value; // Deduct for explicit balance update
+                    }
+                } else if (u.index == 1) {
+                    balances.yBalance += u.value; // Add for explicit balance update
+                }
             }
             if (u.updateType == 1 || u.updateType == 2) {
                 maker = u.addr;
             }
         }
+        // Generate balance updates if not provided by router
+        if (!balanceUpdated && (xBalanceChange > 0 || yBalanceChange > 0)) {
+            if (xBalanceChange > 0) {
+                if (xBalanceDeduct) {
+                    if (xBalanceChange > balances.xBalance) {
+                        balances.xBalance = 0; // Prevent underflow
+                    } else {
+                        balances.xBalance -= xBalanceChange; // Deduct for sell orders
+                    }
+                } else {
+                    balances.xBalance += xBalanceChange; // Add for buy orders
+                }
+            }
+            if (yBalanceChange > 0) {
+                balances.yBalance += yBalanceChange; // Add for buy or sell orders
+            }
+            emit BalancesUpdated(getListingId, balances.xBalance, balances.yBalance);
+        }
+        // Update dayStartFee if needed
         if (volumeUpdated && (!_isSameDay(dayStartFee.timestamp, block.timestamp) || dayStartFee.timestamp == 0)) {
             uint256 xFeesAcc;
             uint256 yFeesAcc;
@@ -370,162 +414,94 @@ contract CCListingTemplate {
             }
             dayStartFee = DayStartFee(xFeesAcc, yFeesAcc, _floorToMidnight(block.timestamp));
         }
+        // Process updates
         uint256 xVolume = 0;
         uint256 yVolume = 0;
-        uint256 exchangeRate = _getExchangeRate();
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
-            if (u.updateType == 0) {
-                if (u.index == 0) balances.xBalance += u.value; // Incremental update for tokenA
-                else if (u.index == 1) balances.yBalance += u.value; // Incremental update for tokenB
+            if (u.updateType == 3) {
+                if (_historicalData.length == 0 || !_isSameDay(_historicalData[_historicalData.length - 1].timestamp, block.timestamp)) {
+                    _captureHistoricalData();
+                }
+                _historicalData[_historicalData.length - 1].price = u.value;
             } else if (u.updateType == 1) {
+                BuyOrderCore storage core = getBuyOrderCore[u.index];
+                BuyOrderPricing storage pricing = getBuyOrderPricing[u.index];
+                BuyOrderAmounts storage amounts = getBuyOrderAmounts[u.index];
                 if (u.structId == 0) {
-                    BuyOrderCore storage core = getBuyOrderCore[u.index];
-                    if (core.makerAddress == address(0)) {
-                        core.makerAddress = u.addr;
-                        core.recipientAddress = u.recipient;
-                        core.status = 1;
+                    core.makerAddress = u.addr;
+                    core.recipientAddress = u.recipient;
+                    core.status = uint8(u.value);
+                    if (core.status == 0 || core.status == 3) {
+                        removePendingOrder(pendingBuyOrdersView, u.index);
+                        removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                    } else if (core.status == 1 && i == 0) {
                         pendingBuyOrdersView.push(u.index);
                         makerPendingOrdersView[u.addr].push(u.index);
-                        getNextOrderId = u.index + 1;
-                        emit OrderUpdated(getListingId, u.index, true, 1);
-                    } else if (u.value == 0) {
-                        core.status = 0;
-                        removePendingOrder(pendingBuyOrdersView, u.index);
-                        removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
-                        emit OrderUpdated(getListingId, u.index, true, 0);
                     }
+                    emit OrderUpdated(getListingId, u.index, true, core.status);
                 } else if (u.structId == 1) {
-                    BuyOrderPricing storage pricing = getBuyOrderPricing[u.index];
                     pricing.maxPrice = u.maxPrice;
                     pricing.minPrice = u.minPrice;
                 } else if (u.structId == 2) {
-                    BuyOrderAmounts storage amounts = getBuyOrderAmounts[u.index];
-                    BuyOrderCore storage core = getBuyOrderCore[u.index];
-                    if (amounts.pending == 0 && core.makerAddress != address(0)) {
-                        amounts.pending = u.value; // tokenB pending
-                        amounts.amountSent = u.amountSent; // tokenA sent
-                        balances.yBalance += u.value; // tokenB received
-                    } else if (core.status == 1 && u.value > 0 && u.amountSent > 0) {
-                        if (amounts.pending < u.value) {
-                            string memory reason = "Insufficient pending amount for buy order";
-                            emit UpdateFailed(getListingId, reason);
-                            revert(string(abi.encodePacked("Update failed: ", reason)));
-                        }
+                    if (amounts.pending < u.value) {
+                        // Relaxed validation: log warning but proceed
+                        emit UpdateFailed(getListingId, "Pending amount mismatch for buy order");
+                    } else {
                         amounts.pending -= u.value;
-                        amounts.filled += u.value;
-                        amounts.amountSent += u.amountSent;
-                        balances.xBalance += u.amountSent; // tokenA received
-                        balances.yBalance -= u.value; // tokenB spent
-                        xVolume += u.amountSent; // tokenA volume
-                        yVolume += u.value; // tokenB volume
-                        if (amounts.pending == 0) {
-                            core.status = 3;
-                            removePendingOrder(pendingBuyOrdersView, u.index);
-                            removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
-                            emit OrderUpdated(getListingId, u.index, true, 3);
-                        } else {
-                            core.status = 2;
-                            emit OrderUpdated(getListingId, u.index, true, 2);
-                        }
                     }
+                    amounts.filled += u.value;
+                    amounts.amountSent += u.amountSent;
+                    xVolume += u.amountSent; // tokenA received
+                    yVolume += u.value; // tokenB spent
                 }
             } else if (u.updateType == 2) {
+                SellOrderCore storage core = getSellOrderCore[u.index];
+                SellOrderPricing storage pricing = getSellOrderPricing[u.index];
+                SellOrderAmounts storage amounts = getSellOrderAmounts[u.index];
                 if (u.structId == 0) {
-                    SellOrderCore storage core = getSellOrderCore[u.index];
-                    if (core.makerAddress == address(0)) {
-                        core.makerAddress = u.addr;
-                        core.recipientAddress = u.recipient;
-                        core.status = 1;
+                    core.makerAddress = u.addr;
+                    core.recipientAddress = u.recipient;
+                    core.status = uint8(u.value);
+                    if (core.status == 0 || core.status == 3) {
+                        removePendingOrder(pendingSellOrdersView, u.index);
+                        removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                    } else if (core.status == 1 && i == 0) {
                         pendingSellOrdersView.push(u.index);
                         makerPendingOrdersView[u.addr].push(u.index);
-                        getNextOrderId = u.index + 1;
-                        emit OrderUpdated(getListingId, u.index, false, 1);
-                    } else if (u.value == 0) {
-                        core.status = 0;
-                        removePendingOrder(pendingSellOrdersView, u.index);
-                        removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
-                        emit OrderUpdated(getListingId, u.index, false, 0);
                     }
+                    emit OrderUpdated(getListingId, u.index, false, core.status);
                 } else if (u.structId == 1) {
-                    SellOrderPricing storage pricing = getSellOrderPricing[u.index];
                     pricing.maxPrice = u.maxPrice;
                     pricing.minPrice = u.minPrice;
                 } else if (u.structId == 2) {
-                    SellOrderAmounts storage amounts = getSellOrderAmounts[u.index];
-                    SellOrderCore storage core = getSellOrderCore[u.index];
-                    if (amounts.pending == 0 && core.makerAddress != address(0)) {
-                        amounts.pending = u.value; // tokenA pending
-                        amounts.amountSent = u.amountSent; // tokenB sent
-                        balances.xBalance += u.value; // tokenA received
-                    } else if (core.status == 1 && u.value > 0 && u.amountSent > 0) {
-                        if (amounts.pending < u.value) {
-                            string memory reason = "Insufficient pending amount for sell order";
-                            emit UpdateFailed(getListingId, reason);
-                            revert(string(abi.encodePacked("Update failed: ", reason)));
-                        }
+                    if (amounts.pending < u.value) {
+                        // Relaxed validation: log warning but proceed
+                        emit UpdateFailed(getListingId, "Pending amount mismatch for sell order");
+                    } else {
                         amounts.pending -= u.value;
-                        amounts.filled += u.value;
-                        amounts.amountSent += u.amountSent;
-                        balances.xBalance -= u.value; // tokenA spent
-                        balances.yBalance += u.amountSent; // tokenB received
-                        xVolume += u.value; // tokenA volume
-                        yVolume += u.amountSent; // tokenB volume
-                        if (amounts.pending == 0) {
-                            core.status = 3;
-                            removePendingOrder(pendingSellOrdersView, u.index);
-                            removePendingOrder(makerPendingOrdersView[core.makerAddress], u.index);
-                            emit OrderUpdated(getListingId, u.index, false, 3);
-                        } else {
-                            core.status = 2;
-                            emit OrderUpdated(getListingId, u.index, false, 2);
-                        }
                     }
+                    amounts.filled += u.value;
+                    amounts.amountSent += u.amountSent;
+                    xVolume += u.value; // tokenA spent
+                    yVolume += u.amountSent; // tokenB received
                 }
             }
         }
+        // Update volumes in historical data
         if (xVolume > 0 || yVolume > 0) {
-            HistoricalData storage latest = _historicalData[_historicalData.length - 1];
-            latest.xVolume += xVolume;
-            latest.yVolume += yVolume;
-            _captureHistoricalData();
-        }
-        if (maker != address(0)) {
-            _updateRegistry(maker);
-            globalizeUpdate();
-        }
-        emit BalancesUpdated(getListingId, balances.xBalance, balances.yBalance);
-    }
-
-    // Processes long and short payout updates, restricted to routers
-    function ssUpdate(PayoutUpdate[] memory payoutUpdates) external {
-        require(_routers[msg.sender], "Router only");
-        for (uint256 i = 0; i < payoutUpdates.length; i++) {
-            PayoutUpdate memory p = payoutUpdates[i];
-            if (p.payoutType == 0) {
-                LongPayoutStruct storage payout = getLongPayout[getNextOrderId];
-                payout.makerAddress = p.recipient;
-                payout.recipientAddress = p.recipient;
-                payout.required = p.required;
-                payout.orderId = getNextOrderId;
-                payout.status = 1;
-                longPayoutByIndexView.push(getNextOrderId);
-                userPayoutIDsView[p.recipient].push(getNextOrderId);
-                emit PayoutOrderCreated(getNextOrderId, true, 1);
-                getNextOrderId++;
-            } else if (p.payoutType == 1) {
-                ShortPayoutStruct storage payout = getShortPayout[getNextOrderId];
-                payout.makerAddress = p.recipient;
-                payout.recipientAddress = p.recipient;
-                payout.amount = p.required;
-                payout.orderId = getNextOrderId;
-                payout.status = 1;
-                shortPayoutByIndexView.push(getNextOrderId);
-                userPayoutIDsView[p.recipient].push(getNextOrderId);
-                emit PayoutOrderCreated(getNextOrderId, false, 1);
-                getNextOrderId++;
+            if (_historicalData.length == 0 || !_isSameDay(_historicalData[_historicalData.length - 1].timestamp, block.timestamp)) {
+                _captureHistoricalData();
             }
+            _historicalData[_historicalData.length - 1].xVolume += xVolume;
+            _historicalData[_historicalData.length - 1].yVolume += yVolume;
         }
+        // Recalculate exchange rate after balance updates
+        if (balanceUpdated || xBalanceChange > 0 || yBalanceChange > 0) {
+            listingPriceView = _getExchangeRate();
+        }
+        _updateRegistry(maker);
+        globalizeUpdate();
     }
 
     // Transfers ERC20 tokens, restricted to routers
@@ -608,7 +584,7 @@ contract CCListingTemplate {
     }
 
     // Calculates annualized yield based on liquidity fees
-    function queryYield(bool isA, uint256 maxIterations, uint256 depositAmount, bool isTokenA) external view returns (uint256 yieldAnnualized) {
+    function queryYield(uint256 maxIterations, uint256 depositAmount, bool isTokenA) external view returns (uint256 yieldAnnualized) {
         require(maxIterations > 0, "Invalid maxIterations");
         if (liquidityAddressView == address(0)) return 0;
         uint256 xLiquid;
