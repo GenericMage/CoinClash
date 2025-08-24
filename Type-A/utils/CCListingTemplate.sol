@@ -749,10 +749,10 @@ contract CCListingTemplate {
     }
 
     // Sets registry address, callable once
-    function setRegistry(address _registryAddress) external {
+    function setRegistry(address registryAddress_) external {
         require(_registryAddress == address(0), "Registry already set");
-        require(_registryAddress != address(0), "Invalid registry address");
-        _registryAddress = _registryAddress;
+        require(registryAddress_ != address(0), "Invalid registry address");
+        _registryAddress = registryAddress_;
     }
 
     // Returns token pair
