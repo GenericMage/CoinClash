@@ -152,3 +152,16 @@ The `CISExitDriver` contract, implemented in Solidity (^0.8.2), manages the clos
 - **Hyx Integration**: `hyxes` authorizes `drift`, `closeLongPosition`, `closeShortPosition` for external contracts.
 - **Safety**: Balance checks (`status2 == 0`, maker validation), explicit casting, no assembly, try-catch for external calls (`ISIStorage`, `ISSListing`, `ISSAgent`).
 - **Storage**: `SIUpdate` via `ISIStorage` for position updates, `ISSListing.ssUpdate` for payouts.
+**Role of Excess Margin**:
+   - **Excess margin** is included in the position entry.
+   - It contributes to `totalMargin` in the payout calculations.
+   - However, the payout is not **scaled** by excess margin in a proportional or linear way; it is simply an additive component in the total margin considered.
+   **Role of Excess Margin**:
+   - **Excess margin** is included in the position entry.
+   - It contributes in the payout calculations.
+   - However, the payout is not **scaled** by excess margin in a proportional or linear way; it is simply an additive component in the total margin considered.
+**Impact of High Excess Margin and Low Initial Margin**:
+   - A high **excess margin** can boost the payout for both long and short positions.
+   - A low **initial margin** reduces `margin1.taxedMargin` and `leverageAmount` (since `leverageAmount = initialMargin * leverage`), which limits the profit potential, especially for short positions where profit depends heavily on `initialMargin * leverage`.
+   - For long positions, a high `excessMargin` can still result in a significant payout if the price movement is favorable, as it offsets the `initialLoan`.
+   - For short positions, the payout is more sensitive to `initialMargin` due to the `priceDiff * initialMargin * leverage` term, so a low initial margin may limit the profit even with high excess margin.
