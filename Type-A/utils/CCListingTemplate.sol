@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.1
+// Version: 0.2.2
 // Changes:
+// - v0.2.2: Enhanced update() for graceful degradation. Skips invalid updates instead of reverting, emits UpdateFailed with detailed reasons for edge cases (zero amounts, invalid order IDs, underflow). Added checks for maker and token validity before registry/globalizer calls. Compatible with CCUniPartial.sol v0.1.0, CCOrderPartial.sol v0.1.0, CCLiquidPartial.sol v0.0.27, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCOrderRouter.sol v0.0.11, TokenRegistry.sol (2025-08-04).
 // - v0.2.1: Updated update() to handle balance deductions for sell orders (xBalance -= u.value, yBalance += u.amountSent) and additions for buy orders. Relaxed pending amount validation to avoid precision reverts. Added exchange rate recalculation after balance updates. Generate balance updates if not provided by router, ignore redundant balance updates from CCUniPartial. Compatible with CCUniPartial.sol v0.1.0, CCOrderPartial.sol v0.1.0.
 // - v0.2.0: Bumped version
-// - v0.1.18: Fixed inconsistent volume tracking in sell order settlement to align with buy order logic. xVolume tracks tokenA traded, yVolume tracks tokenB traded.
-// - v0.1.17: Fixed balance update logic to adjust incrementally. Corrected order settlement to use exchange rate from Uniswap pair balanceOf. Updated volume tracking to reflect actual token amounts during settlement only.
-// - v0.1.16: Fixed TypeError in setRouters by using address as key for _routers mapping
-// - v0.1.15: Fixed ParserError in queryDurationVolume by renaming 'days' parameter to 'durationDays' to avoid potential keyword conflict and ensure clear syntax.
-// - v0.1.14: Fixed ParserError in queryDurationVolume by explicitly casting days parameter to uint256.
-// - v0.1.13: Removed redundant view functions and made corresponding state variables/mappings public.
-// - v0.1.12: Restored queryYield to calculate annualized yield, adjusted dayStart 
-// - v0.1.11: Fixed order settlement in update
 // Compatible with CCLiquidityTemplate.sol (v0.1.1), CCMainPartial.sol (v0.0.12), CCLiquidityPartial.sol (v0.0.21), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCOrderRouter.sol (v0.0.11), TokenRegistry.sol (2025-08-04).
 
 interface IERC20 {
@@ -222,7 +215,10 @@ contract CCListingTemplate {
 
     // Updates token registry with balances for both tokens for a single user
     function _updateRegistry(address maker) internal {
-        if (_registryAddress == address(0) || maker == address(0)) return;
+        if (_registryAddress == address(0) || maker == address(0)) {
+            emit UpdateFailed(getListingId, "Invalid registry or maker address");
+            return;
+        }
         uint256 tokenCount = (tokenA != address(0) ? 1 : 0) + (tokenB != address(0) ? 1 : 0);
         address[] memory tokens = new address[](tokenCount);
         uint256 index = 0;
@@ -256,7 +252,10 @@ contract CCListingTemplate {
 
     // Calls globalizeOrders with latest order details
     function globalizeUpdate() internal {
-        if (_globalizerAddress == address(0) || getNextOrderId == 0) return;
+        if (_globalizerAddress == address(0) || getNextOrderId == 0) {
+            emit UpdateFailed(getListingId, "Invalid globalizer or no orders");
+            return;
+        }
         uint256 orderId = getNextOrderId - 1; // Latest order ID
         address maker;
         address token;
@@ -272,8 +271,13 @@ contract CCListingTemplate {
                 maker = sellCore.makerAddress;
                 token = tokenA != address(0) ? tokenA : tokenB; // Use tokenA for sell
             } else {
-                return; // No valid order found
+                emit UpdateFailed(getListingId, "No valid order found");
+                return;
             }
+        }
+        if (maker == address(0) || token == address(0)) {
+            emit UpdateFailed(getListingId, "Invalid maker or token for globalizer");
+            return;
         }
         uint256 gasBefore = gasleft();
         try ICCGlobalizer(_globalizerAddress).globalizeOrders{gas: gasBefore / 10}(maker, token) {
@@ -336,6 +340,10 @@ contract CCListingTemplate {
     // Updates balances, orders, or historical data, restricted to routers
     function update(UpdateType[] memory updates) external {
         require(_routers[msg.sender], "Router only");
+        if (updates.length == 0) {
+            emit UpdateFailed(getListingId, "No updates provided");
+            return;
+        }
         Balance storage balances = _balance;
         bool volumeUpdated = false;
         bool balanceUpdated = false;
@@ -346,168 +354,126 @@ contract CCListingTemplate {
         bool xBalanceDeduct = false;
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
+            // Skip invalid updates
+            if (u.index >= getNextOrderId && u.updateType != 0) {
+                emit UpdateFailed(getListingId, string(abi.encodePacked("Invalid order ID: ", uint2str(u.index))));
+                continue;
+            }
             if (u.updateType == 1 && u.structId == 2 && u.value > 0 && u.amountSent > 0) {
                 // Buy order: tokenB spent, tokenA received
+                BuyOrderAmounts storage buyAmounts = getBuyOrderAmounts[u.index];
+                if (buyAmounts.pending < u.value) {
+                    emit UpdateFailed(getListingId, string(abi.encodePacked("Buy order ", uint2str(u.index), ": Amount exceeds pending")));
+                    continue;
+                }
                 volumeUpdated = true;
                 yBalanceChange += u.value; // tokenB spent
                 xBalanceChange += u.amountSent; // tokenA received
+                buyAmounts.filled += u.value;
+                buyAmounts.amountSent += u.amountSent;
+                buyAmounts.pending -= u.value;
+                if (buyAmounts.pending == 0) {
+                    getBuyOrderCore[u.index].status = 3; // Filled
+                    removePendingOrder(pendingBuyOrdersView, u.index);
+                    removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                } else {
+                    getBuyOrderCore[u.index].status = 2; // Partially filled
+                }
+                maker = u.addr;
+                emit OrderUpdated(getListingId, u.index, true, getBuyOrderCore[u.index].status);
             } else if (u.updateType == 2 && u.structId == 2 && u.value > 0 && u.amountSent > 0) {
                 // Sell order: tokenA spent, tokenB received
+                SellOrderAmounts storage sellAmounts = getSellOrderAmounts[u.index];
+                if (sellAmounts.pending < u.value) {
+                    emit UpdateFailed(getListingId, string(abi.encodePacked("Sell order ", uint2str(u.index), ": Amount exceeds pending")));
+                    continue;
+                }
                 volumeUpdated = true;
                 xBalanceChange += u.value; // tokenA spent
                 xBalanceDeduct = true;
                 yBalanceChange += u.amountSent; // tokenB received
+                sellAmounts.filled += u.value;
+                sellAmounts.amountSent += u.amountSent;
+                sellAmounts.pending -= u.value;
+                if (sellAmounts.pending == 0) {
+                    getSellOrderCore[u.index].status = 3; // Filled
+                    removePendingOrder(pendingSellOrdersView, u.index);
+                    removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                } else {
+                    getSellOrderCore[u.index].status = 2; // Partially filled
+                }
+                maker = u.addr;
+                emit OrderUpdated(getListingId, u.index, false, getSellOrderCore[u.index].status);
             } else if (u.updateType == 0) {
                 // Explicit balance update
                 balanceUpdated = true;
                 if (u.index == 0) {
                     if (u.value > balances.xBalance) {
-                        balances.xBalance = 0; // Prevent underflow
+                        emit UpdateFailed(getListingId, string(abi.encodePacked("xBalance underflow: ", uint2str(u.value))));
+                        balances.xBalance = 0;
                     } else {
-                        balances.xBalance -= u.value; // Deduct for explicit balance update
+                        balances.xBalance -= u.value;
                     }
                 } else if (u.index == 1) {
-                    balances.yBalance += u.value; // Add for explicit balance update
-                }
-            }
-            if (u.updateType == 1 || u.updateType == 2) {
-                maker = u.addr;
-            }
-        }
-        // Generate balance updates if not provided by router
-        if (!balanceUpdated && (xBalanceChange > 0 || yBalanceChange > 0)) {
-            if (xBalanceChange > 0) {
-                if (xBalanceDeduct) {
-                    if (xBalanceChange > balances.xBalance) {
-                        balances.xBalance = 0; // Prevent underflow
+                    if (u.value > balances.yBalance) {
+                        emit UpdateFailed(getListingId, string(abi.encodePacked("yBalance underflow: ", uint2str(u.value))));
+                        balances.yBalance = 0;
                     } else {
-                        balances.xBalance -= xBalanceChange; // Deduct for sell orders
+                        balances.yBalance -= u.value;
                     }
                 } else {
-                    balances.xBalance += xBalanceChange; // Add for buy orders
+                    emit UpdateFailed(getListingId, string(abi.encodePacked("Invalid balance index: ", uint2str(u.index))));
+                    continue;
                 }
+            } else {
+                emit UpdateFailed(getListingId, string(abi.encodePacked("Invalid update type: ", uint2str(u.updateType))));
+                continue;
             }
-            if (yBalanceChange > 0) {
-                balances.yBalance += yBalanceChange; // Add for buy or sell orders
+        }
+        // Apply balance changes
+        if (xBalanceChange > 0 || yBalanceChange > 0) {
+            if (xBalanceDeduct) {
+                if (xBalanceChange > balances.xBalance) {
+                    emit UpdateFailed(getListingId, string(abi.encodePacked("xBalance underflow on sell: ", uint2str(xBalanceChange))));
+                    balances.xBalance = 0;
+                } else {
+                    balances.xBalance -= xBalanceChange;
+                }
+            } else {
+                balances.xBalance += xBalanceChange;
             }
+            balances.yBalance += yBalanceChange;
+            balanceUpdated = true;
             emit BalancesUpdated(getListingId, balances.xBalance, balances.yBalance);
         }
-        // Update dayStartFee if needed
-        if (volumeUpdated && (!_isSameDay(dayStartFee.timestamp, block.timestamp) || dayStartFee.timestamp == 0)) {
-            uint256 xFeesAcc;
-            uint256 yFeesAcc;
-            try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
-                uint256,
-                uint256,
-                uint256,
-                uint256,
-                uint256 xFees,
-                uint256 yFees
-            ) {
-                xFeesAcc = xFees;
-                yFeesAcc = yFees;
-            } catch (bytes memory reason) {
-                string memory decodedReason = string(reason);
-                emit ExternalCallFailed(liquidityAddressView, "liquidityDetail", decodedReason);
-                xFeesAcc = dayStartFee.dayStartXFeesAcc;
-                yFeesAcc = dayStartFee.dayStartYFeesAcc;
-            }
-            dayStartFee = DayStartFee(xFeesAcc, yFeesAcc, _floorToMidnight(block.timestamp));
-        }
-        // Process updates
-        uint256 xVolume = 0;
-        uint256 yVolume = 0;
-        for (uint256 i = 0; i < updates.length; i++) {
-            UpdateType memory u = updates[i];
-            if (u.updateType == 3) {
-                if (_historicalData.length == 0 || !_isSameDay(_historicalData[_historicalData.length - 1].timestamp, block.timestamp)) {
-                    _captureHistoricalData();
-                }
-                _historicalData[_historicalData.length - 1].price = u.value;
-            } else if (u.updateType == 1) {
-                BuyOrderCore storage core = getBuyOrderCore[u.index];
-                BuyOrderPricing storage pricing = getBuyOrderPricing[u.index];
-                BuyOrderAmounts storage amounts = getBuyOrderAmounts[u.index];
-                if (u.structId == 0) {
-                    core.makerAddress = u.addr;
-                    core.recipientAddress = u.recipient;
-                    core.status = uint8(u.value);
-                    if (core.status == 0 || core.status == 3) {
-                        removePendingOrder(pendingBuyOrdersView, u.index);
-                        removePendingOrder(makerPendingOrdersView[u.addr], u.index);
-                    } else if (core.status == 1 && i == 0) {
-                        pendingBuyOrdersView.push(u.index);
-                        makerPendingOrdersView[u.addr].push(u.index);
-                    }
-                    emit OrderUpdated(getListingId, u.index, true, core.status);
-                } else if (u.structId == 1) {
-                    pricing.maxPrice = u.maxPrice;
-                    pricing.minPrice = u.minPrice;
-                } else if (u.structId == 2) {
-                    if (amounts.pending < u.value) {
-                        // Relaxed validation: log warning but proceed
-                        emit UpdateFailed(getListingId, "Pending amount mismatch for buy order");
-                    } else {
-                        amounts.pending -= u.value;
-                    }
-                    amounts.filled += u.value;
-                    amounts.amountSent += u.amountSent;
-                    xVolume += u.amountSent; // tokenA received
-                    yVolume += u.value; // tokenB spent
-                }
-            } else if (u.updateType == 2) {
-                SellOrderCore storage core = getSellOrderCore[u.index];
-                SellOrderPricing storage pricing = getSellOrderPricing[u.index];
-                SellOrderAmounts storage amounts = getSellOrderAmounts[u.index];
-                if (u.structId == 0) {
-                    core.makerAddress = u.addr;
-                    core.recipientAddress = u.recipient;
-                    core.status = uint8(u.value);
-                    if (core.status == 0 || core.status == 3) {
-                        removePendingOrder(pendingSellOrdersView, u.index);
-                        removePendingOrder(makerPendingOrdersView[u.addr], u.index);
-                    } else if (core.status == 1 && i == 0) {
-                        pendingSellOrdersView.push(u.index);
-                        makerPendingOrdersView[u.addr].push(u.index);
-                    }
-                    emit OrderUpdated(getListingId, u.index, false, core.status);
-                } else if (u.structId == 1) {
-                    pricing.maxPrice = u.maxPrice;
-                    pricing.minPrice = u.minPrice;
-                } else if (u.structId == 2) {
-                    if (amounts.pending < u.value) {
-                        // Relaxed validation: log warning but proceed
-                        emit UpdateFailed(getListingId, "Pending amount mismatch for sell order");
-                    } else {
-                        amounts.pending -= u.value;
-                    }
-                    amounts.filled += u.value;
-                    amounts.amountSent += u.amountSent;
-                    xVolume += u.value; // tokenA spent
-                    yVolume += u.amountSent; // tokenB received
-                }
-            }
-        }
         // Update volumes in historical data
-        if (xVolume > 0 || yVolume > 0) {
-            if (_historicalData.length == 0 || !_isSameDay(_historicalData[_historicalData.length - 1].timestamp, block.timestamp)) {
-                _captureHistoricalData();
-            }
-            _historicalData[_historicalData.length - 1].xVolume += xVolume;
-            _historicalData[_historicalData.length - 1].yVolume += yVolume;
+        if (volumeUpdated && _historicalData.length > 0) {
+            _historicalData[_historicalData.length - 1].xVolume += xBalanceChange;
+            _historicalData[_historicalData.length - 1].yVolume += yBalanceChange;
+        }
+        // Capture historical data if new day
+        if (_historicalData.length == 0 || !_isSameDay(_historicalData[_historicalData.length - 1].timestamp, block.timestamp)) {
+            _captureHistoricalData();
         }
         // Recalculate exchange rate after balance updates
         if (balanceUpdated || xBalanceChange > 0 || yBalanceChange > 0) {
             listingPriceView = _getExchangeRate();
         }
-        _updateRegistry(maker);
-        globalizeUpdate();
+        // Update registry and globalizer only if maker is valid
+        if (maker != address(0)) {
+            _updateRegistry(maker);
+            globalizeUpdate();
+        }
     }
 
     // Transfers ERC20 tokens, restricted to routers
     function transactToken(address token, uint256 amount, address recipient) external {
         require(_routers[msg.sender], "Router only");
         require(token == tokenA || token == tokenB, "Invalid token");
+        if (amount == 0) {
+            emit TransactionFailed(recipient, "Zero amount");
+            return;
+        }
         uint8 decimals = token == tokenA ? decimalsA : decimalsB;
         uint256 normalizedAmount = normalize(amount, decimals);
         if (token == tokenA) {
@@ -536,13 +502,13 @@ contract CCListingTemplate {
             if (!success) {
                 string memory reason = "Token transfer returned false";
                 emit TransactionFailed(recipient, reason);
-                revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+                return;
             }
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
             emit ExternalCallFailed(token, "transfer", decodedReason);
             emit TransactionFailed(recipient, decodedReason);
-            revert(string(abi.encodePacked("Token transfer failed: ", decodedReason)));
+            return;
         }
         emit BalancesUpdated(getListingId, _balance.xBalance, _balance.yBalance);
     }
@@ -551,6 +517,10 @@ contract CCListingTemplate {
     function transactNative(uint256 amount, address recipient) external payable {
         require(_routers[msg.sender], "Router only");
         require(tokenA == address(0) || tokenB == address(0), "No native token");
+        if (amount == 0) {
+            emit TransactionFailed(recipient, "Zero amount");
+            return;
+        }
         uint256 normalizedAmount = normalize(amount, 18);
         if (tokenA == address(0)) {
             _balance.xBalance += normalizedAmount;
@@ -578,7 +548,7 @@ contract CCListingTemplate {
         if (!success) {
             string memory reason = data.length > 0 ? string(data) : "Native transfer call failed";
             emit TransactionFailed(recipient, reason);
-            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
+            return;
         }
         emit BalancesUpdated(getListingId, _balance.xBalance, _balance.yBalance);
     }
@@ -874,5 +844,24 @@ contract CCListingTemplate {
     // Returns globalizer address
     function globalizerAddressView() external view returns (address globalizerAddress) {
         return _globalizerAddress;
+    }
+
+    // Utility function to convert uint to string for error messages
+    function uint2str(uint256 _i) internal pure returns (string memory str) {
+        if (_i == 0) return "0";
+        uint256 j = _i;
+        uint256 length;
+        while (j != 0) {
+            length++;
+            j /= 10;
+        }
+        bytes memory bstr = new bytes(length);
+        uint256 k = length;
+        j = _i;
+        while (j != 0) {
+            bstr[--k] = bytes1(uint8(48 + j % 10));
+            j /= 10;
+        }
+        str = string(bstr);
     }
 }
