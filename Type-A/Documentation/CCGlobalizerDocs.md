@@ -1,15 +1,15 @@
 # CCGlobalizer Documentation
 
 ## Overview
-The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orders and depositor liquidity across tokens, listings, and liquidity templates. It integrates with `ICCLiquidityTemplate`, `ICCListingTemplate`, and `ICCAgent` for validation and data retrieval. It uses `Ownable` for agent setting, employs explicit casting, and ensures non-reverting behavior for `globalizeOrders` and `globalizeLiquidity`. View functions use `step` and `maxIterations` for gas-efficient pagination, with structured outputs (`OrderGroup`/`SlotGroup`/`SlotHistoryGroup`) for readability. Amounts are normalized to 1e18 via external contracts. Depopulates inactive liquidity templates while preserving historical snapshots.
+The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orders and depositor liquidity across tokens, listings, and liquidity templates. It integrates with `ICCLiquidityTemplate`, `ICCListingTemplate`, and `ICCAgent` for validation and data retrieval. It uses `Ownable` for agent setting, employs explicit casting, and ensures non-reverting behavior for `globalizeOrders` and `globalizeLiquidity` with detailed failure events. View functions use `step` and `maxIterations` for gas-efficient pagination, with structured outputs (`OrderGroup`/`SlotGroup`/`SlotHistoryGroup`) for readability. Amounts are normalized to 1e18 via external contracts. Depopulates inactive liquidity templates while preserving historical snapshots.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.2.7 (Updated 2025-08-17)
+**Version**: 0.2.8 (Updated 2025-08-25)
 
 **Compatibility**:
-- CCLiquidityTemplate.sol (v0.1.1)
-- CCListingTemplate.sol (v0.0.10)
+- CCLiquidityTemplate.sol (v0.1.4)
+- CCListingTemplate.sol (v0.2.7)
 - ICCAgent.sol (v0.1.2)
 
 ## Interfaces
@@ -67,111 +67,206 @@ The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orde
 - **`SlotData`**: Internal struct for managing slot data.  
   - **Fields**: `slotIndices` (uint256[]), `isX` (bool[]), `totalSlots` (uint256).
 
+## Events
+- **`AgentSet(address indexed agent)`**: Emitted when `agent` is set via `setAgent`.
+- **`OrdersGlobalized(address indexed maker, address indexed listing, address indexed token)`**: Emitted on successful `globalizeOrders` call.
+- **`LiquidityGlobalized(address indexed depositor, address indexed liquidity, address indexed token, uint256 slotIndex, bool isSpent)`**: Emitted for each slot in `globalizeLiquidity` with allocation and status.
+- **`GlobalizeLiquidityFailed(address indexed depositor, address indexed liquidity, address indexed token, string reason)`**: Emitted on `globalizeLiquidity` failure (e.g., invalid inputs, failed external calls).
+- **`GlobalizeOrdersFailed(address indexed maker, address indexed listing, address indexed token, string reason)`**: Emitted on `globalizeOrders` failure (e.g., invalid inputs, listing mismatch).
+
 ## External Functions
 ### setAgent(address _agent)
-- **Behavior**: Sets `agent` address, callable once by owner, emits `AgentSet`. Exits silently if already set or `_agent` is zero.
+- **Behavior**: Sets `agent` address, callable once by owner. Emits `AgentSet` on success, or `GlobalizeOrdersFailed` if already set or `_agent` is zero.
 - **Parameters**: `_agent` (address) - Agent contract address for validation.
 - **Restrictions**: Only owner, single-time set.
 - **Gas**: Single state write.
-- **Interactions**: Emits `AgentSet(address)`.
+- **Interactions**: 
+  - Updates `agent` state variable.
+  - Emits `AgentSet(address)` or `GlobalizeOrdersFailed(address(0), address(0), address(0), string)`.
 
 ### globalizeOrders(address maker, address token)
-- **Behavior**: Called by valid listings (verified via `ICCAgent.isValidListing`). Updates `makerTokensByListing`, `makerListings`, and `tokenListings` if token matches listing’s `tokenA` or `tokenB`. Exits silently on invalid inputs or failed validation. Emits `OrdersGlobalized`.
-- **Parameters**: `maker` (address), `token` (address).
+- **Behavior**: Called by valid listings (verified via `ICCAgent.isValidListing`). Validates `agent`, `maker`, `token`, and listing/token match. Updates `makerTokensByListing`, `makerListings`, `tokenListings` if valid. Emits `OrdersGlobalized` on success, or `GlobalizeOrdersFailed` with reason (e.g., "Agent not set", "Invalid maker address", "Invalid listing", "Token not in listing").
+- **Parameters**: 
+  - `maker` (address): Order maker.
+  - `token` (address): Token in listing.
 - **Restrictions**: Caller must be a valid listing, `agent` must be set.
-- **Gas**: External call to `ICCAgent`, array pushes.
-- **Interactions**: Calls `ICCAgent.isValidListing`, updates mappings/arrays, emits `OrdersGlobalized(address maker, address listing, address token)`.
+- **Gas**: External call to `ICCAgent`, array pushes, mapping updates.
+- **Interactions**: 
+  - Calls `ICCAgent.isValidListing` to verify listing and token match.
+  - Calls `isInArray` to check for duplicates in `makerTokensByListing`, `makerListings`, `tokenListings`.
+  - Updates `makerTokensByListing`, `makerListings`, `tokenListings`.
+  - Emits `OrdersGlobalized(address maker, address listing, address token)` or `GlobalizeOrdersFailed(address maker, address listing, address token, string reason)`.
 
 ### globalizeLiquidity(address depositor, address token)
-- **Behavior**: Called by valid liquidity templates (verified via `ICCLiquidityTemplate.listingAddress` and `ICCAgent.isValidListing`). Fetches slot data via `userIndexView`, stores `allocation` in `depositorSlotSnapshots`, sets `slotStatus` (spent if `allocation == 0`, unspent otherwise). Updates `depositorTokensByLiquidity`, `depositorLiquidityTemplates`, `tokenLiquidityTemplates`. Depopulates `depositorLiquidityTemplates` if no active slots (`allocation > 0`), and `depositorTokensByLiquidity`/`tokenLiquidityTemplates` if no slots for the token are active. Emits `LiquidityGlobalized`.
-- **Parameters**: `depositor` (address), `token` (address).
+- **Behavior**: Called by valid liquidity templates (verified via `ICCLiquidityTemplate.listingAddress` and `ICCAgent.isValidListing`). Validates `agent`, `depositor`, `token`, listing, and token match. Fetches slot indices via `userIndexView`, validates slots via `getXSlotView`/`getYSlotView`, stores `allocation` in `depositorSlotSnapshots`, sets `slotStatus` (spent if `allocation == 0`). Updates `depositorTokensByLiquidity`, `depositorLiquidityTemplates`, `tokenLiquidityTemplates`. Depopulates mappings if no active slots. Emits `LiquidityGlobalized` per slot, or `GlobalizeLiquidityFailed` with reason (e.g., "Agent not set", "Invalid depositor address", "Failed to fetch user indices").
+- **Parameters**: 
+  - `depositor` (address): Liquidity provider.
+  - `token` (address): Token in liquidity template.
 - **Restrictions**: Caller must be a valid liquidity template, `agent` must be set.
 - **Gas**: External calls to `ICCLiquidityTemplate`, `ICCAgent`, array pushes/pops, mapping updates.
-- **Interactions**: Calls `ICCLiquidityTemplate.listingAddress`, `ICCAgent.isValidListing`, `userIndexView`, `getXSlotView`, `getYSlotView`, updates/depopulates mappings/arrays, emits `LiquidityGlobalized(address depositor, address liquidity, address token, uint256 slotIndex, bool isSpent)`.
+- **Interactions**: 
+  - Calls `ICCLiquidityTemplate.listingAddress` to get listing address.
+  - Calls `ICCAgent.isValidListing` to verify listing and liquidity template match.
+  - Calls `ICCLiquidityTemplate.userIndexView`, `getXSlotView`, `getYSlotView` to fetch slot data.
+  - Calls `isInArray` to check for duplicates in `depositorTokensByLiquidity`, `depositorLiquidityTemplates`, `tokenLiquidityTemplates`.
+  - Calls `removeFromArray` to depopulate `depositorLiquidityTemplates`, `depositorTokensByLiquidity`, `tokenLiquidityTemplates` if no active slots.
+  - Updates `depositorSlotSnapshots`, `slotStatus`, `depositorTokensByLiquidity`, `depositorLiquidityTemplates`, `tokenLiquidityTemplates`.
+  - Emits `LiquidityGlobalized(address depositor, address liquidity, address token, uint256 slotIndex, bool isSpent)` or `GlobalizeLiquidityFailed(address depositor, address liquidity, address token, string reason)`.
 
 ### getAllUserActiveOrders(address user, uint256 step, uint256 maxIterations) view returns (OrderGroup[] memory orderGroups)
-- **Behavior**: Returns paginated `OrderGroup` arrays for a user’s pending orders across listings from `makerListings`. Uses `_fetchOrderData` to get buy/sell orders via `ICCListingTemplate.makerPendingBuyOrdersView` and `makerPendingSellOrdersView`, combined via `_combineOrderIds`. Returns empty array if `step` exceeds listings length.
-- **Parameters**: `user` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `OrderGroup` arrays for a user’s pending orders across listings from `makerListings`. Returns empty array if `step` exceeds listings length.
+- **Parameters**: 
+  - `user` (address): Order maker.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum listings to process.
 - **Returns**: `orderGroups` (OrderGroup[] - listing, orderIds).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
-- **Interactions**: Queries `ICCListingTemplate`, calls `_fetchOrderData`, `_combineOrderIds`.
+- **Interactions**: 
+  - Queries `makerListings` for user’s listings.
+  - Calls `_fetchOrderData` to get pending buy/sell orders.
+  - Calls `_combineOrderIds` to merge order IDs.
 
 ### getAllUserOrdersHistory(address user, uint256 step, uint256 maxIterations) view returns (OrderGroup[] memory orderGroups)
-- **Behavior**: Returns paginated `OrderGroup` arrays for all user orders (pending, filled, canceled) across listings from `makerListings`. Uses `_fetchAllOrderData` to get orders via `ICCListingTemplate.makerOrdersView`, combined via `_combineOrderIds`. Returns empty array if `step` exceeds listings length.
-- **Parameters**: `user` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `OrderGroup` arrays for all user orders (pending, filled, canceled) across listings from `makerListings`. Returns empty array if `step` exceeds listings length.
+- **Parameters**: 
+  - `user` (address): Order maker.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum listings to process.
 - **Returns**: `orderGroups` (OrderGroup[] - listing, orderIds).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
-- **Interactions**: Queries `ICCListingTemplate`, calls `_fetchAllOrderData`, `_combineOrderIds`.
+- **Interactions**: 
+  - Queries `makerListings` for user’s listings.
+  - Calls `_fetchAllOrderData` to get all orders.
+  - Calls `_combineOrderIds` to merge order IDs.
 
 ### getAllUserTokenActiveOrders(address user, address token, uint256 step, uint256 maxIterations) view returns (OrderGroup[] memory orderGroups)
-- **Behavior**: Returns paginated `OrderGroup` arrays for a user’s pending token orders across listings from `makerListings`, filtering by `makerTokensByListing`. Uses `_countValidListings` to size output, `_fetchOrderData` for buy/sell orders, and `_combineOrderIds` to combine. Returns empty array if `step` exceeds listings length.
-- **Parameters**: `user` (address), `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `OrderGroup` arrays for a user’s pending token orders across listings from `makerListings`, filtering by `makerTokensByListing`. Returns empty array if `step` exceeds listings length.
+- **Parameters**: 
+  - `user` (address): Order maker.
+  - `token` (address): Token to filter orders.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum listings to process.
 - **Returns**: `orderGroups` (OrderGroup[] - listing, orderIds).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
-- **Interactions**: Queries `ICCListingTemplate`, calls `_countValidListings`, `_fetchOrderData`, `_combineOrderIds`, checks `makerTokensByListing`.
+- **Interactions**: 
+  - Queries `makerListings` and `makerTokensByListing` for valid listings.
+  - Calls `_countValidListings` to size output array.
+  - Calls `_fetchOrderData` to get pending orders.
+  - Calls `_combineOrderIds` to merge order IDs.
 
 ### getAllUserTokenOrdersHistory(address user, address token, uint256 step, uint256 maxIterations) view returns (OrderGroup[] memory orderGroups)
-- **Behavior**: Returns paginated `OrderGroup` arrays for all user token orders (pending, filled, canceled) across listings from `makerListings`, filtering by `makerTokensByListing`. Uses `_countValidListings` to size output, `_fetchAllOrderData` for orders, and `_combineOrderIds` to combine. Returns empty array if `step` exceeds listings length.
-- **Parameters**: `user` (address), `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `OrderGroup` arrays for all user token orders (pending, filled, canceled) across listings from `makerListings`, filtering by `makerTokensByListing`. Returns empty array if `step` exceeds listings length.
+- **Parameters**: 
+  - `user` (address): Order maker.
+  - `token` (address): Token to filter orders.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum listings to process.
 - **Returns**: `orderGroups` (OrderGroup[] - listing, orderIds).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
-- **Interactions**: Queries `ICCListingTemplate`, calls `_countValidListings`, `_fetchAllOrderData`, `_combineOrderIds`, checks `makerTokensByListing`.
+- **Interactions**: 
+  - Queries `makerListings` and `makerTokensByListing` for valid listings.
+  - Calls `_countValidListings` to size output array.
+  - Calls `_fetchAllOrderData` to get all orders.
+  - Calls `_combineOrderIds` to merge order IDs.
 
 ### getAllTokenOrders(address token, uint256 step, uint256 maxIterations) view returns (OrderGroup[] memory orderGroups)
-- **Behavior**: Returns paginated `OrderGroup` arrays for a token’s pending orders across listings from `tokenListings`. Uses `_fetchTokenOrderData` for buy/sell orders via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`, combined via `_combineOrderIds`. Returns empty array if `step` exceeds listings length.
-- **Parameters**: `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `OrderGroup` arrays for a token’s pending orders across listings from `tokenListings`. Returns empty array if `step` exceeds listings length.
+- **Parameters**: 
+  - `token` (address): Token to filter orders.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum listings to process.
 - **Returns**: `orderGroups` (OrderGroup[] - listing, orderIds).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
-- **Interactions**: Queries `ICCListingTemplate`, calls `_fetchTokenOrderData`, `_combineOrderIds`.
+- **Interactions**: 
+  - Queries `tokenListings` for token’s listings.
+  - Calls `_fetchTokenOrderData` to get pending orders.
+  - Calls `_combineOrderIds` to merge order IDs.
 
 ### getAllListingOrders(address listing, uint256 step, uint256 maxIterations) view returns (OrderGroup memory orderGroup)
-- **Behavior**: Returns a single `OrderGroup` for a listing’s pending orders, fetching buy/sell orders via `_fetchListingOrderData` (using `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`). Returns empty group if `step` exceeds total orders.
-- **Parameters**: `listing` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns a single `OrderGroup` for a listing’s pending orders. Returns empty group if `step` exceeds total orders.
+- **Parameters**: 
+  - `listing` (address): Listing to query.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum orders to process.
 - **Returns**: `orderGroup` (OrderGroup - listing, orderIds).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
-- **Interactions**: Queries `ICCListingTemplate`, calls `_fetchListingOrderData`.
+- **Interactions**: 
+  - Calls `_fetchListingOrderData` to get pending orders.
 
 ### getAllUserActiveLiquidity(address user, uint256 step, uint256 maxIterations) view returns (SlotGroup[] memory slotGroups)
-- **Behavior**: Returns paginated `SlotGroup` arrays for a user’s active liquidity slots (`allocation > 0`) across templates from `depositorLiquidityTemplates`. Uses `_fetchSlotData` to get indices via `ICCLiquidityTemplate.userIndexView` and validate slots with `getXSlotView`/`getYSlotView`. Returns empty array if `step` exceeds templates length.
-- **Parameters**: `user` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `SlotGroup` arrays for a user’s active liquidity slots (`allocation > 0`) across templates from `depositorLiquidityTemplates`. Returns empty array if `step` exceeds templates length.
+- **Parameters**: 
+  - `user` (address): Liquidity depositor.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum templates to process.
 - **Returns**: `slotGroups` (SlotGroup[] - template, slotIndices, isX).
 - **Gas**: External calls to `ICCLiquidityTemplate`, array allocation.
-- **Interactions**: Queries `ICCLiquidityTemplate`, calls `_fetchSlotData`.
+- **Interactions**: 
+  - Queries `depositorLiquidityTemplates` for user’s templates.
+  - Calls `_fetchSlotData` to get active slots.
 
 ### getAllUserLiquidityHistory(address user, uint256 step, uint256 maxIterations) view returns (SlotHistoryGroup[] memory slotGroups)
-- **Behavior**: Returns paginated `SlotHistoryGroup` arrays for a user’s historical liquidity slots (including spent/unspent) across templates from `depositorLiquidityTemplates`. Uses `_fetchHistoricalSlotData` to get indices from `depositorSlotSnapshots`, validate Y slots with `getYSlotView`, and retrieve snapshots/status from `depositorSlotSnapshots`/`slotStatus`. Returns empty array if `step` exceeds templates length.
-- **Parameters**: `user` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `SlotHistoryGroup` arrays for a user’s historical liquidity slots (including spent/unspent) across templates from `depositorLiquidityTemplates`. Returns empty array if `step` exceeds templates length.
+- **Parameters**: 
+  - `user` (address): Liquidity depositor.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum templates to process.
 - **Returns**: `slotGroups` (SlotHistoryGroup[] - template, slotIndices, isX, isSpent).
 - **Gas**: External calls to `ICCLiquidityTemplate` for Y slots, array allocation.
-- **Interactions**: Queries `depositorSlotSnapshots`, `slotStatus`, calls `_fetchHistoricalSlotData`.
+- **Interactions**: 
+  - Queries `depositorSlotSnapshots` and `slotStatus` for historical data.
+  - Calls `_fetchHistoricalSlotData` to get slot indices and status.
 
 ### getAllUserTokenActiveLiquidity(address user, address token, uint256 step, uint256 maxIterations) view returns (SlotGroup[] memory slotGroups)
-- **Behavior**: Returns paginated `SlotGroup` arrays for a user’s active token liquidity slots (`allocation > 0`) across templates from `depositorLiquidityTemplates`, filtering by `depositorTokensByLiquidity`. Uses `_countValidTemplates` to size output, `_fetchSlotData` for indices and slot validation. Returns empty array if `step` exceeds templates length.
-- **Parameters**: `user` (address), `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `SlotGroup` arrays for a user’s active token liquidity slots (`allocation > 0`) across templates from `depositorLiquidityTemplates`, filtering by `depositorTokensByLiquidity`. Returns empty array if `step` exceeds templates length.
+- **Parameters**: 
+  - `user` (address): Liquidity depositor.
+  - `token` (address): Token to filter liquidity.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum templates to process.
 - **Returns**: `slotGroups` (SlotGroup[] - template, slotIndices, isX).
 - **Gas**: External calls to `ICCLiquidityTemplate`, array allocation.
-- **Interactions**: Queries `ICCLiquidityTemplate`, calls `_countValidTemplates`, `_fetchSlotData`, checks `depositorTokensByLiquidity`.
+- **Interactions**: 
+  - Queries `depositorLiquidityTemplates` and `depositorTokensByLiquidity` for valid templates.
+  - Calls `_countValidTemplates` to size output array.
+  - Calls `_fetchSlotData` to get active slots.
 
 ### getAllUserTokenLiquidityHistory(address user, address token, uint256 step, uint256 maxIterations) view returns (SlotHistoryGroup[] memory slotGroups)
-- **Behavior**: Returns paginated `SlotHistoryGroup` arrays for a user’s historical token liquidity slots (including spent/unspent) across templates from `depositorLiquidityTemplates`, filtering by `depositorTokensByLiquidity`. Uses `_countValidTemplates` to size output, `_fetchHistoricalSlotData` for indices, snapshots, and status from `depositorSlotSnapshots`/`slotStatus`. Returns empty array if `step` exceeds templates length.
-- **Parameters**: `user` (address), `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `SlotHistoryGroup` arrays for a user’s historical token liquidity slots (including spent/unspent) across templates from `depositorLiquidityTemplates`, filtering by `depositorTokensByLiquidity`. Returns empty array if `step` exceeds templates length.
+- **Parameters**: 
+  - `user` (address): Liquidity depositor.
+  - `token` (address): Token to filter liquidity.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum templates to process.
 - **Returns**: `slotGroups` (SlotHistoryGroup[] - template, slotIndices, isX, isSpent).
 - **Gas**: External calls to `ICCLiquidityTemplate` for Y slots, array allocation.
-- **Interactions**: Queries `depositorSlotSnapshots`, `slotStatus`, calls `_countValidTemplates`, `_fetchHistoricalSlotData`, checks `depositorTokensByLiquidity`.
+- **Interactions**: 
+  - Queries `depositorLiquidityTemplates`, `depositorTokensByLiquidity`, `depositorSlotSnapshots`, and `slotStatus`.
+  - Calls `_countValidTemplates` to size output array.
+  - Calls `_fetchHistoricalSlotData` to get slot indices and status.
 
 ### getAllTokenLiquidity(address token, uint256 step, uint256 maxIterations) view returns (SlotGroup[] memory slotGroups)
-- **Behavior**: Returns paginated `SlotGroup` arrays for a token’s active liquidity slots across templates from `tokenLiquidityTemplates`. Uses `_fetchTokenSlotData` to get slots via `ICCLiquidityTemplate.activeXLiquiditySlotsView` and `activeYLiquiditySlotsView`, validated with `getXSlotView`/`getYSlotView`. Returns empty array if `step` exceeds templates length.
-- **Parameters**: `token` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns paginated `SlotGroup` arrays for a token’s active liquidity slots across templates from `tokenLiquidityTemplates`. Returns empty array if `step` exceeds templates length.
+- **Parameters**: 
+  - `token` (address): Token to filter liquidity.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum templates to process.
 - **Returns**: `slotGroups` (SlotGroup[] - template, slotIndices, isX).
 - **Gas**: External calls to `ICCLiquidityTemplate`, array allocation.
-- **Interactions**: Queries `ICCLiquidityTemplate`, calls `_fetchTokenSlotData`.
+- **Interactions**: 
+  - Queries `tokenLiquidityTemplates` for token’s templates.
+  - Calls `_fetchTokenSlotData` to get active slots.
 
 ### getAllTemplateLiquidity(address template, uint256 step, uint256 maxIterations) view returns (SlotGroup memory slotGroup)
-- **Behavior**: Returns a single `SlotGroup` for a template’s active liquidity slots, fetching slots via `_fetchTemplateSlotData` (using `ICCLiquidityTemplate.activeXLiquiditySlotsView` and `activeYLiquiditySlotsView`, validated with `getXSlotView`/`getYSlotView`). Returns empty group if `step` exceeds total slots.
-- **Parameters**: `template` (address), `step` (uint256), `maxIterations` (uint256).
+- **Behavior**: Returns a single `SlotGroup` for a template’s active liquidity slots. Returns empty group if `step` exceeds total slots.
+- **Parameters**: 
+  - `template` (address): Liquidity template to query.
+  - `step` (uint256): Starting index for pagination.
+  - `maxIterations` (uint256): Maximum slots to process.
 - **Returns**: `slotGroup` (SlotGroup - template, slotIndices, isX).
 - **Gas**: External calls to `ICCLiquidityTemplate`, array allocation.
-- **Interactions**: Queries `ICCLiquidityTemplate`, calls `_fetchTemplateSlotData`.
+- **Interactions**: 
+  - Calls `_fetchTemplateSlotData` to get active slots.
 
 ## Internal Functions
 ### isInArray(address[] memory array, address element) pure returns (bool)
@@ -188,14 +283,14 @@ The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orde
 - **Called By**: `globalizeLiquidity`.
 
 ### _fetchOrderData(address listing, address user) view returns (OrderData memory)
-- **Behavior**: Fetches pending buy/sell orders for a user in a listing via `ICCListingTemplate.makerPendingBuyOrdersView` and `makerPendingSellOrdersView`.
+- **Behavior**: Fetches pending buy/sell orders via `ICCListingTemplate.makerPendingBuyOrdersView` and `makerPendingSellOrdersView`.
 - **Parameters**: `listing` (address), `user` (address).
 - **Returns**: `OrderData` (buyIds, sellIds, totalOrders).
 - **Gas**: External calls to `ICCListingTemplate`.
 - **Called By**: `getAllUserActiveOrders`, `getAllUserTokenActiveOrders`.
 
 ### _fetchAllOrderData(address listing, address user) view returns (OrderData memory)
-- **Behavior**: Fetches all orders (pending, filled, canceled) for a user in a listing via `ICCListingTemplate.makerOrdersView`.
+- **Behavior**: Fetches all orders (pending, filled, canceled) via `ICCListingTemplate.makerOrdersView`.
 - **Parameters**: `listing` (address), `user` (address).
 - **Returns**: `OrderData` (buyIds, sellIds, totalOrders).
 - **Gas**: External calls to `ICCListingTemplate`.
@@ -216,14 +311,14 @@ The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orde
 - **Called By**: `getAllUserTokenActiveOrders`, `getAllUserTokenOrdersHistory`.
 
 ### _fetchTokenOrderData(address listing) view returns (OrderData memory)
-- **Behavior**: Fetches all pending buy/sell orders for a listing via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`.
+- **Behavior**: Fetches all pending buy/sell orders via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`.
 - **Parameters**: `listing` (address).
 - **Returns**: `OrderData` (buyIds, sellIds, totalOrders).
 - **Gas**: External calls to `ICCListingTemplate`.
 - **Called By**: `getAllTokenOrders`.
 
 ### _fetchListingOrderData(address listing, uint256 step, uint256 maxIterations) view returns (OrderData memory)
-- **Behavior**: Fetches paginated pending buy/sell orders for a listing via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`.
+- **Behavior**: Fetches paginated pending buy/sell orders via `ICCListingTemplate.pendingBuyOrdersView` and `pendingSellOrdersView`.
 - **Parameters**: `listing` (address), `step` (uint256), `maxIterations` (uint256).
 - **Returns**: `OrderData` (combinedIds, empty sellIds, totalOrders).
 - **Gas**: External calls to `ICCListingTemplate`, array allocation.
@@ -237,7 +332,7 @@ The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orde
 - **Called By**: `getAllUserActiveLiquidity`, `getAllUserTokenActiveLiquidity`.
 
 ### _fetchHistoricalSlotData(address template, address user) view returns (SlotData memory, bool[] memory isSpent)
-- **Behavior**: Fetches user’s historical liquidity slot indices from `depositorSlotSnapshots`, validates Y slots with `getYSlotView` for active slots, and retrieves snapshots/status from `depositorSlotSnapshots`/`slotStatus`. Uses a fixed iteration cap (1000) for gas safety.
+- **Behavior**: Fetches user’s historical liquidity slot indices from `depositorSlotSnapshots`, validates Y slots with `getYSlotView`, retrieves snapshots/status from `depositorSlotSnapshots`/`slotStatus`. Uses a fixed iteration cap (1000) for gas safety.
 - **Parameters**: `template` (address), `user` (address).
 - **Returns**: `SlotData` (slotIndices, isX, totalSlots), `isSpent` (bool[]).
 - **Gas**: External calls to `ICCLiquidityTemplate` for Y slots, array allocation.
@@ -251,14 +346,14 @@ The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orde
 - **Called By**: `getAllUserTokenActiveLiquidity`, `getAllUserTokenLiquidityHistory`.
 
 ### _fetchTokenSlotData(address template) view returns (SlotData memory)
-- **Behavior**: Fetches all active slots for a template via `ICCLiquidityTemplate.activeXLiquiditySlotsView` and `activeYLiquiditySlotsView`, validated with `getXSlotView`/`getYSlotView`.
+- **Behavior**: Fetches all active slots via `ICCLiquidityTemplate.activeXLiquiditySlotsView` and `activeYLiquiditySlotsView`, validated with `getXSlotView`/`getYSlotView`.
 - **Parameters**: `template` (address).
 - **Returns**: `SlotData` (slotIndices, isX, totalSlots).
 - **Gas**: External calls to `ICCLiquidityTemplate`, array allocation.
 - **Called By**: `getAllTokenLiquidity`.
 
 ### _fetchTemplateSlotData(address template, uint256 step, uint256 maxIterations) view returns (SlotData memory)
-- **Behavior**: Fetches paginated active slots for a template via `ICCLiquidityTemplate.activeXLiquiditySlotsView` and `activeYLiquiditySlotsView`, validated with `getXSlotView`/`getYSlotView`.
+- **Behavior**: Fetches paginated active slots via `ICCLiquidityTemplate.activeXLiquiditySlotsView` and `activeYLiquiditySlotsView`, validated with `getXSlotView`/`getYSlotView`.
 - **Parameters**: `template` (address), `step` (uint256), `maxIterations` (uint256).
 - **Returns**: `SlotData` (slotIndices, isX, totalSlots).
 - **Gas**: External calls to `ICCLiquidityTemplate`, array allocation.
@@ -267,18 +362,17 @@ The `CCGlobalizer` contract, implemented in Solidity (^0.8.2), tracks maker orde
 ## Additional Details
 - **Decimal Handling**: Relies on `ICCListingTemplate` and `ICCLiquidityTemplate` for normalization to 1e18.
 - **Gas Optimization**: Uses `step` and `maxIterations` for pagination. Avoids inline assembly, uses high-level Solidity for array operations. Call tree structure in view functions reduces stack usage. Historical views use fixed iteration cap (1000) for gas safety.
-- **Events**: `AgentSet(address agent)`, `OrdersGlobalized(address maker, address listing, address token)`, `LiquidityGlobalized(address depositor, address liquidity, address token, uint256 slotIndex, bool isSpent)`.
 - **Safety**:
   - Explicit casting for interface calls.
-  - Try-catch for external calls in `globalizeLiquidity` with silent exits.
+  - Try-catch for external calls in `globalizeLiquidity` with failure events.
   - Public mappings accessed directly in view functions.
   - No reserved keywords, no `virtual`/`override`.
-  - Non-reverting `globalizeOrders` and `globalizeLiquidity`.
+  - Non-reverting `globalizeOrders` and `globalizeLiquidity` with `GlobalizeOrdersFailed` and `GlobalizeLiquidityFailed` events.
   - Depopulates `depositorLiquidityTemplates`, `depositorTokensByLiquidity`, `tokenLiquidityTemplates` for inactive slots while preserving historical snapshots.
 - **Verification**: Validates listings via `ICCAgent.isValidListing`, liquidity templates via `ICCLiquidityTemplate.listingAddress` and `ICCAgent.isValidListing`.
 - **Interactions**:
-  - `setAgent`: Owner-only, sets `agent`.
-  - `globalizeOrders`: Called by listings, verifies via `ICCAgent`, updates mappings, emits event.
-  - `globalizeLiquidity`: Called by liquidity templates, verifies via `ICCLiquidityTemplate` and `ICCAgent`, updates/depopulates mappings, stores snapshots, sets status, emits event.
-  - Order view functions: Query `ICCListingTemplate`, use internal helpers for data processing.
-  - Liquidity view functions: Query `ICCLiquidityTemplate` for active data, `depositorSlotSnapshots`/`slotStatus` for historical data; active views return live data, historical views include snapshots/status.
+  - `setAgent`: Owner-only, sets `agent`, emits `AgentSet` or `GlobalizeOrdersFailed`.
+  - `globalizeOrders`: Called by listings, verifies via `ICCAgent`, updates mappings, emits `OrdersGlobalized` or `GlobalizeOrdersFailed`.
+  - `globalizeLiquidity`: Called by liquidity templates, verifies via `ICCLiquidityTemplate` and `ICCAgent`, updates/depopulates mappings, stores snapshots, sets status, emits `LiquidityGlobalized` or `GlobalizeLiquidityFailed`.
+  - Order view functions: Query `ICCListingTemplate`, use `_fetchOrderData`, `_fetchAllOrderData`, `_combineOrderIds`, `_countValidListings`.
+  - Liquidity view functions: Query `ICCLiquidityTemplate` for active data, `depositorSlotSnapshots`/`slotStatus` for historical data; use `_fetchSlotData`, `_fetchHistoricalSlotData`, `_countValidTemplates`, `_fetchTokenSlotData`, `_fetchTemplateSlotData`.

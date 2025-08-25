@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.2.7
+ Version: 0.2.8
  Changes:
+ - v0.2.8: Enhanced globalizeLiquidity and globalizeOrders to emit detailed failure events without reverting for invalid inputs, failed external calls, or token/listing validation failures. Added GlobalizeLiquidityFailed and GlobalizeOrdersFailed events with reason strings. Ensured view functions correctly access mappings and arrays with proper external calls, maintaining compatibility with CCLiquidityTemplate.sol (v0.1.4) and CCListingTemplate.sol (v0.2.7). No changes to view function logic as they correctly use mappings and external calls.
  - v0.2.7: Modified _fetchHistoricalSlotData to rely on depositorSlotSnapshots and slotStatus for historical slot indices, bypassing ICCLiquidityTemplate.userIndexView. Updated getAllUserLiquidityHistory and getAllUserTokenLiquidityHistory to use modified _fetchHistoricalSlotData, ensuring historical views return snapshot data without fetching live liquidity data.
  - v0.2.6: Modified globalizeLiquidity to depopulate depositorLiquidityTemplates and tokenLiquidityTemplates when all slots for a depositor in a template have allocation == 0, while retaining depositorSlotSnapshots and slotStatus for historical views. Updates depositorTokensByLiquidity and tokenLiquidityTemplates if no slots remain for a token.
  - v0.2.5: Modified globalizeLiquidity to fetch slot data, store allocation snapshot, and set spent/unspent status. Added getAllUserLiquidityHistory and getAllUserTokenLiquidityHistory for snapshot data with status. Renamed getAllUserLiquidity to getAllUserActiveLiquidity and getAllUserTokenLiquidity to getAllUserTokenActiveLiquidity.
@@ -106,10 +107,15 @@ contract CCGlobalizer is Ownable {
     event AgentSet(address indexed agent);
     event OrdersGlobalized(address indexed maker, address indexed listing, address indexed token);
     event LiquidityGlobalized(address indexed depositor, address indexed liquidity, address indexed token, uint256 slotIndex, bool isSpent);
+    event GlobalizeLiquidityFailed(address indexed depositor, address indexed liquidity, address indexed token, string reason);
+    event GlobalizeOrdersFailed(address indexed maker, address indexed listing, address indexed token, string reason);
 
     // Sets agent address, callable once by owner
     function setAgent(address _agent) external onlyOwner {
-        if (agent != address(0) || _agent == address(0)) return;
+        if (agent != address(0) || _agent == address(0)) {
+            emit GlobalizeOrdersFailed(address(0), address(0), address(0), "Agent already set or invalid");
+            return;
+        }
         agent = _agent;
         emit AgentSet(_agent);
     }
@@ -135,27 +141,70 @@ contract CCGlobalizer is Ownable {
 
     // Updates depositor liquidity mappings, callable by valid liquidity templates
     function globalizeLiquidity(address depositor, address token) external {
-        if (agent == address(0)) return;
+        if (agent == address(0)) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Agent not set");
+            return;
+        }
+        if (depositor == address(0)) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Invalid depositor address");
+            return;
+        }
+        if (token == address(0)) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Invalid token address");
+            return;
+        }
         address listingAddress;
         try ICCLiquidityTemplate(msg.sender).listingAddress() returns (address addr) {
             listingAddress = addr;
-        } catch {
+        } catch (bytes memory reason) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch listing address: ", reason)));
+            return;
+        }
+        if (listingAddress == address(0)) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Invalid listing address");
             return;
         }
         (bool isValid, ICCAgent.ListingDetails memory details) = ICCAgent(agent).isValidListing(listingAddress);
-        if (!isValid || details.liquidityAddress != msg.sender) return;
-        if (details.tokenA != token && details.tokenB != token) return;
+        if (!isValid) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Invalid listing");
+            return;
+        }
+        if (details.liquidityAddress != msg.sender) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Liquidity address mismatch");
+            return;
+        }
+        if (details.tokenA != token && details.tokenB != token) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Token not in listing");
+            return;
+        }
 
         // Fetch slot data for depositor
-        uint256[] memory indices = ICCLiquidityTemplate(msg.sender).userIndexView(depositor);
+        uint256[] memory indices;
+        try ICCLiquidityTemplate(msg.sender).userIndexView(depositor) returns (uint256[] memory idxs) {
+            indices = idxs;
+        } catch (bytes memory reason) {
+            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch user indices: ", reason)));
+            return;
+        }
         bool hasActiveSlots = false;
         for (uint256 i = 0; i < indices.length; i++) {
             uint256 slotIndex = indices[i];
-            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(msg.sender).getXSlotView(slotIndex);
+            ICCLiquidityTemplate.Slot memory slot;
             bool isX = true;
+            try ICCLiquidityTemplate(msg.sender).getXSlotView(slotIndex) returns (ICCLiquidityTemplate.Slot memory xSlot) {
+                slot = xSlot;
+            } catch (bytes memory reason) {
+                emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch X slot: ", reason)));
+                continue;
+            }
             if (slot.depositor != depositor || slot.allocation == 0) {
-                slot = ICCLiquidityTemplate(msg.sender).getYSlotView(slotIndex);
-                isX = false;
+                try ICCLiquidityTemplate(msg.sender).getYSlotView(slotIndex) returns (ICCLiquidityTemplate.Slot memory ySlot) {
+                    slot = ySlot;
+                    isX = false;
+                } catch (bytes memory reason) {
+                    emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch Y slot: ", reason)));
+                    continue;
+                }
             }
             if (slot.depositor == depositor) {
                 // Store snapshot of allocation and set status
@@ -186,12 +235,23 @@ contract CCGlobalizer is Ownable {
             // Check if token has any active slots in this template
             bool hasTokenSlots = false;
             for (uint256 i = 0; i < indices.length; i++) {
-                ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(msg.sender).getXSlotView(indices[i]);
+                ICCLiquidityTemplate.Slot memory slot;
+                try ICCLiquidityTemplate(msg.sender).getXSlotView(indices[i]) returns (ICCLiquidityTemplate.Slot memory xSlot) {
+                    slot = xSlot;
+                } catch (bytes memory reason) {
+                    emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch X slot for cleanup: ", reason)));
+                    continue;
+                }
                 if (slot.allocation > 0) {
                     hasTokenSlots = true;
                     break;
                 }
-                slot = ICCLiquidityTemplate(msg.sender).getYSlotView(indices[i]);
+                try ICCLiquidityTemplate(msg.sender).getYSlotView(indices[i]) returns (ICCLiquidityTemplate.Slot memory ySlot) {
+                    slot = ySlot;
+                } catch (bytes memory reason) {
+                    emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch Y slot for cleanup: ", reason)));
+                    continue;
+                }
                 if (slot.allocation > 0) {
                     hasTokenSlots = true;
                     break;
@@ -202,6 +262,47 @@ contract CCGlobalizer is Ownable {
                 removeFromArray(tokenLiquidityTemplates[token], msg.sender);
             }
         }
+    }
+
+    // Updates maker order mappings, callable by valid listings
+    function globalizeOrders(address maker, address token) external {
+        if (agent == address(0)) {
+            emit GlobalizeOrdersFailed(maker, msg.sender, token, "Agent not set");
+            return;
+        }
+        if (maker == address(0)) {
+            emit GlobalizeOrdersFailed(maker, msg.sender, token, "Invalid maker address");
+            return;
+        }
+        if (token == address(0)) {
+            emit GlobalizeOrdersFailed(maker, msg.sender, token, "Invalid token address");
+            return;
+        }
+        (bool isValid, ICCAgent.ListingDetails memory details) = ICCAgent(agent).isValidListing(msg.sender);
+        if (!isValid) {
+            emit GlobalizeOrdersFailed(maker, msg.sender, token, "Invalid listing");
+            return;
+        }
+        if (details.listingAddress != msg.sender) {
+            emit GlobalizeOrdersFailed(maker, msg.sender, token, "Listing address mismatch");
+            return;
+        }
+        if (details.tokenA != token && details.tokenB != token) {
+            emit GlobalizeOrdersFailed(maker, msg.sender, token, "Token not in listing");
+            return;
+        }
+
+        // Update mappings and arrays
+        if (!isInArray(makerTokensByListing[maker][msg.sender], token)) {
+            makerTokensByListing[maker][msg.sender].push(token);
+        }
+        if (!isInArray(makerListings[maker], msg.sender)) {
+            makerListings[maker].push(msg.sender);
+        }
+        if (!isInArray(tokenListings[token], msg.sender)) {
+            tokenListings[token].push(msg.sender);
+        }
+        emit OrdersGlobalized(maker, msg.sender, token);
     }
 
     // Helper: Fetches order data for a listing (pending orders only)
@@ -543,25 +644,5 @@ contract CCGlobalizer is Ownable {
     function getAllTemplateLiquidity(address template, uint256 step, uint256 maxIterations) external view returns (SlotGroup memory slotGroup) {
         SlotData memory data = _fetchTemplateSlotData(template, step, maxIterations);
         return SlotGroup(template, data.slotIndices, data.isX);
-    }
-
-    // Updates maker order mappings, callable by valid listings
-    function globalizeOrders(address maker, address token) external {
-        if (agent == address(0)) return;
-        (bool isValid, ICCAgent.ListingDetails memory details) = ICCAgent(agent).isValidListing(msg.sender);
-        if (!isValid) return;
-        if (details.tokenA != token && details.tokenB != token) return;
-
-        // Update mappings and arrays
-        if (!isInArray(makerTokensByListing[maker][msg.sender], token)) {
-            makerTokensByListing[maker][msg.sender].push(token);
-        }
-        if (!isInArray(makerListings[maker], msg.sender)) {
-            makerListings[maker].push(msg.sender);
-        }
-        if (!isInArray(tokenListings[token], msg.sender)) {
-            tokenListings[token].push(msg.sender);
-        }
-        emit OrdersGlobalized(maker, msg.sender, token);
     }
 }
