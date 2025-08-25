@@ -1,16 +1,11 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- Version: 0.1.3
+ Version: 0.1.4
  Changes:
- - v0.1.3: Removed duplicate subtraction in transactToken and transactNative, as xExecuteOut/yExecuteOut already handle subtraction via update calls. Modified balance checks in transactToken and transactNative to use xLiquid/yLiquid instead of total contract balance, ensuring fees are excluded from liquidity operations. Maintained compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
+ - v0.1.4: Removed fixed gas limit in globalizeUpdate for ICCAgent.globalizerAddress and ITokenRegistry.initializeBalances. Modified globalizeUpdate to emit event on failure without reverting, ensuring deposits succeed. Consolidated registry update into globalizeUpdate for atomicity. Maintained compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
+ - v0.1.3: Removed duplicate subtraction in transactToken and transactNative, as xExecuteOut/yExecuteOut already handle subtraction via update calls. Modified balance checks in transactToken and transactNative to use xLiquid/yLiquid instead of total contract balance, ensuring fees are excluded from liquidity operations.
  - v0.1.2: Integrated update function calls with updateType == 0 for subtraction. No new updateType added. Maintained fee segregation and compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
- - v0.1.1: Added globalizeUpdate internal function to encapsulate globalization calls, extracted from transactToken and transactNative. Integrated into update function to handle deposits from liquidity router. No other changes to maintain compatibility.
- - Removed globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address directly from ICCAgent(agent).globalizerAddress() within each call, aligning with registry update pattern in update function. Compatible with CCGlobalizer.sol v0.2.1.
- - v0.1.0: Added globalizerAddress state variable, updated transactToken and transactNative to fetch globalizer address from agent and call ICCGlobalizer.globalizeLiquidity. Maintained compatibility with CCSEntryPartial.sol v0.0.18 and ICCGlobalizer v0.2.1.
- - v0.0.21: Adjusted globalizeLiquidity call in transactToken and transactNative for ICCGlobalizer v0.2.1. Added view functions userXIndexView, userYIndexView, getActiveXLiquiditySlots, getActiveYLiquiditySlots.
- - v0.0.20: Removed depositToken, depositNative, withdraw, claimFees, changeDepositor, moved to CCLiquidityRouter.sol v0.0.18 via CCLiquidityPartial.sol v0.0.13.
- - v0.0.19: Removed checkRouterInvolved and isRouter, replaced with require(routers[msg.sender], "Router only").
  Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCSEntryPartial.sol (v0.0.18), CCGlobalizer.sol (v0.2.1).
 */
 
@@ -106,20 +101,35 @@ contract CCLiquidityTemplate {
     }
 
     function globalizeUpdate(address depositor, address token, bool isX, uint256 amount) internal {
-        // Handles globalization calls to ICCGlobalizer
+        // Handles globalization and registry updates, emits events on failure without reverting
         if (agent != address(0)) {
             address globalizer;
-            try ICCAgent(agent).globalizerAddress{gas: 1000000}() returns (address glob) {
+            try ICCAgent(agent).globalizerAddress() returns (address glob) {
                 globalizer = glob;
             } catch (bytes memory reason) {
                 emit GlobalizeUpdateFailed(depositor, listingId, isX, amount, reason);
-                revert(string(abi.encodePacked("Globalizer address fetch failed: ", reason)));
+                return;
             }
             if (globalizer != address(0)) {
                 try ICCGlobalizer(globalizer).globalizeLiquidity(depositor, token) {
                 } catch (bytes memory reason) {
                     emit GlobalizeUpdateFailed(depositor, listingId, isX, amount, reason);
-                    revert(string(abi.encodePacked("Globalize update failed: ", reason)));
+                    return;
+                }
+            }
+            address registry;
+            try ICCAgent(agent).registryAddress() returns (address reg) {
+                registry = reg;
+            } catch (bytes memory reason) {
+                emit UpdateRegistryFailed(depositor, isX, reason);
+                return;
+            }
+            if (registry != address(0)) {
+                address[] memory users = new address[](1);
+                users[0] = depositor;
+                try ITokenRegistry(registry).initializeBalances(token, users) {
+                } catch (bytes memory reason) {
+                    emit UpdateRegistryFailed(depositor, isX, reason);
                 }
             }
         }
@@ -235,25 +245,6 @@ contract CCLiquidityTemplate {
                 details.yLiquid += u.value;
                 globalizeUpdate(depositor, tokenB, false, u.value);
             } else revert("Invalid update type");
-        }
-        if (agent != address(0)) {
-            address registry;
-            try ICCAgent(agent).registryAddress{gas: 1000000}() returns (address reg) {
-                registry = reg;
-            } catch (bytes memory reason) {
-                emit UpdateRegistryFailed(depositor, updates[0].updateType == 2, reason);
-                revert(string(abi.encodePacked("Agent registry fetch failed: ", reason)));
-            }
-            if (registry != address(0)) {
-                address token = updates[0].updateType == 2 ? tokenA : tokenB;
-                address[] memory users = new address[](1);
-                users[0] = depositor;
-                try ITokenRegistry(registry).initializeBalances{gas: 1000000}(token, users) {
-                } catch (bytes memory reason) {
-                    emit UpdateRegistryFailed(depositor, updates[0].updateType == 2, reason);
-                    revert(string(abi.encodePacked("Registry update failed: ", reason)));
-                }
-            }
         }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
     }
@@ -381,12 +372,12 @@ contract CCLiquidityTemplate {
         if (withdrawal.amountA > 0) {
             uint8 decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
             uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
-            if (tokenA == address(0)) {
+            if (tokenA == address(0) && amountA > 0) {
                 try this.transactNative(depositor, amountA, depositor) {
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
                 }
-            } else {
+            } else if (amountA > 0) {
                 try this.transactToken(depositor, tokenA, amountA, depositor) {
                 } catch (bytes memory reason) {
                     revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
