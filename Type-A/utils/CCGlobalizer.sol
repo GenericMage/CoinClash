@@ -1,22 +1,12 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.2.8
+ Version: 0.2.13
  Changes:
- - v0.2.8: Enhanced globalizeLiquidity and globalizeOrders to emit detailed failure events without reverting for invalid inputs, failed external calls, or token/listing validation failures. Added GlobalizeLiquidityFailed and GlobalizeOrdersFailed events with reason strings. Ensured view functions correctly access mappings and arrays with proper external calls, maintaining compatibility with CCLiquidityTemplate.sol (v0.1.4) and CCListingTemplate.sol (v0.2.7). No changes to view function logic as they correctly use mappings and external calls.
- - v0.2.7: Modified _fetchHistoricalSlotData to rely on depositorSlotSnapshots and slotStatus for historical slot indices, bypassing ICCLiquidityTemplate.userIndexView. Updated getAllUserLiquidityHistory and getAllUserTokenLiquidityHistory to use modified _fetchHistoricalSlotData, ensuring historical views return snapshot data without fetching live liquidity data.
- - v0.2.6: Modified globalizeLiquidity to depopulate depositorLiquidityTemplates and tokenLiquidityTemplates when all slots for a depositor in a template have allocation == 0, while retaining depositorSlotSnapshots and slotStatus for historical views. Updates depositorTokensByLiquidity and tokenLiquidityTemplates if no slots remain for a token.
- - v0.2.5: Modified globalizeLiquidity to fetch slot data, store allocation snapshot, and set spent/unspent status. Added getAllUserLiquidityHistory and getAllUserTokenLiquidityHistory for snapshot data with status. Renamed getAllUserLiquidity to getAllUserActiveLiquidity and getAllUserTokenLiquidity to getAllUserTokenActiveLiquidity.
- - v0.2.4: Renamed getAllUserOrders to getAllUserOrdersHistory and getAllUserTokenOrders to getAllUserTokenOrdersHistory. Added getAllUserActiveOrders and getAllUserTokenActiveOrders for pending orders.
- - v0.2.3: Refactored view functions into internal call trees per "do x64". Added OrderData, SlotData structs. Fixed "stack too deep" in getAllUserTokenLiquidity.
- - v0.2.2: Modified view functions to return OrderGroup/SlotGroup structs.
- - v0.2.1: Added liquidity view functions with step/maxIterations.
- - v0.2.0: Simplified contract, added globalizeOrders, globalizeLiquidity.
- - v0.1.5: Removed step/maxIterations from token view functions.
- - v0.1.4: Removed maxIterations/step from getAllMakerActiveOrders, getAllMakerOrders.
- - v0.1.3: Fixed parser error in globalizeOrders.
- - v0.1.2: Refactored view functions with count/collect helpers.
- - v0.1.1: Added globalizeOrders, mappings, arrays, view functions.
- - v0.1.0: Initial globalizeLiquidity implementation.
+ - v0.2.13: Modified globalizeOrders to initialize tokenListings for both tokenA and tokenB from ICCListingTemplate. Added _isListingGlobalized to check listing in tokenListings. Modified getAllListingOrders to restrict to globalized listings using _isListingGlobalized. Updated getAllUserActiveOrders, getAllUserOrdersHistory, getAllUserTokenActiveOrders, and getAllUserTokenOrdersHistory to filter listings with _isListingGlobalized. Maintained compatibility with CCLiquidityTemplate.sol (v0.1.4) and CCListingTemplate.sol (v0.2.7).
+ - v0.2.12: Modified _isTemplateGlobalized to remove token parameter, checking template globalization via ICCAgent.isValidListing and ICCLiquidityTemplate.listingAddress. Updated getAllTemplateLiquidity to remove token parameter and return all X and Y liquidity slot IDs using activeXLiquiditySlotsView and activeYLiquiditySlotsView. Adjusted getAllUserActiveLiquidity, getAllUserTokenActiveLiquidity, and getAllTokenLiquidity to use updated _isTemplateGlobalized.
+ - v0.2.11: Fixed TypeError in _isTemplateGlobalized by removing invalid tokenListings.length iteration, added token parameter to check template in tokenLiquidityTemplates[token]. Updated getAllTemplateLiquidity, getAllUserActiveLiquidity, and getAllUserTokenActiveLiquidity to pass token to _isTemplateGlobalized. Modified getAllListingOrders to use ICCAgent.isValidListing for globalization check.
+ - v0.2.10: Modified getAllTemplateLiquidity to return data only if template is globalized. Added getAllListingOrders for globalized listing orders.
+ - v0.2.9: Modified globalizeLiquidity to remove external fetches to ICCLiquidityTemplate (except ICCAgent validation), accepting only depositor and token, storing valid liquidity address. Removed depositorSlotSnapshots and slotStatus mappings. Removed getAllUserLiquidityHistory, getAllUserTokenLiquidityHistory, and _fetchHistoricalSlotData. Added getUserHistoricalTemplates.
 */
 
 pragma solidity ^0.8.2;
@@ -29,7 +19,8 @@ interface IERC20 {
 
 interface ICCLiquidityTemplate {
     function listingAddress() external view returns (address);
-    function userIndexView(address user) external view returns (uint256[] memory indices);
+    function userXIndexView(address user) external view returns (uint256[] memory indices);
+    function userYIndexView(address user) external view returns (uint256[] memory indices);
     function getXSlotView(uint256 index) external view returns (Slot memory slot);
     function getYSlotView(uint256 index) external view returns (Slot memory slot);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory slots);
@@ -72,8 +63,6 @@ contract CCGlobalizer is Ownable {
     mapping(address => address[]) public depositorLiquidityTemplates; // depositor -> liquidity templates
     mapping(address => address[]) public tokenListings; // token -> listings
     mapping(address => address[]) public tokenLiquidityTemplates; // token -> liquidity templates
-    mapping(address => mapping(address => mapping(uint256 => uint256))) public depositorSlotSnapshots; // depositor -> template -> slotIndex -> allocation
-    mapping(address => mapping(uint256 => bool)) public slotStatus; // template -> slotIndex -> spent (true) / unspent (false)
 
     // Structs for grouped output
     struct OrderGroup {
@@ -85,14 +74,8 @@ contract CCGlobalizer is Ownable {
         uint256[] slotIndices;
         bool[] isX;
     }
-    struct SlotHistoryGroup {
-        address template;
-        uint256[] slotIndices;
-        bool[] isX;
-        bool[] isSpent;
-    }
 
-    // Private structs for internal data management
+    // Private struct for internal data management
     struct OrderData {
         uint256[] buyIds;
         uint256[] sellIds;
@@ -106,12 +89,13 @@ contract CCGlobalizer is Ownable {
 
     event AgentSet(address indexed agent);
     event OrdersGlobalized(address indexed maker, address indexed listing, address indexed token);
-    event LiquidityGlobalized(address indexed depositor, address indexed liquidity, address indexed token, uint256 slotIndex, bool isSpent);
+    event LiquidityGlobalized(address indexed depositor, address indexed liquidity, address indexed token);
     event GlobalizeLiquidityFailed(address indexed depositor, address indexed liquidity, address indexed token, string reason);
     event GlobalizeOrdersFailed(address indexed maker, address indexed listing, address indexed token, string reason);
 
     // Sets agent address, callable once by owner
     function setAgent(address _agent) external onlyOwner {
+        // Validates and sets agent address, emits failure event if invalid
         if (agent != address(0) || _agent == address(0)) {
             emit GlobalizeOrdersFailed(address(0), address(0), address(0), "Agent already set or invalid");
             return;
@@ -122,6 +106,7 @@ contract CCGlobalizer is Ownable {
 
     // Helper to check if an address is in an array
     function isInArray(address[] memory array, address element) internal pure returns (bool) {
+        // Returns true if element exists in array
         for (uint256 i = 0; i < array.length; i++) {
             if (array[i] == element) return true;
         }
@@ -130,6 +115,7 @@ contract CCGlobalizer is Ownable {
 
     // Removes an address from an array
     function removeFromArray(address[] storage array, address element) internal {
+        // Removes element from array by swapping with last and popping
         for (uint256 i = 0; i < array.length; i++) {
             if (array[i] == element) {
                 array[i] = array[array.length - 1];
@@ -141,6 +127,7 @@ contract CCGlobalizer is Ownable {
 
     // Updates depositor liquidity mappings, callable by valid liquidity templates
     function globalizeLiquidity(address depositor, address token) external {
+        // Validates inputs and updates mappings without fetching slot data
         if (agent == address(0)) {
             emit GlobalizeLiquidityFailed(depositor, msg.sender, token, "Agent not set");
             return;
@@ -178,46 +165,6 @@ contract CCGlobalizer is Ownable {
             return;
         }
 
-        // Fetch slot data for depositor
-        uint256[] memory indices;
-        try ICCLiquidityTemplate(msg.sender).userIndexView(depositor) returns (uint256[] memory idxs) {
-            indices = idxs;
-        } catch (bytes memory reason) {
-            emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch user indices: ", reason)));
-            return;
-        }
-        bool hasActiveSlots = false;
-        for (uint256 i = 0; i < indices.length; i++) {
-            uint256 slotIndex = indices[i];
-            ICCLiquidityTemplate.Slot memory slot;
-            bool isX = true;
-            try ICCLiquidityTemplate(msg.sender).getXSlotView(slotIndex) returns (ICCLiquidityTemplate.Slot memory xSlot) {
-                slot = xSlot;
-            } catch (bytes memory reason) {
-                emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch X slot: ", reason)));
-                continue;
-            }
-            if (slot.depositor != depositor || slot.allocation == 0) {
-                try ICCLiquidityTemplate(msg.sender).getYSlotView(slotIndex) returns (ICCLiquidityTemplate.Slot memory ySlot) {
-                    slot = ySlot;
-                    isX = false;
-                } catch (bytes memory reason) {
-                    emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch Y slot: ", reason)));
-                    continue;
-                }
-            }
-            if (slot.depositor == depositor) {
-                // Store snapshot of allocation and set status
-                depositorSlotSnapshots[depositor][msg.sender][slotIndex] = slot.allocation;
-                bool isSpent = slot.allocation == 0;
-                slotStatus[msg.sender][slotIndex] = isSpent;
-                emit LiquidityGlobalized(depositor, msg.sender, token, slotIndex, isSpent);
-                if (slot.allocation > 0) {
-                    hasActiveSlots = true;
-                }
-            }
-        }
-
         // Update mappings and arrays
         if (!isInArray(depositorTokensByLiquidity[depositor][msg.sender], token)) {
             depositorTokensByLiquidity[depositor][msg.sender].push(token);
@@ -228,44 +175,12 @@ contract CCGlobalizer is Ownable {
         if (!isInArray(tokenLiquidityTemplates[token], msg.sender)) {
             tokenLiquidityTemplates[token].push(msg.sender);
         }
-
-        // Depopulate if no active slots
-        if (!hasActiveSlots) {
-            removeFromArray(depositorLiquidityTemplates[depositor], msg.sender);
-            // Check if token has any active slots in this template
-            bool hasTokenSlots = false;
-            for (uint256 i = 0; i < indices.length; i++) {
-                ICCLiquidityTemplate.Slot memory slot;
-                try ICCLiquidityTemplate(msg.sender).getXSlotView(indices[i]) returns (ICCLiquidityTemplate.Slot memory xSlot) {
-                    slot = xSlot;
-                } catch (bytes memory reason) {
-                    emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch X slot for cleanup: ", reason)));
-                    continue;
-                }
-                if (slot.allocation > 0) {
-                    hasTokenSlots = true;
-                    break;
-                }
-                try ICCLiquidityTemplate(msg.sender).getYSlotView(indices[i]) returns (ICCLiquidityTemplate.Slot memory ySlot) {
-                    slot = ySlot;
-                } catch (bytes memory reason) {
-                    emit GlobalizeLiquidityFailed(depositor, msg.sender, token, string(abi.encodePacked("Failed to fetch Y slot for cleanup: ", reason)));
-                    continue;
-                }
-                if (slot.allocation > 0) {
-                    hasTokenSlots = true;
-                    break;
-                }
-            }
-            if (!hasTokenSlots) {
-                removeFromArray(depositorTokensByLiquidity[depositor][msg.sender], token);
-                removeFromArray(tokenLiquidityTemplates[token], msg.sender);
-            }
-        }
+        emit LiquidityGlobalized(depositor, msg.sender, token);
     }
 
     // Updates maker order mappings, callable by valid listings
     function globalizeOrders(address maker, address token) external {
+        // Validates inputs and updates order mappings
         if (agent == address(0)) {
             emit GlobalizeOrdersFailed(maker, msg.sender, token, "Agent not set");
             return;
@@ -292,6 +207,10 @@ contract CCGlobalizer is Ownable {
             return;
         }
 
+        // Fetch tokenA and tokenB to initialize tokenListings
+        address tokenA = ICCListingTemplate(msg.sender).tokenA();
+        address tokenB = ICCListingTemplate(msg.sender).tokenB();
+        
         // Update mappings and arrays
         if (!isInArray(makerTokensByListing[maker][msg.sender], token)) {
             makerTokensByListing[maker][msg.sender].push(token);
@@ -299,29 +218,35 @@ contract CCGlobalizer is Ownable {
         if (!isInArray(makerListings[maker], msg.sender)) {
             makerListings[maker].push(msg.sender);
         }
-        if (!isInArray(tokenListings[token], msg.sender)) {
-            tokenListings[token].push(msg.sender);
+        if (!isInArray(tokenListings[tokenA], msg.sender)) {
+            tokenListings[tokenA].push(msg.sender);
+        }
+        if (!isInArray(tokenListings[tokenB], msg.sender)) {
+            tokenListings[tokenB].push(msg.sender);
         }
         emit OrdersGlobalized(maker, msg.sender, token);
     }
 
     // Helper: Fetches order data for a listing (pending orders only)
-    function _fetchOrderData(address listing, address user) internal view returns (OrderData memory) {
+    function _fetchOrderData(address listing, address user) internal view returns (OrderData memory data) {
+        // Fetches pending buy and sell order IDs for a user in a listing
         uint256[] memory buyIds = ICCListingTemplate(listing).makerPendingBuyOrdersView(user, 0, type(uint256).max);
         uint256[] memory sellIds = ICCListingTemplate(listing).makerPendingSellOrdersView(user, 0, type(uint256).max);
         return OrderData(buyIds, sellIds, buyIds.length + sellIds.length);
     }
 
-    // Helper: Fetches all order data for a listing (all orders, regardless of status)
-    function _fetchAllOrderData(address listing, address user) internal view returns (OrderData memory) {
+    // Helper: Fetches all order data for a listing (all orders)
+    function _fetchAllOrderData(address listing, address user) internal view returns (OrderData memory data) {
+        // Fetches all order IDs for a user in a listing
         uint256[] memory buyIds = ICCListingTemplate(listing).makerOrdersView(user, 0, type(uint256).max);
         uint256[] memory sellIds = ICCListingTemplate(listing).makerOrdersView(user, 0, type(uint256).max);
         return OrderData(buyIds, sellIds, buyIds.length + sellIds.length);
     }
 
     // Helper: Combines order IDs
-    function _combineOrderIds(OrderData memory data) internal pure returns (uint256[] memory) {
-        uint256[] memory combinedIds = new uint256[](data.totalOrders);
+    function _combineOrderIds(OrderData memory data) internal pure returns (uint256[] memory combinedIds) {
+        // Combines buy and sell order IDs into a single array
+        combinedIds = new uint256[](data.totalOrders);
         uint256 index = 0;
         for (uint256 i = 0; i < data.buyIds.length; i++) {
             combinedIds[index] = data.buyIds[i];
@@ -331,62 +256,35 @@ contract CCGlobalizer is Ownable {
             combinedIds[index] = data.sellIds[i];
             index++;
         }
-        return combinedIds;
+    }
+
+    // Helper: Checks if a listing is globalized
+    function _isListingGlobalized(address listing) internal view returns (bool) {
+        // Returns true if listing is associated with any token in tokenListings
+        if (agent == address(0)) return false;
+        address tokenA = ICCListingTemplate(listing).tokenA();
+        address tokenB = ICCListingTemplate(listing).tokenB();
+        return isInArray(tokenListings[tokenA], listing) || isInArray(tokenListings[tokenB], listing);
     }
 
     // Returns all user order IDs grouped by listing (pending orders only)
     function getAllUserActiveOrders(address user, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
+        // Returns pending order IDs grouped by listing in reverse order (latest first)
         uint256 length = makerListings[user].length;
         if (step >= length) return new OrderGroup[](0);
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        orderGroups = new OrderGroup[](limit);
-
-        for (uint256 i = step; i < step + limit; i++) {
-            address listing = makerListings[user][i];
-            OrderData memory data = _fetchOrderData(listing, user);
-            orderGroups[i - step] = OrderGroup(listing, _combineOrderIds(data));
-        }
-    }
-
-    // Returns all user order IDs grouped by listing (all orders, regardless of status)
-    function getAllUserOrdersHistory(address user, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
-        uint256 length = makerListings[user].length;
-        if (step >= length) return new OrderGroup[](0);
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        orderGroups = new OrderGroup[](limit);
-
-        for (uint256 i = step; i < step + limit; i++) {
-            address listing = makerListings[user][i];
-            OrderData memory data = _fetchAllOrderData(listing, user);
-            orderGroups[i - step] = OrderGroup(listing, _combineOrderIds(data));
-        }
-    }
-
-    // Helper: Counts valid listings for a token
-    function _countValidListings(address user, address token, uint256 step, uint256 maxIterations) internal view returns (uint256) {
-        uint256 length = makerListings[user].length;
         uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
         uint256 validCount = 0;
-        for (uint256 i = step; i < step + limit; i++) {
-            if (isInArray(makerTokensByListing[user][makerListings[user][i]], token)) {
+        for (uint256 i = 0; i < limit; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (_isListingGlobalized(listing)) {
                 validCount++;
             }
         }
-        return validCount;
-    }
-
-    // Returns user order IDs for a specific token grouped by listing (pending orders only)
-    function getAllUserTokenActiveOrders(address user, address token, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
-        uint256 length = makerListings[user].length;
-        if (step >= length) return new OrderGroup[](0);
-        uint256 validCount = _countValidListings(user, token, step, maxIterations);
         orderGroups = new OrderGroup[](validCount);
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
         uint256 index = 0;
-
-        for (uint256 i = step; i < step + limit && index < validCount; i++) {
-            address listing = makerListings[user][i];
-            if (isInArray(makerTokensByListing[user][listing], token)) {
+        for (uint256 i = 0; i < limit && index < validCount; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (_isListingGlobalized(listing)) {
                 OrderData memory data = _fetchOrderData(listing, user);
                 orderGroups[index] = OrderGroup(listing, _combineOrderIds(data));
                 index++;
@@ -394,18 +292,75 @@ contract CCGlobalizer is Ownable {
         }
     }
 
-    // Returns user order IDs for a specific token grouped by listing (all orders, regardless of status)
-    function getAllUserTokenOrdersHistory(address user, address token, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
+    // Returns all user order IDs grouped by listing (all orders)
+    function getAllUserOrdersHistory(address user, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
+        // Returns all order IDs grouped by listing in reverse order (latest first)
+        uint256 length = makerListings[user].length;
+        if (step >= length) return new OrderGroup[](0);
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        uint256 validCount = 0;
+        for (uint256 i = 0; i < limit; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (_isListingGlobalized(listing)) {
+                validCount++;
+            }
+        }
+        orderGroups = new OrderGroup[](validCount);
+        uint256 index = 0;
+        for (uint256 i = 0; i < limit && index < validCount; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (_isListingGlobalized(listing)) {
+                OrderData memory data = _fetchAllOrderData(listing, user);
+                orderGroups[index] = OrderGroup(listing, _combineOrderIds(data));
+                index++;
+            }
+        }
+    }
+
+    // Helper: Counts valid listings for a token
+    function _countValidListings(address user, address token, uint256 step, uint256 maxIterations) internal view returns (uint256 validCount) {
+        // Counts listings containing the specified token
+        uint256 length = makerListings[user].length;
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        for (uint256 i = 0; i < limit; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (isInArray(makerTokensByListing[user][listing], token) && _isListingGlobalized(listing)) {
+                validCount++;
+            }
+        }
+    }
+
+    // Returns user order IDs for a specific token grouped by listing (pending orders)
+    function getAllUserTokenActiveOrders(address user, address token, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
+        // Returns pending order IDs for a token in reverse order (latest first)
         uint256 length = makerListings[user].length;
         if (step >= length) return new OrderGroup[](0);
         uint256 validCount = _countValidListings(user, token, step, maxIterations);
         orderGroups = new OrderGroup[](validCount);
         uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
         uint256 index = 0;
+        for (uint256 i = 0; i < limit && index < validCount; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (isInArray(makerTokensByListing[user][listing], token) && _isListingGlobalized(listing)) {
+                OrderData memory data = _fetchOrderData(listing, user);
+                orderGroups[index] = OrderGroup(listing, _combineOrderIds(data));
+                index++;
+            }
+        }
+    }
 
-        for (uint256 i = step; i < step + limit && index < validCount; i++) {
-            address listing = makerListings[user][i];
-            if (isInArray(makerTokensByListing[user][listing], token)) {
+    // Returns user order IDs for a specific token grouped by listing (all orders)
+    function getAllUserTokenOrdersHistory(address user, address token, uint256 step, uint256 maxIterations) external view returns (OrderGroup[] memory orderGroups) {
+        // Returns all order IDs for a token in reverse order (latest first)
+        uint256 length = makerListings[user].length;
+        if (step >= length) return new OrderGroup[](0);
+        uint256 validCount = _countValidListings(user, token, step, maxIterations);
+        orderGroups = new OrderGroup[](validCount);
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        uint256 index = 0;
+        for (uint256 i = 0; i < limit && index < validCount; i++) {
+            address listing = makerListings[user][length - 1 - (step + i)];
+            if (isInArray(makerTokensByListing[user][listing], token) && _isListingGlobalized(listing)) {
                 OrderData memory data = _fetchAllOrderData(listing, user);
                 orderGroups[index] = OrderGroup(listing, _combineOrderIds(data));
                 index++;
@@ -414,25 +369,27 @@ contract CCGlobalizer is Ownable {
     }
 
     // Helper: Fetches active slot data for a template
-    function _fetchSlotData(address template, address user) internal view returns (SlotData memory) {
-        uint256[] memory indices = ICCLiquidityTemplate(template).userIndexView(user);
-        uint256[] memory slotIndices = new uint256[](indices.length);
-        bool[] memory isX = new bool[](indices.length);
+    function _fetchSlotData(address template, address user) internal view returns (SlotData memory data) {
+        // Fetches active X and Y slot indices for a user in a template
+        uint256[] memory xIndices = ICCLiquidityTemplate(template).userXIndexView(user);
+        uint256[] memory yIndices = ICCLiquidityTemplate(template).userYIndexView(user);
+        uint256[] memory slotIndices = new uint256[](xIndices.length + yIndices.length);
+        bool[] memory isX = new bool[](xIndices.length + yIndices.length);
         uint256 index = 0;
-
-        for (uint256 i = 0; i < indices.length; i++) {
-            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(indices[i]);
+        for (uint256 i = 0; i < xIndices.length; i++) {
+            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(xIndices[i]);
             if (slot.depositor == user && slot.allocation > 0) {
-                slotIndices[index] = indices[i];
+                slotIndices[index] = xIndices[i];
                 isX[index] = true;
                 index++;
-            } else {
-                slot = ICCLiquidityTemplate(template).getYSlotView(indices[i]);
-                if (slot.depositor == user && slot.allocation > 0) {
-                    slotIndices[index] = indices[i];
-                    isX[index] = false;
-                    index++;
-                }
+            }
+        }
+        for (uint256 i = 0; i < yIndices.length; i++) {
+            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(yIndices[i]);
+            if (slot.depositor == user && slot.allocation > 0) {
+                slotIndices[index] = yIndices[i];
+                isX[index] = false;
+                index++;
             }
         }
         uint256[] memory resizedIndices = new uint256[](index);
@@ -444,205 +401,185 @@ contract CCGlobalizer is Ownable {
         return SlotData(resizedIndices, resizedIsX, index);
     }
 
-    // Helper: Fetches historical slot data with snapshots and status
-    function _fetchHistoricalSlotData(address template, address user) internal view returns (SlotData memory data, bool[] memory isSpent) {
-        uint256[] memory slotIndices = new uint256[](1000); // Arbitrary cap for gas safety
-        bool[] memory isX = new bool[](1000);
-        isSpent = new bool[](1000);
+    // Helper: Fetches all active slot data for a template
+    function _fetchTemplateSlotData(address template) internal view returns (SlotData memory data) {
+        // Fetches all active X and Y slot indices for a template
+        uint256[] memory xIndices = ICCLiquidityTemplate(template).activeXLiquiditySlotsView();
+        uint256[] memory yIndices = ICCLiquidityTemplate(template).activeYLiquiditySlotsView();
+        uint256[] memory slotIndices = new uint256[](xIndices.length + yIndices.length);
+        bool[] memory isX = new bool[](xIndices.length + yIndices.length);
         uint256 index = 0;
-
-        // Check snapshots for X and Y slots up to an arbitrary limit
-        for (uint256 slotIndex = 0; slotIndex < 1000 && index < 1000; slotIndex++) {
-            if (depositorSlotSnapshots[user][template][slotIndex] > 0) {
-                slotIndices[index] = slotIndex;
+        for (uint256 i = 0; i < xIndices.length; i++) {
+            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(xIndices[i]);
+            if (slot.allocation > 0) {
+                slotIndices[index] = xIndices[i];
                 isX[index] = true;
-                isSpent[index] = slotStatus[template][slotIndex];
                 index++;
-            } else {
-                ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(slotIndex);
-                if (depositorSlotSnapshots[user][template][slotIndex] > 0 || (slot.depositor == user && slot.allocation > 0)) {
-                    slotIndices[index] = slotIndex;
-                    isX[index] = false;
-                    isSpent[index] = slotStatus[template][slotIndex];
-                    index++;
-                }
+            }
+        }
+        for (uint256 i = 0; i < yIndices.length; i++) {
+            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(yIndices[i]);
+            if (slot.allocation > 0) {
+                slotIndices[index] = yIndices[i];
+                isX[index] = false;
+                index++;
             }
         }
         uint256[] memory resizedIndices = new uint256[](index);
         bool[] memory resizedIsX = new bool[](index);
-        bool[] memory resizedIsSpent = new bool[](index);
         for (uint256 i = 0; i < index; i++) {
             resizedIndices[i] = slotIndices[i];
             resizedIsX[i] = isX[i];
-            resizedIsSpent[i] = isSpent[i];
         }
-        return (SlotData(resizedIndices, resizedIsX, index), resizedIsSpent);
+        return SlotData(resizedIndices, resizedIsX, index);
+    }
+
+    // Helper: Checks if a template is globalized
+    function _isTemplateGlobalized(address template) internal view returns (bool) {
+        // Returns true if template is associated with a valid listing
+        if (agent == address(0)) return false;
+        address listingAddress;
+        try ICCLiquidityTemplate(template).listingAddress() returns (address addr) {
+            listingAddress = addr;
+        } catch {
+            return false;
+        }
+        if (listingAddress == address(0)) return false;
+        (bool isValid, ICCAgent.ListingDetails memory details) = ICCAgent(agent).isValidListing(listingAddress);
+        return isValid && details.liquidityAddress == template;
+    }
+
+    // Helper: Counts valid templates with active slots
+    function _countValidTemplates(address user, uint256 step, uint256 maxIterations) internal view returns (uint256 validCount) {
+        // Counts templates with non-empty active slots for a user
+        uint256 length = depositorLiquidityTemplates[user].length;
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        for (uint256 i = 0; i < limit; i++) {
+            address template = depositorLiquidityTemplates[user][length - 1 - (step + i)];
+            if (_isTemplateGlobalized(template)) {
+                SlotData memory data = _fetchSlotData(template, user);
+                if (data.totalSlots > 0) {
+                    validCount++;
+                }
+            }
+        }
+    }
+
+    // Helper: Counts valid templates for a token with active slots
+    function _countValidTokenTemplates(address user, address token, uint256 step, uint256 maxIterations) internal view returns (uint256 validCount) {
+        // Counts templates with non-empty active slots for a user and token
+        uint256 length = depositorLiquidityTemplates[user].length;
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        for (uint256 i = 0; i < limit; i++) {
+            address template = depositorLiquidityTemplates[user][length - 1 - (step + i)];
+            if (isInArray(depositorTokensByLiquidity[user][template], token) && _isTemplateGlobalized(template)) {
+                SlotData memory data = _fetchSlotData(template, user);
+                if (data.totalSlots > 0) {
+                    validCount++;
+                }
+            }
+        }
     }
 
     // Returns all user active liquidity slot indices grouped by template
     function getAllUserActiveLiquidity(address user, uint256 step, uint256 maxIterations) external view returns (SlotGroup[] memory slotGroups) {
+        // Returns active slot indices grouped by template in reverse order (latest first)
         uint256 length = depositorLiquidityTemplates[user].length;
         if (step >= length) return new SlotGroup[](0);
+        uint256 validCount = _countValidTemplates(user, step, maxIterations);
+        slotGroups = new SlotGroup[](validCount);
         uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        slotGroups = new SlotGroup[](limit);
-
-        for (uint256 i = step; i < step + limit; i++) {
-            address template = depositorLiquidityTemplates[user][i];
-            SlotData memory data = _fetchSlotData(template, user);
-            slotGroups[i - step] = SlotGroup(template, data.slotIndices, data.isX);
-        }
-    }
-
-    // Returns all user historical liquidity slot indices with snapshots and status
-    function getAllUserLiquidityHistory(address user, uint256 step, uint256 maxIterations) external view returns (SlotHistoryGroup[] memory slotGroups) {
-        uint256 length = depositorLiquidityTemplates[user].length;
-        if (step >= length) return new SlotHistoryGroup[](0);
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        slotGroups = new SlotHistoryGroup[](limit);
-
-        for (uint256 i = step; i < step + limit; i++) {
-            address template = depositorLiquidityTemplates[user][i];
-            (SlotData memory data, bool[] memory isSpent) = _fetchHistoricalSlotData(template, user);
-            slotGroups[i - step] = SlotHistoryGroup(template, data.slotIndices, data.isX, isSpent);
-        }
-    }
-
-    // Helper: Counts valid templates for a token
-    function _countValidTemplates(address user, address token, uint256 step, uint256 maxIterations) internal view returns (uint256) {
-        uint256 length = depositorLiquidityTemplates[user].length;
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        uint256 validCount = 0;
-        for (uint256 i = step; i < step + limit; i++) {
-            if (isInArray(depositorTokensByLiquidity[user][depositorLiquidityTemplates[user][i]], token)) {
-                validCount++;
+        uint256 index = 0;
+        for (uint256 i = 0; i < limit && index < validCount; i++) {
+            address template = depositorLiquidityTemplates[user][length - 1 - (step + i)];
+            if (_isTemplateGlobalized(template)) {
+                SlotData memory data = _fetchSlotData(template, user);
+                if (data.totalSlots > 0) {
+                    slotGroups[index] = SlotGroup(template, data.slotIndices, data.isX);
+                    index++;
+                }
             }
         }
-        return validCount;
     }
 
     // Returns user active liquidity slot indices for a specific token grouped by template
     function getAllUserTokenActiveLiquidity(address user, address token, uint256 step, uint256 maxIterations) external view returns (SlotGroup[] memory slotGroups) {
+        // Returns active slot indices for a token in reverse order (latest first)
         uint256 length = depositorLiquidityTemplates[user].length;
         if (step >= length) return new SlotGroup[](0);
-        uint256 validCount = _countValidTemplates(user, token, step, maxIterations);
+        uint256 validCount = _countValidTokenTemplates(user, token, step, maxIterations);
         slotGroups = new SlotGroup[](validCount);
         uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
         uint256 index = 0;
-
-        for (uint256 i = step; i < step + limit && index < validCount; i++) {
-            address template = depositorLiquidityTemplates[user][i];
-            if (isInArray(depositorTokensByLiquidity[user][template], token)) {
+        for (uint256 i = 0; i < limit && index < validCount; i++) {
+            address template = depositorLiquidityTemplates[user][length - 1 - (step + i)];
+            if (isInArray(depositorTokensByLiquidity[user][template], token) && _isTemplateGlobalized(template)) {
                 SlotData memory data = _fetchSlotData(template, user);
-                slotGroups[index] = SlotGroup(template, data.slotIndices, data.isX);
-                index++;
+                if (data.totalSlots > 0) {
+                    slotGroups[index] = SlotGroup(template, data.slotIndices, data.isX);
+                    index++;
+                }
             }
         }
-    }
-
-    // Returns user historical liquidity slot indices for a specific token with snapshots and status
-    function getAllUserTokenLiquidityHistory(address user, address token, uint256 step, uint256 maxIterations) external view returns (SlotHistoryGroup[] memory slotGroups) {
-        uint256 length = depositorLiquidityTemplates[user].length;
-        if (step >= length) return new SlotHistoryGroup[](0);
-        uint256 validCount = _countValidTemplates(user, token, step, maxIterations);
-        slotGroups = new SlotHistoryGroup[](validCount);
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        uint256 index = 0;
-
-        for (uint256 i = step; i < step + limit && index < validCount; i++) {
-            address template = depositorLiquidityTemplates[user][i];
-            if (isInArray(depositorTokensByLiquidity[user][template], token)) {
-                (SlotData memory data, bool[] memory isSpent) = _fetchHistoricalSlotData(template, user);
-                slotGroups[index] = SlotHistoryGroup(template, data.slotIndices, data.isX, isSpent);
-                index++;
-            }
-        }
-    }
-
-    // Helper: Fetches token slot data
-    function _fetchTokenSlotData(address template) internal view returns (SlotData memory) {
-        uint256[] memory xSlots = ICCLiquidityTemplate(template).activeXLiquiditySlotsView();
-        uint256[] memory ySlots = ICCLiquidityTemplate(template).activeYLiquiditySlotsView();
-        uint256[] memory slotIndices = new uint256[](xSlots.length + ySlots.length);
-        bool[] memory isX = new bool[](xSlots.length + ySlots.length);
-        uint256 index = 0;
-
-        for (uint256 i = 0; i < xSlots.length; i++) {
-            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(xSlots[i]);
-            if (slot.allocation > 0) {
-                slotIndices[index] = xSlots[i];
-                isX[index] = true;
-                index++;
-            }
-        }
-        for (uint256 i = 0; i < ySlots.length; i++) {
-            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(ySlots[i]);
-            if (slot.allocation > 0) {
-                slotIndices[index] = ySlots[i];
-                isX[index] = false;
-                index++;
-            }
-        }
-        uint256[] memory resizedIndices = new uint256[](index);
-        bool[] memory resizedIsX = new bool[](index);
-        for (uint256 i = 0; i < index; i++) {
-            resizedIndices[i] = slotIndices[i];
-            resizedIsX[i] = isX[i];
-        }
-        return SlotData(resizedIndices, resizedIsX, index);
     }
 
     // Returns all liquidity slot indices for a token grouped by template
     function getAllTokenLiquidity(address token, uint256 step, uint256 maxIterations) external view returns (SlotGroup[] memory slotGroups) {
+        // Returns active slot indices for a token in reverse order (latest first)
         uint256 length = tokenLiquidityTemplates[token].length;
         if (step >= length) return new SlotGroup[](0);
         uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
         slotGroups = new SlotGroup[](limit);
-
-        for (uint256 i = step; i < step + limit; i++) {
-            address template = tokenLiquidityTemplates[token][i];
-            SlotData memory data = _fetchTokenSlotData(template);
-            slotGroups[i - step] = SlotGroup(template, data.slotIndices, data.isX);
-        }
-    }
-
-    // Helper: Fetches template slot data
-    function _fetchTemplateSlotData(address template, uint256 step, uint256 maxIterations) internal view returns (SlotData memory) {
-        uint256[] memory xSlots = ICCLiquidityTemplate(template).activeXLiquiditySlotsView();
-        uint256[] memory ySlots = ICCLiquidityTemplate(template).activeYLiquiditySlotsView();
-        uint256 length = xSlots.length + ySlots.length;
-        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
-        uint256[] memory slotIndices = new uint256[](limit);
-        bool[] memory isX = new bool[](limit);
-        uint256 index = 0;
-
-        for (uint256 i = step; i < step + limit && i < xSlots.length && index < limit; i++) {
-            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getXSlotView(xSlots[i]);
-            if (slot.allocation > 0) {
-                slotIndices[index] = xSlots[i];
-                isX[index] = true;
-                index++;
+        for (uint256 i = 0; i < limit; i++) {
+            address template = tokenLiquidityTemplates[token][length - 1 - (step + i)];
+            if (_isTemplateGlobalized(template)) {
+                SlotData memory data = _fetchSlotData(template, address(0));
+                slotGroups[i] = SlotGroup(template, data.slotIndices, data.isX);
             }
         }
-        for (uint256 i = step; i < step + limit && i < ySlots.length && index < limit; i++) {
-            ICCLiquidityTemplate.Slot memory slot = ICCLiquidityTemplate(template).getYSlotView(ySlots[i]);
-            if (slot.allocation > 0) {
-                slotIndices[index] = ySlots[i];
-                isX[index] = false;
-                index++;
-            }
-        }
-        uint256[] memory resizedIndices = new uint256[](index);
-        bool[] memory resizedIsX = new bool[](index);
-        for (uint256 i = 0; i < index; i++) {
-            resizedIndices[i] = slotIndices[i];
-            resizedIsX[i] = isX[i];
-        }
-        return SlotData(resizedIndices, resizedIsX, index);
     }
 
     // Returns all liquidity slot indices for a template
     function getAllTemplateLiquidity(address template, uint256 step, uint256 maxIterations) external view returns (SlotGroup memory slotGroup) {
-        SlotData memory data = _fetchTemplateSlotData(template, step, maxIterations);
+        // Returns active slot indices for a template in reverse order (latest first) if globalized
+        if (!_isTemplateGlobalized(template)) {
+            return SlotGroup(address(0), new uint256[](0), new bool[](0));
+        }
+        SlotData memory data = _fetchTemplateSlotData(template);
         return SlotGroup(template, data.slotIndices, data.isX);
+    }
+
+    // Returns all historical liquidity templates for a user
+    function getUserHistoricalTemplates(address user, uint256 step, uint256 maxIterations) external view returns (address[] memory templates) {
+        // Returns liquidity templates in reverse order (latest first)
+        uint256 length = depositorLiquidityTemplates[user].length;
+        if (step >= length) return new address[](0);
+        uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
+        templates = new address[](limit);
+        for (uint256 i = 0; i < limit; i++) {
+            templates[i] = depositorLiquidityTemplates[user][length - 1 - (step + i)];
+        }
+    }
+
+    // Returns all order IDs for a listing
+    function getAllListingOrders(address listing, uint256 step, uint256 maxIterations) external view returns (OrderGroup memory orderGroup) {
+        // Returns pending order IDs for a listing in reverse order (latest first) if globalized
+        if (!_isListingGlobalized(listing)) {
+            return OrderGroup(address(0), new uint256[](0));
+        }
+        uint256[] memory buyIds = ICCListingTemplate(listing).pendingBuyOrdersView();
+        uint256[] memory sellIds = ICCListingTemplate(listing).pendingSellOrdersView();
+        uint256 totalOrders = buyIds.length + sellIds.length;
+        uint256[] memory combinedIds = new uint256[](totalOrders);
+        uint256 index = 0;
+        for (uint256 i = 0; i < buyIds.length; i++) {
+            combinedIds[index] = buyIds[i];
+            index++;
+        }
+        for (uint256 i = 0; i < sellIds.length; i++) {
+            combinedIds[index] = sellIds[i];
+            index++;
+        }
+        return OrderGroup(listing, combinedIds);
     }
 }
