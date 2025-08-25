@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.4
+// Version: 0.2.7
 // Changes:
+// - v0.2.7: Fixed TypeError in update() by replacing dynamic mapping(uint256 => bool) storage updatedOrders with a temporary uint256[] memory updatedOrders array to track updated order IDs. Fixed TypeError in ssUpdate by correcting payout.amount = u.recipient to payout.amount = u.required. Maintained all existing functionality and compatibility with CCOrderPartial.sol v0.1.0.
+// - v0.2.6: Modified update() to track order completeness across calls. Emits OrderUpdateIncomplete only if an order remains incomplete after all updates in a call (missing Core, Pricing, or Amounts). Added OrderUpdatesComplete event when all structs are set. Uses OrderStatus struct and orderStatus mapping for tracking. Maintains graceful degradation. Compatible with CCOrderPartial.sol v0.1.0.
+// - v0.2.5: Relaxed address validation in update() to only check maker and recipient for Core struct (structId: 0). Added event OrderUpdateIncomplete for partial updates. Maintained graceful degradation by skipping invalid updates instead of reverting. Ensured compatibility with CCOrderPartial.sol v0.1.0.
 // - v0.2.4: Fixed TypeError in ssUpdate by removing invalid u.orderId reference. Used getNextOrderId for new payout orders, incrementing it after creation to align with regular order indexing. Validated payouts using recipient and required amount. Ensured no changes to PayoutUpdate struct for upstream compatibility. Compatible with CCOrderRouter.sol v0.1.0, CCOrderPartial.sol v0.1.0.
 // - v0.2.3: Relaxed order ID validation in update() to allow index == getNextOrderId for new orders, ensuring new order IDs align with the next available slot. Incremented getNextOrderId after successful order creation to prevent reuse. Ensured compatibility with CCOrderRouter.sol v0.1.0 and CCOrderPartial.sol v0.1.0.
 // - v0.2.2: Enhanced update() for graceful degradation. Skips invalid updates instead of reverting, emits UpdateFailed with detailed reasons for edge cases (zero amounts, invalid order IDs, underflow). Added checks for maker and token validity before registry/globalizer calls. Compatible with CCUniPartial.sol v0.1.0, CCOrderPartial.sol v0.1.0, CCLiquidPartial.sol v0.0.27, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCOrderRouter.sol v0.0.11, TokenRegistry.sol (2025-08-04).
@@ -154,6 +157,11 @@ contract CCListingTemplate {
         uint256 minPrice; // for Pricing struct
         uint256 amountSent; // Amount of opposite token sent during settlement
     }
+    struct OrderStatus {
+        bool hasCore;    // Tracks if Core struct is set
+        bool hasPricing; // Tracks if Pricing struct is set
+        bool hasAmounts; // Tracks if Amounts struct is set
+    }
 
     mapping(uint256 => BuyOrderCore) public getBuyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
     mapping(uint256 => BuyOrderPricing) public getBuyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
@@ -163,6 +171,7 @@ contract CCListingTemplate {
     mapping(uint256 => SellOrderAmounts) public getSellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
     mapping(uint256 => LongPayoutStruct) public getLongPayout; // Returns LongPayoutStruct memory payout
     mapping(uint256 => ShortPayoutStruct) public getShortPayout; // Returns ShortPayoutStruct memory payout
+    mapping(uint256 => OrderStatus) private orderStatus; // Tracks completeness of order structs
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
@@ -172,6 +181,8 @@ contract CCListingTemplate {
     event ExternalCallFailed(address indexed target, string functionName, string reason);
     event UpdateFailed(uint256 indexed listingId, string reason);
     event TransactionFailed(address indexed recipient, string reason);
+    event OrderUpdateIncomplete(uint256 indexed listingId, uint256 orderId, string reason);
+    event OrderUpdatesComplete(uint256 indexed listingId, uint256 orderId, bool isBuy);
 
     // Normalizes amount to 1e18 precision
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256 normalized) {
@@ -368,7 +379,7 @@ contract CCListingTemplate {
                 userPayoutIDsView[u.recipient].push(orderId);
                 emit PayoutOrderCreated(orderId, false, payout.status);
             }
-            getNextOrderId++; // Increment for next payout order
+            getNextOrderId++; // Increment after creating payout
         }
     }
 
@@ -376,68 +387,94 @@ contract CCListingTemplate {
     function update(UpdateType[] calldata updates) external {
         require(_routers[msg.sender], "Caller not router");
         bool balanceUpdated = false;
+        // Track orders updated in this call
+        uint256[] memory updatedOrders = new uint256[](updates.length);
+        uint256 updatedCount = 0;
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
             if (u.updateType > 3) {
                 emit UpdateFailed(getListingId, "Invalid update type");
                 continue;
             }
-            if (u.updateType == 0) { // Balance update
-                if (u.value == 0 || u.index != getListingId) {
-                    emit UpdateFailed(getListingId, "Invalid balance update");
+            bool isBuy = u.updateType == 1;
+            bool isCoreUpdate = u.structId == 0;
+            // Validate addresses only for Core struct updates
+            if (isCoreUpdate) {
+                if (u.addr == address(0)) {
+                    emit UpdateFailed(getListingId, "Invalid maker address");
                     continue;
                 }
-                if (u.addr == address(0)) {
-                    emit UpdateFailed(getListingId, "Invalid address for balance update");
+                if (u.recipient == address(0)) {
+                    emit UpdateFailed(getListingId, "Invalid recipient address");
+                    continue;
+                }
+            }
+            if (u.updateType == 0) { // Balance
+                if (u.index != getListingId) {
+                    emit UpdateFailed(getListingId, "Invalid listing ID");
                     continue;
                 }
                 _balance.xBalance = u.value;
                 _balance.yBalance = u.amountSent;
                 balanceUpdated = true;
-                emit BalancesUpdated(getListingId, u.value, u.amountSent);
-            } else if (u.updateType == 1 || u.updateType == 2) { // Buy or sell order
-                bool isBuy = u.updateType == 1;
-                if (u.addr == address(0) || u.recipient == address(0)) {
-                    emit UpdateFailed(getListingId, "Invalid maker or recipient");
-                    continue;
-                }
-                if (u.index > getNextOrderId) {
-                    emit UpdateFailed(getListingId, string(abi.encodePacked("Invalid order ID: ", uint2str(u.index))));
-                    continue;
-                }
+                emit BalancesUpdated(getListingId, _balance.xBalance, _balance.yBalance);
+            } else if (u.updateType == 1 || u.updateType == 2) { // Buy or Sell Order
                 bool isNewOrder = u.index == getNextOrderId;
-                if (isNewOrder && u.structId == 0) {
-                    getNextOrderId++;
-                    makerPendingOrdersView[u.addr].push(u.index);
-                    if (isBuy) {
-                        pendingBuyOrdersView.push(u.index);
-                    } else {
-                        pendingSellOrdersView.push(u.index);
+                if (u.index > getNextOrderId) {
+                    emit UpdateFailed(getListingId, "Invalid order ID");
+                    continue;
+                }
+                if (u.structId > 2) {
+                    emit UpdateFailed(getListingId, "Invalid struct ID");
+                    continue;
+                }
+                // Track updated order ID
+                bool alreadyUpdated = false;
+                for (uint256 j = 0; j < updatedCount; j++) {
+                    if (updatedOrders[j] == u.index) {
+                        alreadyUpdated = true;
+                        break;
                     }
                 }
-                if (u.structId == 0) { // Core
+                if (!alreadyUpdated) {
+                    updatedOrders[updatedCount] = u.index;
+                    updatedCount++;
+                }
+                // Update order status tracking
+                OrderStatus storage status = orderStatus[u.index];
+                if (isCoreUpdate) {
+                    status.hasCore = true;
+                    if (isNewOrder) {
+                        if (isBuy) {
+                            pendingBuyOrdersView.push(u.index);
+                        } else {
+                            pendingSellOrdersView.push(u.index);
+                        }
+                        makerPendingOrdersView[u.addr].push(u.index);
+                        getNextOrderId++;
+                    }
                     if (isBuy) {
                         BuyOrderCore storage core = getBuyOrderCore[u.index];
                         core.makerAddress = u.addr;
                         core.recipientAddress = u.recipient;
                         core.status = uint8(u.value);
-                        emit OrderUpdated(getListingId, u.index, true, core.status);
+                        if (u.value == 0 || u.value == 3) {
+                            removePendingOrder(pendingBuyOrdersView, u.index);
+                            removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                        }
                     } else {
                         SellOrderCore storage core = getSellOrderCore[u.index];
                         core.makerAddress = u.addr;
                         core.recipientAddress = u.recipient;
                         core.status = uint8(u.value);
-                        emit OrderUpdated(getListingId, u.index, false, core.status);
-                    }
-                    if (u.value == 0) { // Cancelled
-                        if (isBuy) {
-                            removePendingOrder(pendingBuyOrdersView, u.index);
-                        } else {
+                        if (u.value == 0 || u.value == 3) {
                             removePendingOrder(pendingSellOrdersView, u.index);
+                            removePendingOrder(makerPendingOrdersView[u.addr], u.index);
                         }
-                        removePendingOrder(makerPendingOrdersView[u.addr], u.index);
                     }
+                    emit OrderUpdated(getListingId, u.index, isBuy, uint8(u.value));
                 } else if (u.structId == 1) { // Pricing
+                    status.hasPricing = true;
                     if (u.maxPrice < u.minPrice) {
                         emit UpdateFailed(getListingId, "Invalid price range");
                         continue;
@@ -452,6 +489,7 @@ contract CCListingTemplate {
                         pricing.minPrice = u.minPrice;
                     }
                 } else if (u.structId == 2) { // Amounts
+                    status.hasAmounts = true;
                     if (u.value == 0 && u.amountSent == 0) {
                         emit UpdateFailed(getListingId, "Invalid amounts");
                         continue;
@@ -510,6 +548,21 @@ contract CCListingTemplate {
                         emit UpdateFailed(getListingId, "Failed to fetch liquidity details");
                     }
                 }
+            }
+        }
+        // Check completeness of updated orders
+        for (uint256 i = 0; i < updatedCount; i++) {
+            uint256 orderId = updatedOrders[i];
+            OrderStatus storage status = orderStatus[orderId];
+            bool isBuy = getBuyOrderCore[orderId].makerAddress != address(0);
+            if (status.hasCore && status.hasPricing && status.hasAmounts) {
+                emit OrderUpdatesComplete(getListingId, orderId, isBuy);
+            } else {
+                string memory reason;
+                if (!status.hasCore) reason = "Missing Core struct";
+                else if (!status.hasPricing) reason = "Missing Pricing struct";
+                else reason = "Missing Amounts struct";
+                emit OrderUpdateIncomplete(getListingId, orderId, reason);
             }
         }
         if (balanceUpdated) {
