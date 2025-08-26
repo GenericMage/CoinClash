@@ -1,17 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.7
+// Version: 0.2.10
 // Changes:
-// - v0.2.7: Fixed TypeError in update() by replacing dynamic mapping(uint256 => bool) storage updatedOrders with a temporary uint256[] memory updatedOrders array to track updated order IDs. Fixed TypeError in ssUpdate by correcting payout.amount = u.recipient to payout.amount = u.required. Maintained all existing functionality and compatibility with CCOrderPartial.sol v0.1.0.
-// - v0.2.6: Modified update() to track order completeness across calls. Emits OrderUpdateIncomplete only if an order remains incomplete after all updates in a call (missing Core, Pricing, or Amounts). Added OrderUpdatesComplete event when all structs are set. Uses OrderStatus struct and orderStatus mapping for tracking. Maintains graceful degradation. Compatible with CCOrderPartial.sol v0.1.0.
-// - v0.2.5: Relaxed address validation in update() to only check maker and recipient for Core struct (structId: 0). Added event OrderUpdateIncomplete for partial updates. Maintained graceful degradation by skipping invalid updates instead of reverting. Ensured compatibility with CCOrderPartial.sol v0.1.0.
-// - v0.2.4: Fixed TypeError in ssUpdate by removing invalid u.orderId reference. Used getNextOrderId for new payout orders, incrementing it after creation to align with regular order indexing. Validated payouts using recipient and required amount. Ensured no changes to PayoutUpdate struct for upstream compatibility. Compatible with CCOrderRouter.sol v0.1.0, CCOrderPartial.sol v0.1.0.
-// - v0.2.3: Relaxed order ID validation in update() to allow index == getNextOrderId for new orders, ensuring new order IDs align with the next available slot. Incremented getNextOrderId after successful order creation to prevent reuse. Ensured compatibility with CCOrderRouter.sol v0.1.0 and CCOrderPartial.sol v0.1.0.
-// - v0.2.2: Enhanced update() for graceful degradation. Skips invalid updates instead of reverting, emits UpdateFailed with detailed reasons for edge cases (zero amounts, invalid order IDs, underflow). Added checks for maker and token validity before registry/globalizer calls. Compatible with CCUniPartial.sol v0.1.0, CCOrderPartial.sol v0.1.0, CCLiquidPartial.sol v0.0.27, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCOrderRouter.sol v0.0.11, TokenRegistry.sol (2025-08-04).
-// - v0.2.1: Updated update() to handle balance deductions for sell orders (xBalance -= u.value, yBalance += u.amountSent) and additions for buy orders. Relaxed pending amount validation to avoid precision reverts. Added exchange rate recalculation after balance updates. Generate balance updates if not provided by router, ignore redundant balance updates from CCUniPartial. Compatible with CCUniPartial.sol v0.1.0, CCOrderPartial.sol v0.1.0.
-// - v0.2.0: Bumped version
-// Compatible with CCLiquidityTemplate.sol (v0.1.1), CCMainPartial.sol (v0.0.12), CCLiquidityPartial.sol (v0.0.21), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCOrderRouter.sol (v0.1.0), TokenRegistry.sol (2025-08-04).
+// - v0.2.10: Added auto-generation of historical data in update() when updateType 3 is not provided. Updated historical volume (xVolume, yVolume) on order cancellation or settlement in update() for BuyOrderAmounts and SellOrderAmounts, accumulating filled amounts. Ensured volume updates use normalized amounts. Compatible with CCOrderPartial.sol v0.1.0, CCOrderRouter.sol v0.1.0, CCLiquidityTemplate.sol v0.1.3, CCMainPartial.sol v0.0.14, CCLiquidityPartial.sol v0.0.27, CCUniPartial.sol v0.1.0, TokenRegistry.sol (2025-08-04).
+// - v0.2.9: Named mapping and array input parameters for clarity and Etherscan visibility (e.g., orderId, maker, timestamp). Confirmed dayStartFee and historical data population in update() for updateType 3, no updates in transactToken/transactNative as they only handle transfers. Cleared changelog entries older than v0.2.8. Compatible with CCOrderPartial.sol v0.1.0, CCOrderRouter.sol v0.1.0, CCLiquidityTemplate.sol v0.1.3, CCMainPartial.sol v0.0.14, CCLiquidityPartial.sol v0.0.27, CCUniPartial.sol v0.1.0, TokenRegistry.sol (2025-08-04).
+// - v0.2.8: Initialized dayStartFee and historical data in setTokens to ensure data availability without router updates. Updated volumeBalances to fetch real-time token balances from contract. Fixed pending amount validation in update() to set pending for new orders. Made _registryAddress public as registryAddress. Added registry call validation in _updateRegistry. Compatible with CCOrderPartial.sol v0.1.0, CCOrderRouter.sol v0.1.0, CCLiquidityTemplate.sol v0.1.3, CCMainPartial.sol v0.0.14, CCLiquidityPartial.sol v0.0.27, CCUniPartial.sol v0.1.0, TokenRegistry.sol (2025-08-04).
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -47,7 +41,7 @@ interface ICCGlobalizer {
 }
 
 contract CCListingTemplate {
-    mapping(address => bool) private _routers;
+    mapping(address router => bool isRouter) private _routers;
     bool private _routersSet;
     address public tokenA; // Returns address token
     address public tokenB; // Returns address token
@@ -57,7 +51,7 @@ contract CCListingTemplate {
     bool private _uniswapV2PairSet;
     uint256 public getListingId; // Returns uint256 listingId
     address public agentView; // Returns address agent
-    address private _registryAddress;
+    address public registryAddress; // Returns address registry
     address public liquidityAddressView; // Returns address liquidityAddress
     address private _globalizerAddress;
     bool private _globalizerSet;
@@ -84,10 +78,10 @@ contract CCListingTemplate {
     uint256 public listingPriceView; // Returns uint256 price
     uint256[] public pendingBuyOrdersView; // Returns uint256[] memory orderIds
     uint256[] public pendingSellOrdersView; // Returns uint256[] memory orderIds
-    mapping(address => uint256[]) public makerPendingOrdersView; // Returns uint256[] memory orderIds
+    mapping(address maker => uint256[] orderIds) public makerPendingOrdersView; // Returns uint256[] memory orderIds
     uint256[] public longPayoutByIndexView; // Returns uint256[] memory orderIds
     uint256[] public shortPayoutByIndexView; // Returns uint256[] memory orderIds
-    mapping(address => uint256[]) public userPayoutIDsView; // Returns uint256[] memory orderIds
+    mapping(address user => uint256[] orderIds) public userPayoutIDsView; // Returns uint256[] memory orderIds
 
     struct HistoricalData {
         uint256 price;
@@ -100,7 +94,7 @@ contract CCListingTemplate {
     HistoricalData[] private _historicalData;
 
     // Maps midnight timestamps to historical data indices
-    mapping(uint256 => uint256) private _dayStartIndices;
+    mapping(uint256 timestamp => uint256 index) private _dayStartIndices;
 
     struct BuyOrderCore {
         address makerAddress;
@@ -163,15 +157,15 @@ contract CCListingTemplate {
         bool hasAmounts; // Tracks if Amounts struct is set
     }
 
-    mapping(uint256 => BuyOrderCore) public getBuyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 => BuyOrderPricing) public getBuyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 => BuyOrderAmounts) public getBuyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 => SellOrderCore) public getSellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 => SellOrderPricing) public getSellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 => SellOrderAmounts) public getSellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 => LongPayoutStruct) public getLongPayout; // Returns LongPayoutStruct memory payout
-    mapping(uint256 => ShortPayoutStruct) public getShortPayout; // Returns ShortPayoutStruct memory payout
-    mapping(uint256 => OrderStatus) private orderStatus; // Tracks completeness of order structs
+    mapping(uint256 orderId => BuyOrderCore) public getBuyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => BuyOrderPricing) public getBuyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => BuyOrderAmounts) public getBuyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => SellOrderCore) public getSellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => SellOrderPricing) public getSellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => SellOrderAmounts) public getSellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => LongPayoutStruct) public getLongPayout; // Returns LongPayoutStruct memory payout
+    mapping(uint256 orderId => ShortPayoutStruct) public getShortPayout; // Returns ShortPayoutStruct memory payout
+    mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
@@ -228,7 +222,7 @@ contract CCListingTemplate {
 
     // Updates token registry with balances for both tokens for a single user
     function _updateRegistry(address maker) internal {
-        if (_registryAddress == address(0) || maker == address(0)) {
+        if (registryAddress == address(0) || maker == address(0)) {
             emit UpdateFailed(getListingId, "Invalid registry or maker address");
             return;
         }
@@ -238,11 +232,11 @@ contract CCListingTemplate {
         if (tokenA != address(0)) tokens[index++] = tokenA;
         if (tokenB != address(0)) tokens[index] = tokenB;
         uint256 gasBefore = gasleft();
-        try ITokenRegistry(_registryAddress).initializeTokens{gas: 500000}(maker, tokens) {
+        try ITokenRegistry(registryAddress).initializeTokens{gas: 500000}(maker, tokens) {
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
             emit UpdateRegistryFailed(maker, tokens, decodedReason);
-            emit ExternalCallFailed(_registryAddress, "initializeTokens", decodedReason);
+            emit ExternalCallFailed(registryAddress, "initializeTokens", decodedReason);
         }
         uint256 gasUsed = gasBefore - gasleft();
         if (gasUsed > 500000) {
@@ -387,6 +381,7 @@ contract CCListingTemplate {
     function update(UpdateType[] calldata updates) external {
         require(_routers[msg.sender], "Caller not router");
         bool balanceUpdated = false;
+        bool historicalUpdated = false;
         // Track orders updated in this call
         uint256[] memory updatedOrders = new uint256[](updates.length);
         uint256 updatedCount = 0;
@@ -461,6 +456,15 @@ contract CCListingTemplate {
                         if (u.value == 0 || u.value == 3) {
                             removePendingOrder(pendingBuyOrdersView, u.index);
                             removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                            // Update historical volume for cancelled or filled buy orders
+                            BuyOrderAmounts storage amounts = getBuyOrderAmounts[u.index];
+                            if (amounts.filled > 0) {
+                                if (_historicalData.length > 0) {
+                                    HistoricalData storage latest = _historicalData[_historicalData.length - 1];
+                                    latest.yVolume += normalize(amounts.filled, decimalsB); // Accumulate tokenB filled amount
+                                    latest.xVolume += normalize(amounts.amountSent, decimalsA); // Accumulate tokenA sent
+                                }
+                            }
                         }
                     } else {
                         SellOrderCore storage core = getSellOrderCore[u.index];
@@ -470,6 +474,15 @@ contract CCListingTemplate {
                         if (u.value == 0 || u.value == 3) {
                             removePendingOrder(pendingSellOrdersView, u.index);
                             removePendingOrder(makerPendingOrdersView[u.addr], u.index);
+                            // Update historical volume for cancelled or filled sell orders
+                            SellOrderAmounts storage amounts = getSellOrderAmounts[u.index];
+                            if (amounts.filled > 0) {
+                                if (_historicalData.length > 0) {
+                                    HistoricalData storage latest = _historicalData[_historicalData.length - 1];
+                                    latest.xVolume += normalize(amounts.filled, decimalsA); // Accumulate tokenA filled amount
+                                    latest.yVolume += normalize(amounts.amountSent, decimalsB); // Accumulate tokenB sent
+                                }
+                            }
                         }
                     }
                     emit OrderUpdated(getListingId, u.index, isBuy, uint8(u.value));
@@ -496,19 +509,25 @@ contract CCListingTemplate {
                     }
                     if (isBuy) {
                         BuyOrderAmounts storage amounts = getBuyOrderAmounts[u.index];
-                        if (amounts.pending < u.value && u.value != 0) {
+                        if (isNewOrder) {
+                            amounts.pending = u.value; // Set pending for new orders
+                        } else if (amounts.pending < u.value && u.value != 0) {
                             emit UpdateFailed(getListingId, "Pending underflow");
                             continue;
+                        } else {
+                            amounts.pending = u.value;
                         }
-                        amounts.pending = u.value;
                         amounts.amountSent = u.amountSent;
                     } else {
                         SellOrderAmounts storage amounts = getSellOrderAmounts[u.index];
-                        if (amounts.pending < u.value && u.value != 0) {
+                        if (isNewOrder) {
+                            amounts.pending = u.value; // Set pending for new orders
+                        } else if (amounts.pending < u.value && u.value != 0) {
                             emit UpdateFailed(getListingId, "Pending underflow");
                             continue;
+                        } else {
+                            amounts.pending = u.value;
                         }
-                        amounts.pending = u.value;
                         amounts.amountSent = u.amountSent;
                     }
                 }
@@ -526,8 +545,57 @@ contract CCListingTemplate {
                     yVolume: u.minPrice,
                     timestamp: block.timestamp
                 }));
+                historicalUpdated = true;
                 uint256 midnight = _floorToMidnight(block.timestamp);
                 if (_dayStartIndices[midnight] == 0 && _historicalData.length > 0) {
+                    _dayStartIndices[midnight] = _historicalData.length - 1;
+                    dayStartFee = DayStartFee({
+                        dayStartXFeesAcc: 0,
+                        dayStartYFeesAcc: 0,
+                        timestamp: midnight
+                    });
+                    try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
+                        uint256 xLiq,
+                        uint256 yLiq,
+                        uint256,
+                        uint256,
+                        uint256 xFees,
+                        uint256 yFees
+                    ) {
+                        dayStartFee.dayStartXFeesAcc = xFees;
+                        dayStartFee.dayStartYFeesAcc = yFees;
+                    } catch {
+                        emit UpdateFailed(getListingId, "Failed to fetch liquidity details");
+                    }
+                }
+            }
+        }
+        // Auto-generate historical data if not updated in this call
+        if (!historicalUpdated && _historicalData.length > 0) {
+            uint256 midnight = _floorToMidnight(block.timestamp);
+            HistoricalData storage latest = _historicalData[_historicalData.length - 1];
+            if (!_isSameDay(latest.timestamp, block.timestamp)) {
+                uint256 currentPrice;
+                try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+                    uint256 balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
+                    try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+                        uint256 balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
+                        currentPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+                    } catch {
+                        currentPrice = listingPriceView;
+                    }
+                } catch {
+                    currentPrice = listingPriceView;
+                }
+                _historicalData.push(HistoricalData({
+                    price: currentPrice,
+                    xBalance: _balance.xBalance,
+                    yBalance: _balance.yBalance,
+                    xVolume: latest.xVolume, // Carry forward previous volume
+                    yVolume: latest.yVolume, // Carry forward previous volume
+                    timestamp: block.timestamp
+                }));
+                if (_dayStartIndices[midnight] == 0) {
                     _dayStartIndices[midnight] = _historicalData.length - 1;
                     dayStartFee = DayStartFee({
                         dayStartXFeesAcc: 0,
@@ -699,7 +767,7 @@ contract CCListingTemplate {
         liquidityAddressView = _liquidityAddress;
     }
 
-    // Sets token addresses, callable once
+    // Sets token addresses, initializes historical data and dayStartFee
     function setTokens(address _tokenA, address _tokenB) external {
         require(tokenA == address(0) && tokenB == address(0), "Tokens already set");
         require(_tokenA != _tokenB, "Tokens must be different");
@@ -708,6 +776,21 @@ contract CCListingTemplate {
         tokenB = _tokenB;
         decimalsA = _tokenA == address(0) ? 18 : IERC20(_tokenA).decimals();
         decimalsB = _tokenB == address(0) ? 18 : IERC20(_tokenB).decimals();
+        uint256 midnight = _floorToMidnight(block.timestamp);
+        _historicalData.push(HistoricalData({
+            price: 0,
+            xBalance: 0,
+            yBalance: 0,
+            xVolume: 0,
+            yVolume: 0,
+            timestamp: midnight
+        }));
+        _dayStartIndices[midnight] = 0;
+        dayStartFee = DayStartFee({
+            dayStartXFeesAcc: 0,
+            dayStartYFeesAcc: 0,
+            timestamp: midnight
+        });
     }
 
     // Sets agent address, callable once
@@ -719,9 +802,9 @@ contract CCListingTemplate {
 
     // Sets registry address, callable once
     function setRegistry(address registryAddress_) external {
-        require(_registryAddress == address(0), "Registry already set");
+        require(registryAddress == address(0), "Registry already set");
         require(registryAddress_ != address(0), "Invalid registry address");
-        _registryAddress = registryAddress_;
+        registryAddress = registryAddress_;
     }
 
     // Returns token pair
@@ -747,15 +830,15 @@ contract CCListingTemplate {
         return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
     }
 
-    // Returns balances
+    // Returns real-time token balances
     function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
-        return (_balance.xBalance, _balance.yBalance);
+        xBalance = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
+        yBalance = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
     }
 
     // Returns balance and volume details
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
-        xBalance = _balance.xBalance;
-        yBalance = _balance.yBalance;
+        (xBalance, yBalance) = this.volumeBalances(0);
         if (_historicalData.length > 0) {
             HistoricalData memory latest = _historicalData[_historicalData.length - 1];
             xVolume = latest.xVolume;
