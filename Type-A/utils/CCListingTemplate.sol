@@ -277,7 +277,7 @@ contract CCListingTemplate {
                 return;
             }
         }
-        try ICCGlobalizer(_globalizerAddress).globalizeOrders{gas: 500000}(maker, token) {
+        try ICCGlobalizer(_globalizerAddress).globalizeOrders(maker, token) {
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
             emit ExternalCallFailed(_globalizerAddress, "globalizeOrders", decodedReason);
