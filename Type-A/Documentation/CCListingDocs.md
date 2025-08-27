@@ -4,10 +4,11 @@
 The `CCListingTemplate` contract, written in Solidity (^0.8.2), facilitates decentralized trading for a token pair, integrating with Uniswap V2 for price discovery using `IERC20.balanceOf` for token balances at the pair address. It manages buy/sell orders, long/short payouts, and tracks normalized (1e18 precision) balances. Volume is captured in `_historicalData` during order settlement or cancellation, with historical data auto-generated if not provided by the router. Licensed under BSL 1.1 - Peng Protocol 2025, it ensures secure, modular design with explicit casting, no inline assembly, and graceful degradation for external calls.
 
 ## Version
-- **0.2.13**
+- **0.2.15**
 - **Changes**:
-// - v0.2.13: Renamed state variables, mappings, and arrays by removing "View" or "Get" from names. 
-// - v0.2.12: Restored explicit view functions pendingBuyOrdersView() and pendingSellOrdersView() to match ICCListing interface in CCMainPartial.sol. Renamed public arrays and added private visibility. Simplified globalizeUpdate() to only check for valid _globalizerAddress, removing getNextOrderId check to allow updates before orderId is incremented.
+  - v0.2.14: Updated `PayoutUpdate` struct to include `filled` and `amountSent` fields. Modified `ssUpdate` to initialize `filled=0` in `LongPayoutStruct` and `ShortPayoutStruct`, and support updates to `filled` and `amountSent` for settlement. Ensured router-only access and emitted events for updates.
+  - v0.2.13: Renamed state variables, mappings, and arrays by removing "View" or "Get" from names.
+  - v0.2.12: Restored explicit view functions `pendingBuyOrdersView()` and `pendingSellOrdersView()` to match `ICCListing` interface in `CCMainPartial.sol`. Renamed public arrays and added private visibility. Simplified `globalizeUpdate()` to only check for valid `globalizerAddress`, removing `getNextOrderId` check to allow updates before `orderId` is incremented.
 
 - **Compatibility**: Compatible with `CCLiquidityTemplate.sol` (v0.1.3), `CCMainPartial.sol` (v0.0.14), `CCLiquidityPartial.sol` (v0.0.27), `ICCLiquidity.sol` (v0.0.5), `ICCListing.sol` (v0.0.7), `CCOrderRouter.sol` (v0.1.0), `TokenRegistry.sol` (2025-08-04), `CCUniPartial.sol` (v0.1.0), `CCOrderPartial.sol` (v0.1.0).
 
@@ -20,7 +21,7 @@ The `CCListingTemplate` contract, written in Solidity (^0.8.2), facilitates dece
 - **ICCGlobalizer**: Defines `globalizeOrders(address maker, address token)`.
 
 ## Structs
-- **PayoutUpdate**: Defines `payoutType` (0: Long, 1: Short), `recipient`, `required`.
+- **PayoutUpdate**: Defines `payoutType` (0: Long, 1: Short), `recipient`, `required`, `filled`, `amountSent`.
 - **DayStartFee**: Tracks `dayStartXFeesAcc`, `dayStartYFeesAcc`, `timestamp`.
 - **Balance**: Stores `xBalance`, `yBalance` (normalized, 1e18).
 - **HistoricalData**: Records `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp`.
@@ -28,25 +29,25 @@ The `CCListingTemplate` contract, written in Solidity (^0.8.2), facilitates dece
 - **BuyOrderPricing**: Stores `maxPrice`, `minPrice` (1e18).
 - **BuyOrderAmounts**: Tracks `pending` (tokenB), `filled` (tokenB), `amountSent` (tokenA).
 - **SellOrderCore**, **SellOrderPricing**, **SellOrderAmounts**: Similar, with `pending` (tokenA), `amountSent` (tokenB).
-- **LongPayoutStruct**: Tracks `makerAddress`, `recipientAddress`, `required` (tokenB), `filled`, `orderId`, `status`.
-- **ShortPayoutStruct**: Tracks `makerAddress`, `recipientAddress`, `amount` (tokenA), `filled`, `orderId`, `status`.
+- **LongPayoutStruct**: Tracks `makerAddress`, `recipientAddress`, `required` (tokenB), `filled`, `amountSent`, `orderId`, `status`.
+- **ShortPayoutStruct**: Tracks `makerAddress`, `recipientAddress`, `amount` (tokenA), `filled`, `amountSent`, `orderId`, `status`.
 - **UpdateType**: Defines `updateType` (0: balance, 1: buy order, 2: sell order, 3: historical), `structId`, `index`, `value`, `addr`, `recipient`, `maxPrice`, `minPrice`, `amountSent`.
 - **OrderStatus**: Tracks `hasCore`, `hasPricing`, `hasAmounts` for order completeness.
 
 ## Fee Segregation
-The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orders by tracking tokens received from the order router during order creation and settlement, excluding fees managed by `ICCLiquidityTemplate`. On buy order creation (`updateType=1`, `structId=2`), `u.value` (tokenB) adds to `yBalance`; on sell order creation (`updateType=2`, `structId=2`), `u.value` (tokenA) adds to `xBalance`. During settlement, buy orders add `u.amountSent` (tokenA) to `xBalance`, subtract `u.value` (tokenB) from `yBalance`; sell orders subtract `u.value` (tokenA) from `xBalance`, add `u.amountSent` (tokenB) to `yBalance`. Fees are fetched via `ICCLiquidityTemplate.liquidityDetail` and stored in `dayStartFee` for `yieldAnnualizedView`.
+The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orders by tracking tokens received from the order router during order creation and settlement, excluding fees managed by `ICCLiquidityTemplate`. On buy order creation (`updateType=1`, `structId=2`), `u.value` (tokenB) adds to `yBalance`; on sell order creation (`updateType=2`, `structId=2`), `u.value` (tokenA) adds to `xBalance`. During settlement, buy orders add `u.amountSent` to `xBalance`, subtract `u.value` from `yBalance`; sell orders subtract `u.value` from `xBalance`, add `u.amountSent` to `yBalance`. Fees are fetched via `ICCLiquidityTemplate.liquidityDetail` and stored in `dayStartFee` for `queryYield`.
 
 ## State Variables
 - `_routers`: `mapping(address => bool)` - Authorized routers.
 - `_routersSet`: `bool` - Locks router settings.
 - `tokenA`, `tokenB`: `address` - Token pair (ETH as `address(0)`).
 - `decimalsA`, `decimalsB`: `uint8` - Token decimals.
-- `uniswapV2PairView`, `_uniswapV2PairSet`: `address`, `bool` - Uniswap V2 pair.
+- `uniswapV2PairView`, `uniswapV2PairViewSet`: `address`, `bool` - Uniswap V2 pair.
 - `listingId`: `uint256` - Listing identifier.
 - `agentView`: `address` - Agent address.
 - `registryAddress`: `address` - Registry address (public since v0.2.8).
 - `liquidityAddressView`: `address` - Liquidity contract address.
-- `_globalizerAddress`, `_globalizerSet`: `address`, `bool` - Globalizer contract.
+- `globalizerAddress`, `_globalizerSet`: `address`, `bool` - Globalizer contract.
 - `nextOrderId`: `uint256` - Order ID counter.
 - `dayStartFee`: `DayStartFee` - Daily fee tracking.
 - `_balance`: `Balance` - Normalized balances.
@@ -65,19 +66,19 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 ## Functions
 ### External Functions
 #### setGlobalizerAddress(address globalizerAddress_)
-- **Purpose**: Sets `_globalizerAddress`.
+- **Purpose**: Sets `globalizerAddress`.
 - **Inputs**: `globalizerAddress_` (non-zero).
-- **Logic**: Sets `_globalizerAddress`, `_globalizerSet=true`, emits `GlobalizerAddressSet`.
-- **State Changes**: `_globalizerAddress`, `_globalizerSet`.
+- **Logic**: Sets `globalizerAddress`, `_globalizerSet=true`, emits `GlobalizerAddressSet`.
+- **State Changes**: `globalizerAddress`, `_globalizerSet`.
 - **Errors**: Reverts if `_globalizerSet` or `globalizerAddress_ == address(0)`.
 - **Call Tree**: None.
 
-#### setUniswapV2Pair(address _uniswapV2Pair)
+#### setUniswapV2Pair(address uniswapV2Pair_)
 - **Purpose**: Sets `uniswapV2PairView`.
-- **Inputs**: `_uniswapV2Pair` (non-zero).
-- **Logic**: Sets `uniswapV2PairView`, `_uniswapV2PairSet=true`.
-- **State Changes**: `uniswapV2PairView`, `_uniswapV2PairSet`.
-- **Errors**: Reverts if `_uniswapV2PairSet` or `_uniswapV2Pair == address(0)`.
+- **Inputs**: `uniswapV2Pair_` (non-zero).
+- **Logic**: Sets `uniswapV2PairView`, `uniswapV2PairViewSet=true`.
+- **State Changes**: `uniswapV2PairView`, `uniswapV2PairViewSet`.
+- **Errors**: Reverts if `uniswapV2PairViewSet` or `uniswapV2Pair_ == address(0)`.
 - **Call Tree**: None.
 
 #### setRouters(address[] memory routers_)
@@ -130,12 +131,12 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 - **Call Tree**: None.
 
 #### ssUpdate(PayoutUpdate[] calldata updates)
-- **Purpose**: Processes long/short payouts.
-- **Inputs**: `updates` (`payoutType`, `recipient`, `required`).
-- **Logic**: Creates `longPayout` or `shortPayout` entries, updates `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, increments `nextOrderId`, emits `PayoutOrderCreated`.
+- **Purpose**: Processes long/short payouts, supports settlement updates.
+- **Inputs**: `updates` (`payoutType`, `recipient`, `required`, `filled`, `amountSent`).
+- **Logic**: Creates or updates `longPayout` or `shortPayout` entries, sets `filled=0` for new payouts, updates `filled` and `amountSent` for existing payouts, updates `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, increments `nextOrderId` for new payouts, emits `PayoutOrderCreated` or `PayoutOrderUpdated`.
 - **State Changes**: `longPayout`, `shortPayout`, `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, `nextOrderId`.
 - **Internal Call Tree**: None.
-- **Errors**: Emits `UpdateFailed` for invalid `recipient`, `payoutType`, or `required`.
+- **Errors**: Emits `UpdateFailed` for invalid `recipient`, `payoutType`, or `required`/`filled`.
 
 #### update(UpdateType[] calldata updates)
 - **Purpose**: Updates balances, orders, historical data.
@@ -164,7 +165,7 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 - **Internal Call Tree**: None.
 - **Errors**: Reverts for invalid router, no native token, `amount`, `recipient`, or `msg.value`. Emits `TransactionFailed`.
 
-#### yieldAnnualizedView(bool isTokenA, uint256 depositAmount) returns (uint256 yieldAnnualized)
+#### queryYield(bool isTokenA, uint256 depositAmount) returns (uint256 yieldAnnualized)
 - **Purpose**: Calculates annualized yield from liquidity fees.
 - **Inputs**: `isTokenA`, `depositAmount`.
 - **Logic**: Fetches fees via `ICCLiquidityTemplate.liquidityDetail`, uses `dayStartFee` to compute daily fees, calculates yield (`dailyFees * 365 * 10000 / depositAmount`).
@@ -205,11 +206,6 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 - **External Interactions**: `IERC20.balanceOf`.
 - **Internal Call Tree**: `normalize`.
 
-#### listingVolumeBalancesView() returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume)
-- **Purpose**: Returns balances and latest volumes.
-- **Logic**: Calls `this.volumeBalances`, fetches `xVolume`, `yVolume` from `_historicalData`.
-- **Internal Call Tree**: `volumeBalances`.
-
 #### pendingBuyOrdersView() returns (uint256[] memory)
 - **Purpose**: Returns `_pendingBuyOrders`.
 - **Logic**: Returns array of pending buy order IDs.
@@ -230,6 +226,36 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 - **Logic**: Filters `makerPendingOrders[maker]` for `status=1`, capped by `maxIterations`.
 - **Internal Call Tree**: None.
 
+#### getBuyOrderCore(uint256 orderId) returns (address makerAddress, address recipientAddress, uint8 status)
+- **Purpose**: Returns buy order core details.
+- **Logic**: Returns `buyOrderCore[orderId]` fields.
+- **Internal Call Tree**: None.
+
+#### getBuyOrderPricing(uint256 orderId) returns (uint256 maxPrice, uint256 minPrice)
+- **Purpose**: Returns buy order pricing details.
+- **Logic**: Returns `buyOrderPricing[orderId]` fields.
+- **Internal Call Tree**: None.
+
+#### getBuyOrderAmounts(uint256 orderId) returns (uint256 pending, uint256 filled, uint256 amountSent)
+- **Purpose**: Returns buy order amounts.
+- **Logic**: Returns `buyOrderAmounts[orderId]` fields.
+- **Internal Call Tree**: None.
+
+#### getSellOrderCore(uint256 orderId) returns (address makerAddress, address recipientAddress, uint8 status)
+- **Purpose**: Returns sell order core details.
+- **Logic**: Returns `sellOrderCore[orderId]` fields.
+- **Internal Call Tree**: None.
+
+#### getSellOrderPricing(uint256 orderId) returns (uint256 maxPrice, uint256 minPrice)
+- **Purpose**: Returns sell order pricing details.
+- **Logic**: Returns `sellOrderPricing[orderId]` fields.
+- **Internal Call Tree**: None.
+
+#### getSellOrderAmounts(uint256 orderId) returns (uint256 pending, uint256 filled, uint256 amountSent)
+- **Purpose**: Returns sell order amounts.
+- **Logic**: Returns `sellOrderAmounts[orderId]` fields.
+- **Internal Call Tree**: None.
+
 #### getFullBuyOrderDetails(uint256 orderId) returns (BuyOrderCore, BuyOrderPricing, BuyOrderAmounts)
 - **Purpose**: Returns full buy order details.
 - **Logic**: Returns `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts` for `orderId`.
@@ -245,6 +271,26 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 - **Logic**: Slices `makerPendingOrders[maker]` from `step`.
 - **Internal Call Tree**: None.
 
+#### makerPendingOrdersView(address maker) returns (uint256[] memory orderIds)
+- **Purpose**: Returns all pending order IDs for `maker`.
+- **Logic**: Returns `makerPendingOrders[maker]`.
+- **Internal Call Tree**: None.
+
+#### longPayoutByIndexView() returns (uint256[] memory orderIds)
+- **Purpose**: Returns `longPayoutByIndex`.
+- **Logic**: Returns array of long payout order IDs.
+- **Internal Call Tree**: None.
+
+#### shortPayoutByIndexView() returns (uint256[] memory orderIds)
+- **Purpose**: Returns `shortPayoutByIndex`.
+- **Logic**: Returns array of short payout order IDs.
+- **Internal Call Tree**: None.
+
+#### userPayoutIDsView(address user) returns (uint256[] memory orderIds)
+- **Purpose**: Returns payout order IDs for `user`.
+- **Logic**: Returns `userPayoutIDs[user]`.
+- **Internal Call Tree**: None.
+
 #### getHistoricalDataView(uint256 index) returns (HistoricalData)
 - **Purpose**: Returns `_historicalData[index]`.
 - **Logic**: Returns data, reverts if `index` invalid.
@@ -255,16 +301,6 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 - **Logic**: Returns length.
 - **Internal Call Tree**: None.
 
-#### getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) returns (HistoricalData)
-- **Purpose**: Returns `_historicalData` entry closest to `targetTimestamp`.
-- **Logic**: Finds entry with minimum timestamp difference.
-- **Internal Call Tree**: None.
-
-#### globalizerAddressView() returns (address)
-- **Purpose**: Returns `_globalizerAddress`.
-- **Logic**: Returns `_globalizerAddress`.
-- **Internal Call Tree**: None.
-
 ### Internal Functions
 #### normalize(uint256 amount, uint8 decimals) returns (uint256 normalized)
 - **Purpose**: Normalizes amounts to 1e18.
@@ -272,11 +308,11 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 
 #### denormalize(uint256 amount, uint8 decimals) returns (uint256 denormalized)
 - **Purpose**: Converts from 1e18 to token decimals.
-- **Callers**: None in v0.2.13.
+- **Callers**: None in v0.2.15.
 
 #### _isSameDay(uint256 time1, uint256 time2) returns (bool sameDay)
 - **Purpose**: Checks same-day timestamps.
-- **Callers**: `update`, `yieldAnnualizedView`.
+- **Callers**: `update`, `queryYield`.
 
 #### _floorToMidnight(uint256 timestamp) returns (uint256 midnight)
 - **Purpose**: Rounds timestamp to midnight.
@@ -284,7 +320,7 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 
 #### _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256 volumeChange)
 - **Purpose**: Returns volume from `_historicalData` at or after `startTime`.
-- **Callers**: None in v0.2.13.
+- **Callers**: None in v0.2.15.
 
 #### _updateRegistry(address maker)
 - **Purpose**: Updates registry with `tokenA`, `tokenB` balances.
@@ -304,15 +340,15 @@ The `_balance` struct (`xBalance`, `yBalance`) segregates fees from pending orde
 
 #### uint2str(uint256 _i) returns (string)
 - **Purpose**: Converts uint to string for error messages.
-- **Callers**: None in v0.2.13.
+- **Callers**: None in v0.2.15.
 
 ## Parameters and Interactions
 - **Orders** (`UpdateType`): `updateType=0` updates `_balance`. Buy orders (`updateType=1`) input `tokenB` (`value`), output `tokenA` (`amountSent`); sell orders (`updateType=2`) input `tokenA` (`value`), output `tokenB` (`amountSent`). On creation, buy orders add `value` to `yBalance`, sell orders add `value` to `xBalance`. On settlement, buy orders add `amountSent` to `xBalance`, subtract `value` from `yBalance`; sell orders subtract `value` from `xBalance`, add `amountSent` to `yBalance`. On cancellation (`status=0`) or settlement (`status=3`), buy orders update `_historicalData` with `yVolume += pending`; sell orders update `xVolume += pending`. Order completeness tracked via `orderStatus`, emitting `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
-- **Payouts** (`PayoutUpdate`): Long (`payoutType=0`, `tokenB`), short (`payoutType=1`, `tokenA`) via `ssUpdate`, using `nextOrderId` for indexing.
+- **Payouts** (`PayoutUpdate`): Long (`payoutType=0`, `tokenB`), short (`payoutType=1`, `tokenA`) via `ssUpdate`, using `nextOrderId` for indexing. Supports `filled` and `amountSent` updates for settlement.
 - **Price**: Computed via `IUniswapV2Pair` and `IERC20.balanceOf(uniswapV2PairView)`, stored in `listingPrice` after balance updates.
 - **Registry**: Updated via `_updateRegistry` in `update`.
 - **Globalizer**: Updated via `globalizeUpdate` in `update`.
-- **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` used in `update`, `yieldAnnualizedView`.
+- **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` used in `update`, `queryYield`.
 - **Historical Data**: Stored in `_historicalData` during `update` (`updateType=3`) or auto-generated if not provided and not same-day, using Uniswap V2 price and carrying forward previous volumes. Volumes updated on order cancellation/settlement.
 - **External Calls**: `IERC20.balanceOf`, `IERC20.transfer`, `IERC20.decimals`, `ITokenRegistry.initializeTokens`, `ICCLiquidityTemplate.liquidityDetail`, `ICCGlobalizer.globalizeOrders`, low-level `call`.
 - **Security**: Router checks, try-catch, explicit casting, no tuple access, relaxed validation, skips invalid updates with `UpdateFailed`.

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.13
+// Version: 0.2.15
 // Changes:
-// - v0.2.13: Renamed state variables, mappings, and arrays by removing "View" or "Get" from names. 
-// - v0.2.12: Restored explicit view functions pendingBuyOrdersView() and pendingSellOrdersView() to match ICCListing interface in CCMainPartial.sol. Renamed public arrays and added private visibility. Simplified globalizeUpdate() to only check for valid _globalizerAddress, removing getNextOrderId check to allow updates before orderId is incremented.
+// - v0.2.14: Updated PayoutUpdate struct to include filled and amountSent fields. Modified ssUpdate to initialize filled=0 in LongPayoutStruct and ShortPayoutStruct, and support updates to filled and amountSent for settlement. Ensured router-only access and emitted events for updates.
+// - v0.2.13: Renamed state variables, mappings, and arrays by removing "View" or "Get" from names.
+// - v0.2.12: Restored explicit view functions pendingBuyOrdersView() and pendingSellOrdersView() to match ICCListing interface in CCMainPartial.sol. Renamed public arrays and added private visibility. Simplified globalizeUpdate() to only check for valid globalizerAddress, removing getNextOrderId check to allow updates before orderId is incremented.
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -49,19 +50,21 @@ contract CCListingTemplate {
     uint8 public decimalsA; // Returns uint8 decimals
     uint8 public decimalsB; // Returns uint8 decimals
     address public uniswapV2PairView; // Returns address pair
-    bool private _uniswapV2PairSet;
+    bool private uniswapV2PairViewSet;
     uint256 public listingId; // Returns uint256 listingId
     address public agentView; // Returns address agent
     address public registryAddress; // Returns address registry
     address public liquidityAddressView; // Returns address liquidityAddress
-    address private _globalizerAddress;
+    address public globalizerAddress;
     bool private _globalizerSet;
-    uint256 public nextOrderId; // Returns uint256 nextOrderId
+    uint256 private nextOrderId; // Returns uint256 nextOrderId
 
     struct PayoutUpdate {
         uint8 payoutType; // 0: Long, 1: Short
         address recipient;
         uint256 required;
+        uint256 filled; // Amount filled during settlement
+        uint256 amountSent; // Amount of opposite token sent
     }
     struct DayStartFee {
         uint256 dayStartXFeesAcc; // Tracks xFeesAcc at midnight
@@ -80,9 +83,9 @@ contract CCListingTemplate {
     uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
     uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
     mapping(address maker => uint256[] orderIds) public makerPendingOrders; // Returns uint256[] memory orderIds
-    uint256[] public longPayoutByIndex; // Returns uint256[] memory orderIds
-    uint256[] public shortPayoutByIndex; // Returns uint256[] memory orderIds
-    mapping(address user => uint256[] orderIds) public userPayoutIDs; // Returns uint256[] memory orderIds
+    uint256[] private longPayoutByIndex; // Returns uint256[] memory orderIds
+    uint256[] private shortPayoutByIndex; // Returns uint256[] memory orderIds
+    mapping(address user => uint256[] orderIds) private userPayoutIDs; // Returns uint256[] memory orderIds
 
     struct HistoricalData {
         uint256 price;
@@ -130,6 +133,7 @@ contract CCListingTemplate {
         address recipientAddress;
         uint256 required;
         uint256 filled;
+        uint256 amountSent;
         uint256 orderId;
         uint8 status;
     }
@@ -138,6 +142,7 @@ contract CCListingTemplate {
         address recipientAddress;
         uint256 amount;
         uint256 filled;
+        uint256 amountSent;
         uint256 orderId;
         uint8 status;
     }
@@ -170,6 +175,7 @@ contract CCListingTemplate {
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
+    event PayoutOrderUpdated(uint256 indexed orderId, bool isLong, uint256 filled, uint256 amountSent, uint8 status);
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
     event GlobalizerAddressSet(address indexed globalizer);
     event RegistryUpdateFailed(address indexed user, address[] indexed tokens, string reason);
@@ -254,7 +260,7 @@ contract CCListingTemplate {
 
     // Calls globalizeOrders with latest order details
     function globalizeUpdate() internal {
-        if (_globalizerAddress == address(0)) {
+        if (globalizerAddress == address(0)) {
             emit UpdateFailed(listingId, "Invalid globalizer address");
             return;
         }
@@ -277,10 +283,10 @@ contract CCListingTemplate {
                 return;
             }
         }
-        try ICCGlobalizer(_globalizerAddress).globalizeOrders(maker, token) {
+        try ICCGlobalizer(globalizerAddress).globalizeOrders(maker, token) {
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
-            emit ExternalCallFailed(_globalizerAddress, "globalizeOrders", decodedReason);
+            emit ExternalCallFailed(globalizerAddress, "globalizeOrders", decodedReason);
             emit UpdateFailed(listingId, decodedReason);
         }
     }
@@ -336,7 +342,6 @@ contract CCListingTemplate {
         }
     }
 
-    // Processes payout updates
     function ssUpdate(PayoutUpdate[] calldata updates) external {
         require(_routers[msg.sender], "Caller not router");
         for (uint256 i = 0; i < updates.length; i++) {
@@ -349,36 +354,54 @@ contract CCListingTemplate {
                 emit UpdateFailed(listingId, "Invalid payout type");
                 continue;
             }
-            if (u.required == 0) {
-                emit UpdateFailed(listingId, "Invalid required amount");
+            if (u.required == 0 && u.filled == 0) {
+                emit UpdateFailed(listingId, "Invalid required or filled amount");
                 continue;
             }
             bool isLong = u.payoutType == 0;
-            uint256 orderId = nextOrderId; // Use next available order ID
+            uint256 orderId = nextOrderId;
             if (isLong) {
                 LongPayoutStruct storage payout = longPayout[orderId];
-                payout.makerAddress = u.recipient; // Assuming recipient is maker for new payout
-                payout.recipientAddress = u.recipient;
-                payout.required = u.required;
-                payout.filled = u.required;
-                payout.orderId = orderId;
-                payout.status = u.required > 0 ? 3 : 0; // Mark as filled or cancelled
-                longPayoutByIndex.push(orderId);
-                userPayoutIDs[u.recipient].push(orderId);
-                emit PayoutOrderCreated(orderId, true, payout.status);
+                if (payout.orderId == 0) { // New payout
+                    payout.makerAddress = u.recipient;
+                    payout.recipientAddress = u.recipient;
+                    payout.required = u.required;
+                    payout.filled = 0; // Initialize filled to 0
+                    payout.orderId = orderId;
+                    payout.status = u.required > 0 ? 1 : 0; // Pending or cancelled
+                    longPayoutByIndex.push(orderId);
+                    userPayoutIDs[u.recipient].push(orderId);
+                    emit PayoutOrderCreated(orderId, true, payout.status);
+                } else { // Update existing payout
+                    if (u.filled > 0) payout.filled = u.filled;
+                    if (u.amountSent > 0) payout.amountSent = u.amountSent;
+                    if (u.required > 0) payout.required = u.required;
+                    payout.status = u.filled >= payout.required ? 3 : (u.filled > 0 ? 2 : 1); // Filled, partially filled, or pending
+                    emit PayoutOrderUpdated(orderId, true, payout.filled, payout.amountSent, payout.status);
+                }
             } else {
                 ShortPayoutStruct storage payout = shortPayout[orderId];
-                payout.makerAddress = u.recipient; // Assuming recipient is maker for new payout
-                payout.recipientAddress = u.recipient;
-                payout.amount = u.required;
-                payout.filled = u.required;
-                payout.orderId = orderId;
-                payout.status = u.required > 0 ? 3 : 0; // Mark as filled or cancelled
-                shortPayoutByIndex.push(orderId);
-                userPayoutIDs[u.recipient].push(orderId);
-                emit PayoutOrderCreated(orderId, false, payout.status);
+                if (payout.orderId == 0) { // New payout
+                    payout.makerAddress = u.recipient;
+                    payout.recipientAddress = u.recipient;
+                    payout.amount = u.required;
+                    payout.filled = 0; // Initialize filled to 0
+                    payout.orderId = orderId;
+                    payout.status = u.required > 0 ? 1 : 0; // Pending or cancelled
+                    shortPayoutByIndex.push(orderId);
+                    userPayoutIDs[u.recipient].push(orderId);
+                    emit PayoutOrderCreated(orderId, false, payout.status);
+                } else { // Update existing payout
+                    if (u.filled > 0) payout.filled = u.filled;
+                    if (u.amountSent > 0) payout.amountSent = u.amountSent;
+                    if (u.required > 0) payout.amount = u.required;
+                    payout.status = u.filled >= payout.amount ? 3 : (u.filled > 0 ? 2 : 1); // Filled, partially filled, or pending
+                    emit PayoutOrderUpdated(orderId, false, payout.filled, payout.amountSent, payout.status);
+                }
             }
-            nextOrderId++;
+            if (longPayout[orderId].orderId == 0 && shortPayout[orderId].orderId == 0) {
+                nextOrderId++; // Increment only for new payouts
+            }
         }
     }
 
@@ -565,8 +588,8 @@ contract CCListingTemplate {
         globalizeUpdate();
     }
 
-    // Calculates annualized yield based on deposit amount and fees
-    function yieldAnnualizedView(bool isTokenA, uint256 depositAmount) external view returns (uint256 yieldAnnualized) {
+    // Calculates annualized yield based Compare changes between versions to verify fixes for undeclared identifiers and shadowing issues
+    function queryYield(bool isTokenA, uint256 depositAmount) external view returns (uint256 yieldAnnualized) {
         if (liquidityAddressView == address(0) || depositAmount == 0) return 0;
         uint256 xLiquid;
         uint256 yLiquid;
@@ -650,17 +673,17 @@ contract CCListingTemplate {
     function setGlobalizerAddress(address globalizerAddress_) external {
         require(!_globalizerSet, "Globalizer already set");
         require(globalizerAddress_ != address(0), "Invalid globalizer address");
-        _globalizerAddress = globalizerAddress_;
+        globalizerAddress = globalizerAddress_;
         _globalizerSet = true;
         emit GlobalizerAddressSet(globalizerAddress_);
     }
 
     // Sets Uniswap V2 pair address, callable once
-    function setUniswapV2Pair(address _uniswapV2Pair) external {
-        require(!_uniswapV2PairSet, "Uniswap V2 pair already set");
-        require(_uniswapV2Pair != address(0), "Invalid pair address");
-        uniswapV2PairView = _uniswapV2Pair;
-        _uniswapV2PairSet = true;
+    function setUniswapV2Pair(address uniswapV2Pair_) external {
+        require(!uniswapV2PairViewSet, "Uniswap V2 pair already set");
+        require(uniswapV2Pair_ != address(0), "Invalid pair address");
+        uniswapV2PairView = uniswapV2Pair_;
+        uniswapV2PairViewSet = true;
     }
 
     // Sets router addresses, callable once
@@ -733,8 +756,23 @@ contract CCListingTemplate {
         return (tokenA, tokenB);
     }
 
+    // Returns next order ID
+    function getNextOrderId() external view returns (uint256 orderId_) {
+        return nextOrderId;
+    }
+
+    // Returns long payout details
+    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory payout) {
+        return longPayout[orderId];
+    }
+
+    // Returns short payout details
+    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory payout) {
+        return shortPayout[orderId];
+    }
+
     // Computes current price from Uniswap V2 pair token balances
-    function prices(uint256) external view returns (uint256 price) {
+    function prices(uint256 _listingId) external view returns (uint256 price) {
         uint256 balanceA;
         uint256 balanceB;
         try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
@@ -751,22 +789,9 @@ contract CCListingTemplate {
     }
 
     // Returns real-time token balances
-    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance) {
+    function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance) {
         xBalance = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
         yBalance = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
-    }
-
-    // Returns balance and volume details
-    function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume) {
-        (xBalance, yBalance) = this.volumeBalances(0);
-        if (_historicalData.length > 0) {
-            HistoricalData memory latest = _historicalData[_historicalData.length - 1];
-            xVolume = latest.xVolume;
-            yVolume = latest.yVolume;
-        } else {
-            xVolume = 0;
-            yVolume = 0;
-        }
     }
 
     // Returns up to maxIterations pending buy order IDs for a maker, starting from step
@@ -805,6 +830,42 @@ contract CCListingTemplate {
         }
     }
 
+    // Returns buy order core details
+    function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
+        BuyOrderCore memory core = buyOrderCore[orderId];
+        return (core.makerAddress, core.recipientAddress, core.status);
+    }
+
+    // Returns buy order pricing details
+    function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
+        BuyOrderPricing memory pricing = buyOrderPricing[orderId];
+        return (pricing.maxPrice, pricing.minPrice);
+    }
+
+    // Returns buy order amounts
+    function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
+        BuyOrderAmounts memory amounts = buyOrderAmounts[orderId];
+        return (amounts.pending, amounts.filled, amounts.amountSent);
+    }
+
+    // Returns sell order core details
+    function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status) {
+        SellOrderCore memory core = sellOrderCore[orderId];
+        return (core.makerAddress, core.recipientAddress, core.status);
+    }
+
+    // Returns sell order pricing details
+    function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice) {
+        SellOrderPricing memory pricing = sellOrderPricing[orderId];
+        return (pricing.maxPrice, pricing.minPrice);
+    }
+
+    // Returns sell order amounts
+    function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent) {
+        SellOrderAmounts memory amounts = sellOrderAmounts[orderId];
+        return (amounts.pending, amounts.filled, amounts.amountSent);
+    }
+
     // Returns full buy order details
     function getFullBuyOrderDetails(uint256 orderId) external view returns (
         BuyOrderCore memory core,
@@ -839,6 +900,26 @@ contract CCListingTemplate {
         }
     }
 
+    // Returns pending orders for a maker
+    function makerPendingOrdersView(address maker) external view returns (uint256[] memory orderIds) {
+        return makerPendingOrders[maker];
+    }
+
+    // Returns long payout IDs
+    function longPayoutByIndexView() external view returns (uint256[] memory orderIds) {
+        return longPayoutByIndex;
+    }
+
+    // Returns short payout IDs
+    function shortPayoutByIndexView() external view returns (uint256[] memory orderIds) {
+        return shortPayoutByIndex;
+    }
+
+    // Returns payout IDs for a user
+    function userPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
+        return userPayoutIDs[user];
+    }
+
     // Returns historical data at index
     function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data) {
         require(index < _historicalData.length, "Invalid index");
@@ -848,28 +929,6 @@ contract CCListingTemplate {
     // Returns historical data length
     function historicalDataLengthView() external view returns (uint256 length) {
         return _historicalData.length;
-    }
-
-    // Returns historical data closest to target timestamp
-    function getHistoricalDataByNearestTimestamp(uint256 targetTimestamp) external view returns (HistoricalData memory data) {
-        if (_historicalData.length == 0) return HistoricalData(0, 0, 0, 0, 0, 0);
-        uint256 minDiff = type(uint256).max;
-        uint256 closestIndex = 0;
-        for (uint256 i = 0; i < _historicalData.length; i++) {
-            uint256 diff = targetTimestamp > _historicalData[i].timestamp
-                ? targetTimestamp - _historicalData[i].timestamp
-                : _historicalData[i].timestamp - targetTimestamp;
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestIndex = i;
-            }
-        }
-        return _historicalData[closestIndex];
-    }
-
-    // Returns globalizer address
-    function globalizerAddressView() external view returns (address globalizerAddress) {
-        return _globalizerAddress;
     }
 
     // Utility function to convert uint to string for error messages
