@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.11
+// Version: 0.2.13
 // Changes:
-// - v0.2.11: Fixed shadowed declaration in _updateRegistry by renaming tokens to emptyTokens. Commented out unused xLiq and yLiq in update try/catch. Added TransactionFailed event to fix undeclared identifier errors in transactToken and transactNative. Removed validation in update() to treat router data as correct. Removed gas limit on initializeTokens in _updateRegistry. Added RegistryUpdateFailed event for registry-specific errors. Ensured maker address validation before registry call. Compatible with CCOrderPartial.sol v0.1.0, CCOrderRouter.sol v0.1.0, CCLiquidityTemplate.sol v0.1.3, CCMainPartial.sol v0.0.14, CCLiquidityPartial.sol v0.0.27, CCUniPartial.sol v0.1.0, TokenRegistry.sol (2025-08-04).
-// - v0.2.10: Added auto-generation of historical data in update() when updateType 3 is not provided. Updated historical volume (xVolume, yVolume) on order cancellation or settlement in update() for BuyOrderAmounts and SellOrderAmounts, accumulating filled amounts. Ensured volume updates use normalized amounts.
-// - v0.2.9: Named mapping and array input parameters for clarity and Etherscan visibility (e.g., orderId, maker, timestamp). Confirmed dayStartFee and historical data population in update() for updateType 3, no updates in transactToken/transactNative as they only handle transfers.
-// - v0.2.8: Initialized dayStartFee and historical data in setTokens to ensure data availability without router updates. Updated volumeBalances to fetch real-time token balances from contract. Fixed pending amount validation in update() to set pending for new orders. Made _registryAddress public as registryAddress. Added registry call validation in _updateRegistry.
+// - v0.2.13: Renamed state variables, mappings, and arrays by removing "View" or "Get" from names. 
+// - v0.2.12: Restored explicit view functions pendingBuyOrdersView() and pendingSellOrdersView() to match ICCListing interface in CCMainPartial.sol. Renamed public arrays and added private visibility. Simplified globalizeUpdate() to only check for valid _globalizerAddress, removing getNextOrderId check to allow updates before orderId is incremented.
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -22,6 +20,8 @@ interface ICCListing {
     function tokenB() external view returns (address);
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
+    function pendingBuyOrdersView() external view returns (uint256[] memory);
+    function pendingSellOrdersView() external view returns (uint256[] memory);
 }
 
 interface IUniswapV2Pair {
@@ -50,13 +50,13 @@ contract CCListingTemplate {
     uint8 public decimalsB; // Returns uint8 decimals
     address public uniswapV2PairView; // Returns address pair
     bool private _uniswapV2PairSet;
-    uint256 public getListingId; // Returns uint256 listingId
+    uint256 public listingId; // Returns uint256 listingId
     address public agentView; // Returns address agent
     address public registryAddress; // Returns address registry
     address public liquidityAddressView; // Returns address liquidityAddress
     address private _globalizerAddress;
     bool private _globalizerSet;
-    uint256 public getNextOrderId; // Returns uint256 nextOrderId
+    uint256 public nextOrderId; // Returns uint256 nextOrderId
 
     struct PayoutUpdate {
         uint8 payoutType; // 0: Long, 1: Short
@@ -76,13 +76,13 @@ contract CCListingTemplate {
     }
     Balance private _balance;
 
-    uint256 public listingPriceView; // Returns uint256 price
-    uint256[] public pendingBuyOrdersView; // Returns uint256[] memory orderIds
-    uint256[] public pendingSellOrdersView; // Returns uint256[] memory orderIds
-    mapping(address maker => uint256[] orderIds) public makerPendingOrdersView; // Returns uint256[] memory orderIds
-    uint256[] public longPayoutByIndexView; // Returns uint256[] memory orderIds
-    uint256[] public shortPayoutByIndexView; // Returns uint256[] memory orderIds
-    mapping(address user => uint256[] orderIds) public userPayoutIDsView; // Returns uint256[] memory orderIds
+    uint256 public listingPrice; // Returns uint256 price
+    uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
+    uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
+    mapping(address maker => uint256[] orderIds) public makerPendingOrders; // Returns uint256[] memory orderIds
+    uint256[] public longPayoutByIndex; // Returns uint256[] memory orderIds
+    uint256[] public shortPayoutByIndex; // Returns uint256[] memory orderIds
+    mapping(address user => uint256[] orderIds) public userPayoutIDs; // Returns uint256[] memory orderIds
 
     struct HistoricalData {
         uint256 price;
@@ -158,14 +158,14 @@ contract CCListingTemplate {
         bool hasAmounts; // Tracks if Amounts struct is set
     }
 
-    mapping(uint256 orderId => BuyOrderCore) public getBuyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 orderId => BuyOrderPricing) public getBuyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 orderId => BuyOrderAmounts) public getBuyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => SellOrderCore) public getSellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 orderId => SellOrderPricing) public getSellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 orderId => SellOrderAmounts) public getSellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => LongPayoutStruct) public getLongPayout; // Returns LongPayoutStruct memory payout
-    mapping(uint256 orderId => ShortPayoutStruct) public getShortPayout; // Returns ShortPayoutStruct memory payout
+    mapping(uint256 orderId => BuyOrderCore) public buyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => BuyOrderPricing) public buyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => BuyOrderAmounts) public buyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => SellOrderCore) public sellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => SellOrderPricing) public sellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => SellOrderAmounts) public sellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => LongPayoutStruct) public longPayout; // Returns LongPayoutStruct memory payout
+    mapping(uint256 orderId => ShortPayoutStruct) public shortPayout; // Returns ShortPayoutStruct memory payout
     mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
@@ -254,26 +254,26 @@ contract CCListingTemplate {
 
     // Calls globalizeOrders with latest order details
     function globalizeUpdate() internal {
-        if (_globalizerAddress == address(0) || getNextOrderId == 0) {
-            emit UpdateFailed(getListingId, "Invalid globalizer or no orders");
+        if (_globalizerAddress == address(0)) {
+            emit UpdateFailed(listingId, "Invalid globalizer address");
             return;
         }
-        uint256 orderId = getNextOrderId - 1; // Latest order ID
+        uint256 orderId = nextOrderId > 0 ? nextOrderId - 1 : 0; // Use latest order ID or 0 if none
         address maker;
         address token;
         // Check if it's a buy order
-        BuyOrderCore memory buyCore = getBuyOrderCore[orderId];
+        BuyOrderCore memory buyCore = buyOrderCore[orderId];
         if (buyCore.makerAddress != address(0)) {
             maker = buyCore.makerAddress;
             token = tokenB != address(0) ? tokenB : tokenA; // Use tokenB for buy
         } else {
             // Check if it's a sell order
-            SellOrderCore memory sellCore = getSellOrderCore[orderId];
+            SellOrderCore memory sellCore = sellOrderCore[orderId];
             if (sellCore.makerAddress != address(0)) {
                 maker = sellCore.makerAddress;
                 token = tokenA != address(0) ? tokenA : tokenB; // Use tokenA for sell
             } else {
-                emit UpdateFailed(getListingId, "No valid order found");
+                // No valid order, skip for balance updates
                 return;
             }
         }
@@ -281,8 +281,18 @@ contract CCListingTemplate {
         } catch (bytes memory reason) {
             string memory decodedReason = string(reason);
             emit ExternalCallFailed(_globalizerAddress, "globalizeOrders", decodedReason);
-            emit UpdateFailed(getListingId, decodedReason);
+            emit UpdateFailed(listingId, decodedReason);
         }
+    }
+
+    // Returns pending buy order IDs
+    function pendingBuyOrdersView() external view returns (uint256[] memory) {
+        return _pendingBuyOrders;
+    }
+
+    // Returns pending sell order IDs
+    function pendingSellOrdersView() external view returns (uint256[] memory) {
+        return _pendingSellOrders;
     }
 
     // Transfers ERC20 tokens to recipient
@@ -332,173 +342,152 @@ contract CCListingTemplate {
         for (uint256 i = 0; i < updates.length; i++) {
             PayoutUpdate memory u = updates[i];
             if (u.recipient == address(0)) {
-                emit UpdateFailed(getListingId, "Invalid recipient");
+                emit UpdateFailed(listingId, "Invalid recipient");
                 continue;
             }
             if (u.payoutType > 1) {
-                emit UpdateFailed(getListingId, "Invalid payout type");
+                emit UpdateFailed(listingId, "Invalid payout type");
                 continue;
             }
             if (u.required == 0) {
-                emit UpdateFailed(getListingId, "Invalid required amount");
+                emit UpdateFailed(listingId, "Invalid required amount");
                 continue;
             }
             bool isLong = u.payoutType == 0;
-            uint256 orderId = getNextOrderId; // Use next available order ID
+            uint256 orderId = nextOrderId; // Use next available order ID
             if (isLong) {
-                LongPayoutStruct storage payout = getLongPayout[orderId];
+                LongPayoutStruct storage payout = longPayout[orderId];
                 payout.makerAddress = u.recipient; // Assuming recipient is maker for new payout
                 payout.recipientAddress = u.recipient;
                 payout.required = u.required;
                 payout.filled = u.required;
                 payout.orderId = orderId;
                 payout.status = u.required > 0 ? 3 : 0; // Mark as filled or cancelled
-                longPayoutByIndexView.push(orderId);
-                userPayoutIDsView[u.recipient].push(orderId);
+                longPayoutByIndex.push(orderId);
+                userPayoutIDs[u.recipient].push(orderId);
                 emit PayoutOrderCreated(orderId, true, payout.status);
             } else {
-                ShortPayoutStruct storage payout = getShortPayout[orderId];
+                ShortPayoutStruct storage payout = shortPayout[orderId];
                 payout.makerAddress = u.recipient; // Assuming recipient is maker for new payout
                 payout.recipientAddress = u.recipient;
                 payout.amount = u.required;
                 payout.filled = u.required;
                 payout.orderId = orderId;
                 payout.status = u.required > 0 ? 3 : 0; // Mark as filled or cancelled
-                shortPayoutByIndexView.push(orderId);
-                userPayoutIDsView[u.recipient].push(orderId);
+                shortPayoutByIndex.push(orderId);
+                userPayoutIDs[u.recipient].push(orderId);
                 emit PayoutOrderCreated(orderId, false, payout.status);
             }
-            getNextOrderId++;
+            nextOrderId++;
         }
     }
 
-    // Processes order updates, accumulates volume, updates historical data
-    function update(UpdateType[] memory updates) external {
+    // Processes updates for balances, orders, and historical data
+    function update(UpdateType[] calldata updates) external {
         require(_routers[msg.sender], "Caller not router");
         bool balanceUpdated = false;
         bool historicalUpdated = false;
         uint256[] memory updatedOrders = new uint256[](updates.length);
         uint256 updatedCount = 0;
+
         for (uint256 i = 0; i < updates.length; i++) {
             UpdateType memory u = updates[i];
-            if (u.updateType == 0) {
-                // Update balances
-                _balance.xBalance = normalize(u.value, decimalsA);
-                _balance.yBalance = normalize(u.amountSent, decimalsB);
-                balanceUpdated = true;
-                emit BalancesUpdated(getListingId, _balance.xBalance, _balance.yBalance);
+            if (u.updateType > 3) {
+                emit UpdateFailed(listingId, "Invalid update type");
                 continue;
             }
-            if (u.updateType == 3) {
-                // Update historical data
-                historicalUpdated = true;
-                uint256 midnight = _floorToMidnight(block.timestamp);
+            if (u.addr == address(0)) {
+                emit UpdateFailed(listingId, "Invalid maker address");
+                continue;
+            }
+            _updateRegistry(u.addr);
+            if (u.updateType == 0) { // Balance update
+                if (u.structId == 0) {
+                    _balance.xBalance = u.value;
+                } else if (u.structId == 1) {
+                    _balance.yBalance = u.value;
+                } else {
+                    emit UpdateFailed(listingId, "Invalid balance structId");
+                    continue;
+                }
+                balanceUpdated = true;
+                emit BalancesUpdated(listingId, _balance.xBalance, _balance.yBalance);
+            } else if (u.updateType == 1) { // Buy order update
+                if (u.structId == 0) { // Core
+                    buyOrderCore[u.index] = BuyOrderCore(u.addr, u.recipient, uint8(u.value));
+                    orderStatus[u.index].hasCore = true;
+                    if (u.value == 1) { // Pending status
+                        _pendingBuyOrders.push(u.index);
+                        makerPendingOrders[u.addr].push(u.index);
+                    } else if (u.value == 0 || u.value == 3) { // Cancelled or filled
+                        removePendingOrder(_pendingBuyOrders, u.index);
+                        removePendingOrder(makerPendingOrders[u.addr], u.index);
+                    }
+                    emit OrderUpdated(listingId, u.index, true, uint8(u.value));
+                } else if (u.structId == 1) { // Pricing
+                    buyOrderPricing[u.index] = BuyOrderPricing(u.maxPrice, u.minPrice);
+                    orderStatus[u.index].hasPricing = true;
+                } else if (u.structId == 2) { // Amounts
+                    BuyOrderAmounts storage amounts = buyOrderAmounts[u.index];
+                    amounts.pending = u.value;
+                    amounts.amountSent = u.amountSent;
+                    if (u.value == 0 && buyOrderCore[u.index].status != 0) {
+                        amounts.filled += amounts.pending;
+                        _historicalData[_historicalData.length - 1].yVolume += amounts.pending;
+                    }
+                    orderStatus[u.index].hasAmounts = true;
+                } else {
+                    emit UpdateFailed(listingId, "Invalid buy order structId");
+                    continue;
+                }
+                if (updatedOrders[updatedCount] != u.index) {
+                    updatedOrders[updatedCount++] = u.index;
+                }
+            } else if (u.updateType == 2) { // Sell order update
+                if (u.structId == 0) { // Core
+                    sellOrderCore[u.index] = SellOrderCore(u.addr, u.recipient, uint8(u.value));
+                    orderStatus[u.index].hasCore = true;
+                    if (u.value == 1) { // Pending status
+                        _pendingSellOrders.push(u.index);
+                        makerPendingOrders[u.addr].push(u.index);
+                    } else if (u.value == 0 || u.value == 3) { // Cancelled or filled
+                        removePendingOrder(_pendingSellOrders, u.index);
+                        removePendingOrder(makerPendingOrders[u.addr], u.index);
+                    }
+                    emit OrderUpdated(listingId, u.index, false, uint8(u.value));
+                } else if (u.structId == 1) { // Pricing
+                    sellOrderPricing[u.index] = SellOrderPricing(u.maxPrice, u.minPrice);
+                    orderStatus[u.index].hasPricing = true;
+                } else if (u.structId == 2) { // Amounts
+                    SellOrderAmounts storage amounts = sellOrderAmounts[u.index];
+                    amounts.pending = u.value;
+                    amounts.amountSent = u.amountSent;
+                    if (u.value == 0 && sellOrderCore[u.index].status != 0) {
+                        amounts.filled += amounts.pending;
+                        _historicalData[_historicalData.length - 1].xVolume += amounts.pending;
+                    }
+                    orderStatus[u.index].hasAmounts = true;
+                } else {
+                    emit UpdateFailed(listingId, "Invalid sell order structId");
+                    continue;
+                }
+                if (updatedOrders[updatedCount] != u.index) {
+                    updatedOrders[updatedCount++] = u.index;
+                }
+            } else if (u.updateType == 3) { // Historical data update
                 _historicalData.push(HistoricalData({
                     price: u.value,
                     xBalance: _balance.xBalance,
                     yBalance: _balance.yBalance,
                     xVolume: u.maxPrice,
                     yVolume: u.minPrice,
-                    timestamp: u.amountSent
+                    timestamp: block.timestamp
                 }));
+                uint256 midnight = _floorToMidnight(block.timestamp);
                 if (_dayStartIndices[midnight] == 0) {
                     _dayStartIndices[midnight] = _historicalData.length - 1;
-                    dayStartFee = DayStartFee({
-                        dayStartXFeesAcc: 0,
-                        dayStartYFeesAcc: 0,
-                        timestamp: midnight
-                    });
-                    try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
-                        uint256 /* xLiq */,
-                        uint256 /* yLiq */,
-                        uint256,
-                        uint256,
-                        uint256 xFees,
-                        uint256 yFees
-                    ) {
-                        dayStartFee.dayStartXFeesAcc = xFees;
-                        dayStartFee.dayStartYFeesAcc = yFees;
-                    } catch {
-                        emit UpdateFailed(getListingId, "Failed to fetch liquidity details");
-                    }
                 }
-                continue;
-            }
-            // Handle buy or sell order updates
-            bool isBuy = u.updateType == 1;
-            uint256 orderId = u.index;
-            OrderStatus storage status = orderStatus[orderId];
-            if (u.structId == 0) {
-                // Update Core struct
-                if (isBuy) {
-                    getBuyOrderCore[orderId] = BuyOrderCore({
-                        makerAddress: u.addr,
-                        recipientAddress: u.recipient,
-                        status: uint8(u.value)
-                    });
-                    if (u.value == 1) {
-                        pendingBuyOrdersView.push(orderId);
-                        makerPendingOrdersView[u.addr].push(orderId);
-                    } else if (u.value == 0 || u.value == 3) {
-                        removePendingOrder(pendingBuyOrdersView, orderId);
-                        removePendingOrder(makerPendingOrdersView[u.addr], orderId);
-                    }
-                } else {
-                    getSellOrderCore[orderId] = SellOrderCore({
-                        makerAddress: u.addr,
-                        recipientAddress: u.recipient,
-                        status: uint8(u.value)
-                    });
-                    if (u.value == 1) {
-                        pendingSellOrdersView.push(orderId);
-                        makerPendingOrdersView[u.addr].push(orderId);
-                    } else if (u.value == 0 || u.value == 3) {
-                        removePendingOrder(pendingSellOrdersView, orderId);
-                        removePendingOrder(makerPendingOrdersView[u.addr], orderId);
-                    }
-                }
-                status.hasCore = true;
-                emit OrderUpdated(getListingId, orderId, isBuy, uint8(u.value));
-            } else if (u.structId == 1) {
-                // Update Pricing struct
-                if (isBuy) {
-                    getBuyOrderPricing[orderId] = BuyOrderPricing({
-                        maxPrice: u.maxPrice,
-                        minPrice: u.minPrice
-                    });
-                } else {
-                    getSellOrderPricing[orderId] = SellOrderPricing({
-                        maxPrice: u.maxPrice,
-                        minPrice: u.minPrice
-                    });
-                }
-                status.hasPricing = true;
-            } else if (u.structId == 2) {
-                // Update Amounts struct
-                if (isBuy) {
-                    getBuyOrderAmounts[orderId] = BuyOrderAmounts({
-                        pending: u.value,
-                        filled: getBuyOrderAmounts[orderId].filled + u.amountSent,
-                        amountSent: getBuyOrderAmounts[orderId].amountSent + u.amountSent
-                    });
-                    if (u.value > 0 || u.amountSent > 0) {
-                        _historicalData[_historicalData.length - 1].xVolume += u.amountSent;
-                    }
-                } else {
-                    getSellOrderAmounts[orderId] = SellOrderAmounts({
-                        pending: u.value,
-                        filled: getSellOrderAmounts[orderId].filled + u.amountSent,
-                        amountSent: getSellOrderAmounts[orderId].amountSent + u.amountSent
-                    });
-                    if (u.value > 0 || u.amountSent > 0) {
-                        _historicalData[_historicalData.length - 1].yVolume += u.amountSent;
-                    }
-                }
-                status.hasAmounts = true;
-            }
-            updatedOrders[updatedCount++] = orderId;
-            if (u.structId == 0 && u.addr != address(0)) {
-                _updateRegistry(u.addr);
+                historicalUpdated = true;
             }
         }
         // Auto-generate historical data if not updated in this call
@@ -513,10 +502,10 @@ contract CCListingTemplate {
                         uint256 balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
                         currentPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
                     } catch {
-                        currentPrice = listingPriceView;
+                        currentPrice = listingPrice;
                     }
                 } catch {
-                    currentPrice = listingPriceView;
+                    currentPrice = listingPrice;
                 }
                 _historicalData.push(HistoricalData({
                     price: currentPrice,
@@ -544,7 +533,7 @@ contract CCListingTemplate {
                         dayStartFee.dayStartXFeesAcc = xFees;
                         dayStartFee.dayStartYFeesAcc = yFees;
                     } catch {
-                        emit UpdateFailed(getListingId, "Failed to fetch liquidity details");
+                        emit UpdateFailed(listingId, "Failed to fetch liquidity details");
                     }
                 }
             }
@@ -553,24 +542,24 @@ contract CCListingTemplate {
         for (uint256 i = 0; i < updatedCount; i++) {
             uint256 orderId = updatedOrders[i];
             OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = getBuyOrderCore[orderId].makerAddress != address(0);
+            bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
             if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(getListingId, orderId, isBuy);
+                emit OrderUpdatesComplete(listingId, orderId, isBuy);
             } else {
                 string memory reason;
                 if (!status.hasCore) reason = "Missing Core struct";
                 else if (!status.hasPricing) reason = "Missing Pricing struct";
                 else reason = "Missing Amounts struct";
-                emit OrderUpdateIncomplete(getListingId, orderId, reason);
+                emit OrderUpdateIncomplete(listingId, orderId, reason);
             }
         }
         if (balanceUpdated) {
             try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
                 uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
                 uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
-                listingPriceView = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+                listingPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
             } catch {
-                emit UpdateFailed(getListingId, "Failed to update price");
+                emit UpdateFailed(listingId, "Failed to update price");
             }
         }
         globalizeUpdate();
@@ -687,8 +676,8 @@ contract CCListingTemplate {
 
     // Sets listing ID, callable once
     function setListingId(uint256 _listingId) external {
-        require(getListingId == 0, "Listing ID already set");
-        getListingId = _listingId;
+        require(listingId == 0, "Listing ID already set");
+        listingId = _listingId;
     }
 
     // Sets liquidity address, callable once
@@ -751,12 +740,12 @@ contract CCListingTemplate {
         try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
             balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
         } catch {
-            return listingPriceView;
+            return listingPrice;
         }
         try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
             balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
         } catch {
-            return listingPriceView;
+            return listingPrice;
         }
         return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
     }
@@ -782,17 +771,17 @@ contract CCListingTemplate {
 
     // Returns up to maxIterations pending buy order IDs for a maker, starting from step
     function makerPendingBuyOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
-        uint256[] memory allOrders = makerPendingOrdersView[maker];
+        uint256[] memory allOrders = makerPendingOrders[maker];
         uint256 count = 0;
         for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (getBuyOrderCore[allOrders[i]].makerAddress == maker && getBuyOrderCore[allOrders[i]].status == 1) {
+            if (buyOrderCore[allOrders[i]].makerAddress == maker && buyOrderCore[allOrders[i]].status == 1) {
                 count++;
             }
         }
         orderIds = new uint256[](count);
         count = 0;
         for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (getBuyOrderCore[allOrders[i]].makerAddress == maker && getBuyOrderCore[allOrders[i]].status == 1) {
+            if (buyOrderCore[allOrders[i]].makerAddress == maker && buyOrderCore[allOrders[i]].status == 1) {
                 orderIds[count++] = allOrders[i];
             }
         }
@@ -800,17 +789,17 @@ contract CCListingTemplate {
 
     // Returns up to maxIterations pending sell order IDs for a maker, starting from step
     function makerPendingSellOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
-        uint256[] memory allOrders = makerPendingOrdersView[maker];
+        uint256[] memory allOrders = makerPendingOrders[maker];
         uint256 count = 0;
         for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (getSellOrderCore[allOrders[i]].makerAddress == maker && getSellOrderCore[allOrders[i]].status == 1) {
+            if (sellOrderCore[allOrders[i]].makerAddress == maker && sellOrderCore[allOrders[i]].status == 1) {
                 count++;
             }
         }
         orderIds = new uint256[](count);
         count = 0;
         for (uint256 i = step; i < allOrders.length && count < maxIterations; i++) {
-            if (getSellOrderCore[allOrders[i]].makerAddress == maker && getSellOrderCore[allOrders[i]].status == 1) {
+            if (sellOrderCore[allOrders[i]].makerAddress == maker && sellOrderCore[allOrders[i]].status == 1) {
                 orderIds[count++] = allOrders[i];
             }
         }
@@ -822,9 +811,9 @@ contract CCListingTemplate {
         BuyOrderPricing memory pricing,
         BuyOrderAmounts memory amounts
     ) {
-        core = getBuyOrderCore[orderId];
-        pricing = getBuyOrderPricing[orderId];
-        amounts = getBuyOrderAmounts[orderId];
+        core = buyOrderCore[orderId];
+        pricing = buyOrderPricing[orderId];
+        amounts = buyOrderAmounts[orderId];
     }
 
     // Returns full sell order details
@@ -833,14 +822,14 @@ contract CCListingTemplate {
         SellOrderPricing memory pricing,
         SellOrderAmounts memory amounts
     ) {
-        core = getSellOrderCore[orderId];
-        pricing = getSellOrderPricing[orderId];
-        amounts = getSellOrderAmounts[orderId];
+        core = sellOrderCore[orderId];
+        pricing = sellOrderPricing[orderId];
+        amounts = sellOrderAmounts[orderId];
     }
 
     // Returns up to maxIterations order IDs for a maker, starting from step
     function makerOrdersView(address maker, uint256 step, uint256 maxIterations) external view returns (uint256[] memory orderIds) {
-        uint256[] memory allOrders = makerPendingOrdersView[maker];
+        uint256[] memory allOrders = makerPendingOrders[maker];
         uint256 length = allOrders.length;
         if (step >= length) return new uint256[](0);
         uint256 limit = maxIterations < (length - step) ? maxIterations : (length - step);
