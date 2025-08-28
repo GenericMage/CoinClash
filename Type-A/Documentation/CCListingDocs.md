@@ -4,13 +4,12 @@
 The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a token pair, integrating with Uniswap V2 for price discovery via `IERC20.balanceOf`. It manages buy/sell orders, long/short payouts, and normalized (1e18) balances. Volumes are tracked in `_historicalData` during order settlement/cancellation, with auto-generated historical data if not router-provided. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, no inline assembly, and graceful degradation.
 
 ## Version
-- **0.2.22**
+- **0.2.23**
 - **Changes**:
-  - v0.2.22: Added `floorToMidnightView` to expose `_floorToMidnight`, `isSameDayView` to expose `_isSameDay`, and `getDayStartIndex` to expose `_dayStartIndices`. Removed `getMidnightIndicies`.
-  - Modified `update` to determine order state using `amountSent` and `pending` amounts. For `updateType=1,2` and `structId=2`, if `amountSent > 0` or `pending > 0`, updates `filled` (settlement); else updates `pending` (new order). Removed Core struct validation.
-- Moved analytics to `CCDexlytan`, added required views. Removed `getFullBuyOrderDetails` and `getFullSellOrderDetails`.
-  - v0.2.21: Removed `listingPrice` from `update` and `prices`, using `prices` directly for price computation. Renamed `getLastDays` to `getMidnightIndices` with clarified comments. Compatible with `CCUniPartial.sol` (v0.1.0), `CCSettlementPartial.sol` (v0.1.0).
-  - v0.2.20: Modified `update` to always create a `HistoricalData` entry during settlement, preserving day-counting for view functions.
+  - v0.2.23: Modified `update` function to reduce `pending` amount by `filled` amount during settlement for buy/sell orders when `amountSent > 0` or `amounts.pending > 0`. Added underflow protection (`amounts.pending >= u.value`).
+  - v0.2.22: Added `floorToMidnightView`, `isSameDayView`, `getDayStartIndex`. Modified `update` to determine order state using `amountSent` and `pending` amounts. For `updateType=1,2` and `structId=2`, if `amountSent > 0` or `pending > 0`, updates `filled` (settlement); else updates `pending` (new order). Moved analytics to `CCDexlytan`, removed `getFullBuyOrderDetails`, `getFullSellOrderDetails`.
+  - v0.2.21: Removed `listingPrice` from `update` and `prices`, using `prices` directly. Renamed `getLastDays` to `getMidnightIndices`.
+  - v0.2.20: Modified `update` to create `HistoricalData` during settlement.
 - **Compatibility**: Compatible with `CCLiquidityTemplate.sol` (v0.1.3), `CCMainPartial.sol` (v0.0.14), `CCLiquidityPartial.sol` (v0.0.27), `ICCLiquidity.sol` (v0.0.5), `ICCListing.sol` (v0.0.7), `CCOrderRouter.sol` (v0.1.0), `TokenRegistry.sol` (2025-08-04), `CCUniPartial.sol` (v0.1.0), `CCOrderPartial.sol` (v0.1.0), `CCSettlementPartial.sol` (v0.1.0).
 
 ## Interfaces
@@ -35,7 +34,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 - **OrderStatus**: `hasCore`, `hasPricing`, `hasAmounts`.
 
 ## Fee Segregation
-`_balance` (`xBalance`, `yBalance`) tracks tokens from order creation/settlement, excluding `ICCLiquidityTemplate` fees. Buy orders (`updateType=1`, `structId=2`) add `u.value` to `yVolume`; sell orders (`updateType=2`, `structId=2`) add `u.value` to `xVolume`. Settlement: buy orders add `u.amountSent` to `xBalance`, subtract `u.value` from `yBalance`; sell orders subtract `u.value` from `xBalance`, add `u.amountSent` to `yBalance`. Fees via `ICCLiquidityTemplate.liquidityDetail`, stored in `dayStartFee` for `queryYield`.
+`_balance` (`xBalance`, `yBalance`) tracks tokens from order creation/settlement, excluding `ICCLiquidityTemplate` fees. Buy orders (`updateType=1`, `structId=2`) add `u.value` to `yVolume`; sell orders (`updateType=2`, `structId=2`) add `u.value` to `xVolume`. Settlement: buy orders add `u.amountSent` to `xBalance`, subtract `u.value` from `yBalance`; sell orders subtract `u.value` from `xBalance`, add `u.amountSent` to `yBalance`. Fees via `ICCLiquidityTemplate.liquidityDetail`, stored in `dayStartFee`.
 
 ## State Variables
 - `_routers`: `mapping(address => bool)` - Authorized routers.
@@ -130,7 +129,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### update(UpdateType[] calldata updates)
 - **Purpose**: Updates balances, buy/sell orders, or historical data.
-- **Logic**: Requires `_routers[msg.sender]`. Processes updates via `_processBalanceUpdate` (`updateType=0`), `_processBuyOrderUpdate` (`updateType=1`), `_processSellOrderUpdate` (`updateType=2`), or `_processHistoricalUpdate` (`updateType=3`). Updates `_balance`, order mappings (`buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, etc.), `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `_historicalData`, `_dayStartIndices`, `dayStartFee`. For `structId=2`, sets `filled` if `amountSent > 0` or `pending > 0` (settlement), else sets `pending` (new order). Auto-generates `_historicalData` for settlement/cancellation, updates fees via `ICCLiquidityTemplate.liquidityDetail`, calls `globalizeUpdate`.
+- **Logic**: Requires `_routers[msg.sender]`. Processes updates via `_processBalanceUpdate` (`updateType=0`), `_processBuyOrderUpdate` (`updateType=1`), `_processSellOrderUpdate` (`updateType=2`), or `_processHistoricalUpdate` (`updateType=3`). Updates `_balance`, order mappings (`buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, etc.), `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `_historicalData`, `_dayStartIndices`, `dayStartFee`. For `structId=2`, if `amountSent > 0` or `pending > 0` (settlement), sets `filled` and reduces `pending` by `filled` amount with underflow protection; else sets `pending` (new order). Auto-generates `_historicalData` for settlement/cancellation, updates fees via `ICCLiquidityTemplate.liquidityDetail`, calls `globalizeUpdate`.
 - **State Changes**: `_balance`, order mappings, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `_dayStartIndices`, `dayStartFee`, `nextOrderId`.
 - **External Interactions**: `IUniswapV2Pair.token0`, `IERC20.balanceOf`, `ITokenRegistry.initializeTokens`, `ICCLiquidityTemplate.liquidityDetail`, `ICCGlobalizer.globalizeOrders`.
 - **Internal Call Tree**: `_processBalanceUpdate`, `_processBuyOrderUpdate`, `_processSellOrderUpdate`, `_processHistoricalUpdate`, `removePendingOrder`, `_updateRegistry`, `globalizeUpdate`, `_floorToMidnight`, `_isSameDay`.
@@ -144,7 +143,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### prices(uint256) returns (uint256 price)
 - **Purpose**: Computes the current price from Uniswap V2 pair balances.
-- **Logic**: Calls `IERC20.balanceOf(uniswapV2PairView)` for `tokenA` and `tokenB`, normalizes balances, computes `(balanceB * 1e18) / balanceA`. Returns 1 if calls fail.
+- **Logic**: Calls `IERC20.balanceOf(uniswapV2PairView)` for `tokenA` and `tokenB`, normalizes balances, computes `(balanceB * 1e18) / balanceA`.
 - **External Interactions**: `IERC20.balanceOf`.
 - **Internal Call Tree**: `normalize`.
 - **Errors**: Returns 0 or 1 on failure.
@@ -233,21 +232,21 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### floorToMidnightView(uint256 inputTimestamp) returns (uint256 midnight)
 - **Purpose**: Rounds a timestamp to the start of its day (midnight UTC).
-- **Logic**: Computes `(inputTimestamp / 86400) * 86400` to return the midnight timestamp.
+- **Logic**: Computes `(inputTimestamp / 86400) * 86400`.
 - **Internal Call Tree**: None.
-- **Usage**: Used by external contracts (e.g., `CCDexlytan`) to replicate `_floorToMidnight` for time-based queries.
+- **Usage**: Used by external contracts (e.g., `CCDexlytan`) for time-based queries.
 
 #### isSameDayView(uint256 firstTimestamp, uint256 secondTimestamp) returns (bool sameDay)
 - **Purpose**: Checks if two timestamps are in the same calendar day (UTC).
 - **Logic**: Returns `(firstTimestamp / 86400) == (secondTimestamp / 86400)`.
 - **Internal Call Tree**: None.
-- **Usage**: Used by external contracts (e.g., `CCDexlytan`) to replicate `_isSameDay` for fee or time checks.
+- **Usage**: Used by external contracts (e.g., `CCDexlytan`) for fee/time checks.
 
 #### getDayStartIndex(uint256 midnightTimestamp) returns (uint256 index)
 - **Purpose**: Returns the `_historicalData` index for a given midnight timestamp.
 - **Logic**: Returns `_dayStartIndices[midnightTimestamp]`, or 0 if unset.
 - **Internal Call Tree**: None.
-- **Usage**: Used by external contracts (e.g., `CCDexlytan`) to access `_dayStartIndices` for historical data queries.
+- **Usage**: Used by external contracts (e.g., `CCDexlytan`) for historical data queries.
 
 ### Internal Functions
 #### normalize(uint256 amount, uint8 decimals) returns (uint256 normalized)
@@ -258,75 +257,79 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 #### denormalize(uint256 amount, uint8 decimals) returns (uint256 denormalized)
 - **Purpose**: Converts amounts from 1e18 to token decimals.
 - **Logic**: Adjusts `amount` based on `decimals` relative to 18.
-- **Callers**: None in v0.2.24.
+- **Callers**: None in v0.2.23.
 
 #### _isSameDay(uint256 time1, uint256 time2) returns (bool sameDay)
 - **Purpose**: Checks if two timestamps are in the same calendar day.
 - **Logic**: Returns `(time1 / 86400) == (time2 / 86400)`.
-- **Callers**: Called by `update` to check `dayStartFee.timestamp` against `block.timestamp` for fee updates, and by `queryYield` (if not moved to `CCDexlytan`).
+- **Callers**: `update` (for `dayStartFee` vs. `block.timestamp` in fee updates).
 
 #### _floorToMidnight(uint256 timestamp) returns (uint256 midnight)
 - **Purpose**: Rounds a timestamp to midnight UTC.
 - **Logic**: Returns `(timestamp / 86400) * 86400`.
-- **Callers**: Called by `setTokens` to initialize `_historicalData` and `dayStartFee`, `update` to set `_dayStartIndices` and `dayStartFee`, and `queryDurationVolume` (if not moved to `CCDexlytan`) to compute time boundaries.
+- **Callers**: `setTokens` (initializes `_historicalData`, `dayStartFee`), `update` (sets `_dayStartIndices`, `dayStartFee`).
 
 #### _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256 volumeChange)
 - **Purpose**: Returns volume from `_historicalData` at or after `startTime`.
 - **Logic**: Iterates `_historicalData` backward, returns `xVolume` or `yVolume` based on `isA`.
-- **Callers**: None in v0.2.24 (previously used by analytics moved to `CCDexlytan`).
+- **Callers**: None in v0.2.23 (moved to `CCDexlytan`).
 
 #### _updateRegistry(address maker)
 - **Purpose**: Updates `ITokenRegistry` with `tokenA`, `tokenB` balances.
 - **Logic**: Calls `ITokenRegistry.initializeTokens` with `maker` and token array.
-- **Callers**: Called by `update` after order processing.
+- **Callers**: `update` (after order processing).
 - **External Interactions**: `ITokenRegistry.initializeTokens`.
 - **Errors**: Emits `RegistryUpdateFailed`, `ExternalCallFailed`.
 
 #### removePendingOrder(uint256[] storage orders, uint256 orderId)
 - **Purpose**: Removes `orderId` from `_pendingBuyOrders`, `_pendingSellOrders`, or `makerPendingOrders`.
 - **Logic**: Swaps `orderId` with the last element and pops the array.
-- **Callers**: Called by `update` when `status=0` (cancelled).
+- **Callers**: `update` (when `status=0` for cancelled orders).
 
 #### globalizeUpdate()
 - **Purpose**: Calls `ICCGlobalizer.globalizeOrders` for the latest order.
 - **Logic**: Calls `globalizeOrders` with `makerAddress` and `tokenA` or `tokenB`.
-- **Callers**: Called by `update` after processing updates.
+- **Callers**: `update` (after processing updates).
 - **External Interactions**: `ICCGlobalizer.globalizeOrders`.
 - **Errors**: Emits `ExternalCallFailed`, `globalUpdateFailed`.
 
 #### _processBalanceUpdate(UpdateType calldata u)
 - **Purpose**: Updates `_balance` for `updateType=0`.
 - **Logic**: Sets `xBalance` or `yBalance` based on `u.index`.
-- **Callers**: Called by `update`.
+- **Callers**: `update`.
 
 #### _processBuyOrderUpdate(UpdateType calldata u, uint256[] memory updatedOrders, uint256 updatedCount)
 - **Purpose**: Updates buy orders for `updateType=1`.
 - **Logic**: Updates `buyOrderCore`, `buyOrderPricing`, or `buyOrderAmounts`, manages `_pendingBuyOrders`, `makerPendingOrders`, `orderStatus`.
-- **Callers**: Called by `update`.
+- **Callers**: `update`.
 
 #### _processSellOrderUpdate(UpdateType calldata u, uint256[] memory updatedOrders, uint256 updatedCount)
 - **Purpose**: Updates sell orders for `updateType=2`.
 - **Logic**: Updates `sellOrderCore`, `sellOrderPricing`, or `sellOrderAmounts`, manages `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`.
-- **Callers**: Called by `update`.
+- **Callers**: `update`.
 
 #### _processHistoricalUpdate(UpdateType calldata u)
 - **Purpose**: Updates `_historicalData` for `updateType=3`.
 - **Logic**: Adds or updates `_historicalData` with `u.value` as price, current `_balance`, and timestamp.
-- **Callers**: Called by `update`.
+- **Callers**: `update`.
 
 #### uint2str(uint256 _i) returns (string str)
 - **Purpose**: Converts uint to string for error messages.
 - **Logic**: Converts `_i` to a string representation.
-- **Callers**: None in v0.2.24.
+- **Callers**: None in v0.2.23.
 
 ## Parameters and Interactions
-- **Orders** (`UpdateType`): `updateType=0`: updates `_balance`. Buy (`updateType=1`): inputs `tokenB` (`value` as filled), outputs `tokenA` (`amountSent`). Sell (`updateType=2`): inputs `tokenA` (`value` as filled), outputs `tokenB` (`amountSent`). Creation: buy adds to `yVolume`, sell adds to `xVolume`. Settlement/cancellation (`status=0,3`): sets `pending=0`, updates `yVolume` (buy) or `xVolume` (sell). For `structId=2`, sets `filled` if `amountSent > 0` or `pending > 0`, else sets `pending`. Tracked via `orderStatus`, emits `OrderUpdatesComplete`/`OrderUpdateIncomplete`.
+- **Orders** (`UpdateType`): 
+  - `updateType=0`: Updates `_balance` (`xBalance`, `yBalance`).
+  - `updateType=1` (Buy): Inputs `tokenB` (`value` as filled), outputs `tokenA` (`amountSent`). Creation adds to `yVolume`. Settlement (`amountSent > 0` or `pending > 0`) sets `filled`, reduces `pending` by `filled` (with underflow protection), updates `yVolume`. Cancellation (`status=0`) sets `pending=0`, updates `yVolume`.
+  - `updateType=2` (Sell): Inputs `tokenA` (`value` as filled), outputs `tokenB` (`amountSent`). Creation adds to `xVolume`. Settlement (`amountSent > 0` or `pending > 0`) sets `filled`, reduces `pending` by `filled` (with underflow protection), updates `xVolume`. Cancellation (`status=0`) sets `pending=0`, updates `xVolume`.
+  - For `structId=2`, settlement updates `filled`, reduces `pending`, sets `amountSent`; new orders set `pending`. Tracked via `orderStatus`, emits `OrderUpdatesComplete`/`OrderUpdateIncomplete`.
 - **Payouts** (`PayoutUpdate`): Long (`payoutType=0`, `tokenB`), short (`payoutType=1`, `tokenA`) via `ssUpdate`, indexed by `nextOrderId`. Supports `filled`, `amountSent` updates.
 - **Price**: Computed via `IUniswapV2Pair`, `IERC20.balanceOf(uniswapV2PairView)`, using `prices` function.
 - **Registry**: Updated via `_updateRegistry` in `update`.
 - **Globalizer**: Updated via `globalizeUpdate` in `update`.
-- **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` used in `update`, `queryYield`.
+- **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` used in `update`.
 - **Historical Data**: Stored in `_historicalData` via `update` (`updateType=3`) or auto-generated for settlement/cancellation, using Uniswap V2 price via `prices`, carrying forward volumes. `_dayStartIndices` maps midnight timestamps to `_historicalData` indices, accessible via `getDayStartIndex`.
-- **External Calls**: `IERC20.balanceOf`, `IERC20.transfer`, `IERC20.decimals`, `ITokenRegistry.initializeTokens`, `ICCLiquidityTemplate.liquidityDetail`, `ICCGlobalizer.globalizeOrders`, low-level `call`.
+- **External Calls**: `IERC20.balanceOf`, `IERC20.transfer`, `IERC20.decimals`, `ITokenRegistry.initializeTokens`, `ICCLiquidityTemplate.liquidityDetail`, `ICCGlobalizer.globalizeOrders`.
 - **Security**: Router checks, try-catch, explicit casting, no tuple access, relaxed validation, emits `UpdateFailed`.
 - **Optimization**: Normalized amounts, `maxIterations`, auto-generated historical data, helper functions in `update`.

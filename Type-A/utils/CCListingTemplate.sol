@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.22
+// Version: 0.2.23
 // Changes:
+// - v0.2.23: Modified update function to reduce pending amount by filled amount during settlement for buy and sell orders when amountSent > 0 or amounts.pending > 0. Ensured no underflow in pending reduction.
 // - v0.2.22: Modified update function to determine order state using amountSent and pending amounts. Distinguishes order router updates from settlement router updates. Moved analytics to CCDexlytan, added required views.  Removed getFullBuy/SellOrderDetails. 
 
 interface IERC20 {
@@ -515,175 +516,186 @@ contract CCListingTemplate {
         return true;
     }
 
-// Processes updates for balances, orders, and historical data
-function update(UpdateType[] calldata updates) external {
-    // Updates orders, balances, and historical data; only callable by routers
-    require(_routers[msg.sender], "Caller not router");
-    bool balanceUpdated = false;
-    uint256[] memory updatedOrders = new uint256[](updates.length);
-    uint256 updatedCount = 0;
-    uint256 currentMidnight = _floorToMidnight(block.timestamp);
-    for (uint256 i = 0; i < updates.length; i++) {
-        UpdateType memory u = updates[i];
-        if (u.updateType == 0) { // Balance update
-            if (u.index == 0) _balance.xBalance = u.value;
-            else if (u.index == 1) _balance.yBalance = u.value;
-            balanceUpdated = true;
-            emit BalancesUpdated(listingId, _balance.xBalance, _balance.yBalance);
-        } else if (u.updateType == 1) { // Buy order
-            if (updatedOrders.length <= updatedCount) {
-                emit UpdateFailed(listingId, "Order array overflow");
-                continue;
-            }
-            updatedOrders[updatedCount] = u.index;
-            OrderStatus storage status = orderStatus[u.index];
-            if (u.structId == 0) { // Core
-                buyOrderCore[u.index] = BuyOrderCore({
-                    makerAddress: u.addr,
-                    recipientAddress: u.recipient,
-                    status: uint8(u.value)
-                });
-                if (u.value == 1) {
-                    _pendingBuyOrders.push(u.index);
-                    makerPendingOrders[u.addr].push(u.index);
-                } else if (u.value == 0) {
-                    removePendingOrder(_pendingBuyOrders, u.index);
-                    removePendingOrder(makerPendingOrders[u.addr], u.index);
+    // Modified update function to reduce pending amount during settlement
+    function update(UpdateType[] calldata updates) external {
+        // Updates balances, orders, and historical data, only callable by routers
+        require(_routers[msg.sender], "Caller not router");
+        uint256 currentMidnight = (block.timestamp / 86400) * 86400;
+        bool balanceUpdated = false;
+        uint256[] memory updatedOrders = new uint256[](updates.length);
+        uint256 updatedCount = 0;
+
+        for (uint256 i = 0; i < updates.length; i++) {
+            UpdateType memory u = updates[i];
+            if (u.updateType == 0) { // Balance
+                _balance.xBalance = u.index; // xBalance
+                _balance.yBalance = u.value; // yBalance
+                balanceUpdated = true;
+                emit BalancesUpdated(listingId, u.index, u.value);
+            } else if (u.updateType == 1) { // Buy order
+                if (updatedOrders.length <= updatedCount) {
+                    emit UpdateFailed(listingId, "Order array overflow");
+                    continue;
                 }
-                status.hasCore = true;
-                emit OrderUpdated(listingId, u.index, true, uint8(u.value));
-            } else if (u.structId == 1) { // Pricing
-                buyOrderPricing[u.index] = BuyOrderPricing({
-                    maxPrice: u.maxPrice,
-                    minPrice: u.minPrice
-                });
-                status.hasPricing = true;
-            } else if (u.structId == 2) { // Amounts
-                BuyOrderAmounts storage amounts = buyOrderAmounts[u.index];
-                if (u.amountSent > 0 || amounts.pending > 0) { // Settlement
-                    amounts.filled = u.value;
-                } else { // New order
-                    amounts.pending = u.value;
+                updatedOrders[updatedCount] = u.index;
+                OrderStatus storage status = orderStatus[u.index];
+                if (u.structId == 0) { // Core
+                    buyOrderCore[u.index] = BuyOrderCore({
+                        makerAddress: u.addr,
+                        recipientAddress: u.recipient,
+                        status: uint8(u.value)
+                    });
+                    if (u.value == 1) {
+                        _pendingBuyOrders.push(u.index);
+                        makerPendingOrders[u.addr].push(u.index);
+                    } else if (u.value == 0) {
+                        removePendingOrder(_pendingBuyOrders, u.index);
+                        removePendingOrder(makerPendingOrders[u.addr], u.index);
+                    }
+                    status.hasCore = true;
+                    emit OrderUpdated(listingId, u.index, true, uint8(u.value));
+                } else if (u.structId == 1) { // Pricing
+                    buyOrderPricing[u.index] = BuyOrderPricing({
+                        maxPrice: u.maxPrice,
+                        minPrice: u.minPrice
+                    });
+                    status.hasPricing = true;
+                } else if (u.structId == 2) { // Amounts
+                    BuyOrderAmounts storage amounts = buyOrderAmounts[u.index];
+                    if (u.amountSent > 0 || amounts.pending > 0) { // Settlement
+                        amounts.filled = u.value;
+                        if (amounts.pending >= u.value) { // Prevent underflow
+                            amounts.pending -= u.value; // Reduce pending by filled amount
+                        } else {
+                            amounts.pending = 0; // Set to 0 if filled exceeds pending
+                        }
+                    } else { // New order
+                        amounts.pending = u.value;
+                    }
+                    if (u.amountSent > 0) amounts.amountSent = u.amountSent;
+                    status.hasAmounts = true;
+                } else {
+                    emit UpdateFailed(listingId, "Invalid buy order struct ID");
+                    continue;
                 }
-                if (u.amountSent > 0) amounts.amountSent = u.amountSent;
-                status.hasAmounts = true;
+                updatedCount++;
+            } else if (u.updateType == 2) { // Sell order
+                if (updatedOrders.length <= updatedCount) {
+                    emit UpdateFailed(listingId, "Order array overflow");
+                    continue;
+                }
+                updatedOrders[updatedCount] = u.index;
+                OrderStatus storage status = orderStatus[u.index];
+                if (u.structId == 0) { // Core
+                    sellOrderCore[u.index] = SellOrderCore({
+                        makerAddress: u.addr,
+                        recipientAddress: u.recipient,
+                        status: uint8(u.value)
+                    });
+                    if (u.value == 1) {
+                        _pendingSellOrders.push(u.index);
+                        makerPendingOrders[u.addr].push(u.index);
+                    } else if (u.value == 0) {
+                        removePendingOrder(_pendingSellOrders, u.index);
+                        removePendingOrder(makerPendingOrders[u.addr], u.index);
+                    }
+                    status.hasCore = true;
+                    emit OrderUpdated(listingId, u.index, false, uint8(u.value));
+                } else if (u.structId == 1) { // Pricing
+                    sellOrderPricing[u.index] = SellOrderPricing({
+                        maxPrice: u.maxPrice,
+                        minPrice: u.minPrice
+                    });
+                    status.hasPricing = true;
+                } else if (u.structId == 2) { // Amounts
+                    SellOrderAmounts storage amounts = sellOrderAmounts[u.index];
+                    if (u.amountSent > 0 || amounts.pending > 0) { // Settlement
+                        amounts.filled = u.value;
+                        if (amounts.pending >= u.value) { // Prevent underflow
+                            amounts.pending -= u.value; // Reduce pending by filled amount
+                        } else {
+                            amounts.pending = 0; // Set to 0 if filled exceeds pending
+                        }
+                    } else { // New order
+                        amounts.pending = u.value;
+                    }
+                    if (u.amountSent > 0) amounts.amountSent = u.amountSent;
+                    status.hasAmounts = true;
+                } else {
+                    emit UpdateFailed(listingId, "Invalid sell order struct ID");
+                    continue;
+                }
+                updatedCount++;
+            } else if (u.updateType == 3) { // Historical
+                if (_historicalData.length <= u.index) {
+                    _historicalData.push(HistoricalData({
+                        price: u.value,
+                        xBalance: _balance.xBalance,
+                        yBalance: _balance.yBalance,
+                        xVolume: 0,
+                        yVolume: 0,
+                        timestamp: u.value > 0 ? block.timestamp : _floorToMidnight(block.timestamp)
+                    }));
+                } else {
+                    _historicalData[u.index].price = u.value;
+                    _historicalData[u.index].xBalance = _balance.xBalance;
+                    _historicalData[u.index].yBalance = _balance.yBalance;
+                    _historicalData[u.index].timestamp = u.value > 0 ? block.timestamp : _floorToMidnight(block.timestamp);
+                }
+                if (_isSameDay(_historicalData[u.index].timestamp, currentMidnight)) {
+                    _dayStartIndices[currentMidnight] = u.index;
+                }
+                balanceUpdated = true;
             } else {
-                emit UpdateFailed(listingId, "Invalid buy order struct ID");
+                emit UpdateFailed(listingId, "Invalid update type");
                 continue;
             }
-            updatedCount++;
-        } else if (u.updateType == 2) { // Sell order
-            if (updatedOrders.length <= updatedCount) {
-                emit UpdateFailed(listingId, "Order array overflow");
-                continue;
+        }
+        if (_historicalData.length > 0 && !_isSameDay(dayStartFee.timestamp, currentMidnight)) {
+            dayStartFee = DayStartFee({
+                dayStartXFeesAcc: 0,
+                dayStartYFeesAcc: 0,
+                timestamp: currentMidnight
+            });
+            try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
+                uint256 /* xLiq */,
+                uint256 /* yLiq */,
+                uint256,
+                uint256,
+                uint256 xFees,
+                uint256 yFees
+            ) {
+                dayStartFee.dayStartXFeesAcc = xFees;
+                dayStartFee.dayStartYFeesAcc = yFees;
+            } catch {
+                emit UpdateFailed(listingId, "Failed to fetch liquidity details");
             }
-            updatedOrders[updatedCount] = u.index;
-            OrderStatus storage status = orderStatus[u.index];
-            if (u.structId == 0) { // Core
-                sellOrderCore[u.index] = SellOrderCore({
-                    makerAddress: u.addr,
-                    recipientAddress: u.recipient,
-                    status: uint8(u.value)
-                });
-                if (u.value == 1) {
-                    _pendingSellOrders.push(u.index);
-                    makerPendingOrders[u.addr].push(u.index);
-                } else if (u.value == 0) {
-                    removePendingOrder(_pendingSellOrders, u.index);
-                    removePendingOrder(makerPendingOrders[u.addr], u.index);
-                }
-                status.hasCore = true;
-                emit OrderUpdated(listingId, u.index, false, uint8(u.value));
-            } else if (u.structId == 1) { // Pricing
-                sellOrderPricing[u.index] = SellOrderPricing({
-                    maxPrice: u.maxPrice,
-                    minPrice: u.minPrice
-                });
-                status.hasPricing = true;
-            } else if (u.structId == 2) { // Amounts
-                SellOrderAmounts storage amounts = sellOrderAmounts[u.index];
-                if (u.amountSent > 0 || amounts.pending > 0) { // Settlement
-                    amounts.filled = u.value;
-                } else { // New order
-                    amounts.pending = u.value;
-                }
-                if (u.amountSent > 0) amounts.amountSent = u.amountSent;
-                status.hasAmounts = true;
+        }
+        for (uint256 i = 0; i < updatedCount; i++) {
+            uint256 orderId = updatedOrders[i];
+            OrderStatus storage status = orderStatus[orderId];
+            bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
+            if (status.hasCore && status.hasPricing && status.hasAmounts) {
+                emit OrderUpdatesComplete(listingId, orderId, isBuy);
             } else {
-                emit UpdateFailed(listingId, "Invalid sell order struct ID");
-                continue;
+                string memory reason;
+                if (!status.hasCore) reason = "Missing Core struct";
+                else if (!status.hasPricing) reason = "Missing Pricing struct";
+                else reason = "Missing Amounts struct";
+                emit OrderUpdateIncomplete(listingId, orderId, reason);
             }
-            updatedCount++;
-        } else if (u.updateType == 3) { // Historical
-            if (_historicalData.length <= u.index) {
-                _historicalData.push(HistoricalData({
-                    price: u.value,
-                    xBalance: _balance.xBalance,
-                    yBalance: _balance.yBalance,
-                    xVolume: 0,
-                    yVolume: 0,
-                    timestamp: u.value > 0 ? block.timestamp : _floorToMidnight(block.timestamp)
-                }));
-            } else {
-                _historicalData[u.index].price = u.value;
-                _historicalData[u.index].xBalance = _balance.xBalance;
-                _historicalData[u.index].yBalance = _balance.yBalance;
-                _historicalData[u.index].timestamp = u.value > 0 ? block.timestamp : _floorToMidnight(block.timestamp);
+        }
+        if (balanceUpdated) {
+            try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
+                uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
+                uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
+                // Price updated via prices function
+            } catch {
+                emit UpdateFailed(listingId, "Failed to update price");
             }
-            if (_isSameDay(_historicalData[u.index].timestamp, currentMidnight)) {
-                _dayStartIndices[currentMidnight] = u.index;
-            }
-            balanceUpdated = true;
-        } else {
-            emit UpdateFailed(listingId, "Invalid update type");
-            continue;
         }
+        globalizeUpdate();
     }
-    if (_historicalData.length > 0 && !_isSameDay(dayStartFee.timestamp, currentMidnight)) {
-        dayStartFee = DayStartFee({
-            dayStartXFeesAcc: 0,
-            dayStartYFeesAcc: 0,
-            timestamp: currentMidnight
-        });
-        try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
-            uint256 /* xLiq */,
-            uint256 /* yLiq */,
-            uint256,
-            uint256,
-            uint256 xFees,
-            uint256 yFees
-        ) {
-            dayStartFee.dayStartXFeesAcc = xFees;
-            dayStartFee.dayStartYFeesAcc = yFees;
-        } catch {
-            emit UpdateFailed(listingId, "Failed to fetch liquidity details");
-        }
-    }
-    for (uint256 i = 0; i < updatedCount; i++) {
-        uint256 orderId = updatedOrders[i];
-        OrderStatus storage status = orderStatus[orderId];
-        bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
-        if (status.hasCore && status.hasPricing && status.hasAmounts) {
-            emit OrderUpdatesComplete(listingId, orderId, isBuy);
-        } else {
-            string memory reason;
-            if (!status.hasCore) reason = "Missing Core struct";
-            else if (!status.hasPricing) reason = "Missing Pricing struct";
-            else reason = "Missing Amounts struct";
-            emit OrderUpdateIncomplete(listingId, orderId, reason);
-        }
-    }
-    if (balanceUpdated) {
-        try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
-            uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
-            uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
-            // Price updated via prices function
-        } catch {
-            emit UpdateFailed(listingId, "Failed to update price");
-        }
-    }
-    globalizeUpdate();
-}
 
     // Sets globalizer contract address, callable once
     function setGlobalizerAddress(address globalizerAddress_) external {
