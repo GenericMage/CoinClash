@@ -4,15 +4,14 @@
 The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a token pair, integrating with Uniswap V2 for price discovery via `IERC20.balanceOf`. It manages buy/sell orders, long/short payouts, and normalized (1e18) balances. Volumes are tracked in `_historicalData` during order settlement/cancellation, with auto-generated historical data if not router-provided. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, no inline assembly, and graceful degradation.
 
 ## Version
-- **0.2.17**
+- **0.2.20**
 - **Changes**:
-  - v0.2.17: Relaxed maker address check in `update`, refactored into helper functions (`_processBalanceUpdate`, `_processBuyOrderUpdate`, `_processSellOrderUpdate`, `_processHistoricalUpdate`) to reduce complexity.
-  - v0.2.16: Adjusted `update` to bypass restrictive maker checks in `globalizeUpdate`.
-  - v0.2.14: Updated `PayoutUpdate` struct with `filled`, `amountSent`. Modified `ssUpdate` to initialize `filled=0` in `LongPayoutStruct`, `ShortPayoutStruct`, and support `filled`, `amountSent` updates. Ensured router-only access, emitted events.
-  - v0.2.13: Renamed state variables/mappings/arrays, removing "View"/"Get".
-  - v0.2.12: Restored `pendingBuyOrdersView`, `pendingSellOrdersView` per `ICCListing`. Privatized arrays, simplified `globalizeUpdate` to check only `globalizerAddress`.
+  - v0.2.20: Modified `update` to always create a `HistoricalData` entry during settlement (buy/sell order updates), preserving day-counting for view functions. Compatible with `CCUniPartial.sol` (v0.1.0), `CCSettlementPartial.sol` (v0.1.0).
+  - v0.2.19: Modified `_processBuyOrderUpdate` and `_processSellOrderUpdate` to set `amounts.pending = 0` when `Core` update (`structId == 0`) sets `status` to 0 (cancelled) or 3 (filled), ensuring pending is zeroed for settled or cancelled orders despite Uniswap 0.3% fee. Compatible with `CCUniPartial.sol` (v0.1.0), `CCSettlementPartial.sol` (v0.1.0).
+  - v0.2.18: Fixed `_processBuyOrderUpdate` and `_processSellOrderUpdate` to handle `u.value` as filled amount, recalculating `pending` as `originalTotal - filled`. Ensured compatibility with `CCUniPartial.sol` (v0.0.22), `CCSettlementPartial.sol` (v0.1.0).
 
-- **Compatibility**: Compatible with `CCLiquidityTemplate.sol` (v0.1.3), `CCMainPartial.sol` (v0.0.14), `CCLiquidityPartial.sol` (v0.0.27), `ICCLiquidity.sol` (v0.0.5), `ICCListing.sol` (v0.0.7), `CCOrderRouter.sol` (v0.1.0), `TokenRegistry.sol` (2025-08-04), `CCUniPartial.sol` (v0.1.0), `CCOrderPartial.sol` (v0.1.0).
+
+- **Compatibility**: Compatible with `CCLiquidityTemplate.sol` (v0.1.3), `CCMainPartial.sol` (v0.0.14), `CCLiquidityPartial.sol` (v0.0.27), `ICCLiquidity.sol` (v0.0.5), `ICCListing.sol` (v0.0.7), `CCOrderRouter.sol` (v0.1.0), `TokenRegistry.sol` (2025-08-04), `CCUniPartial.sol` (v0.1.0), `CCOrderPartial.sol` (v0.1.0), `CCSettlementPartial.sol` (v0.1.0).
 
 ## Interfaces
 - **IERC20**: Defines `decimals()`, `transfer(address, uint256)`, `balanceOf(address)`.
@@ -37,7 +36,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 - **OrderStatus**: `hasCore`, `hasPricing`, `hasAmounts`.
 
 ## Fee Segregation
-`_balance` (`xBalance`, `yBalance`) tracks tokens from order creation/settlement, excluding `ICCLiquidityTemplate` fees. Buy orders (`updateType=1`, `structId=2`) add `u.value` to `yBalance`; sell orders (`updateType=2`, `structId=2`) add `u.value` to `xBalance`. Settlement: buy orders add `u.amountSent` to `xBalance`, subtract `u.value` from `yBalance`; sell orders subtract `u.value` from `xBalance`, add `u.amountSent` to `yBalance`. Fees via `ICCLiquidityTemplate.liquidityDetail`, stored in `dayStartFee` for `queryYield`.
+`_balance` (`xBalance`, `yBalance`) tracks tokens from order creation/settlement, excluding `ICCLiquidityTemplate` fees. Buy orders (`updateType=1`, `structId=2`) add `u.value` to `yVolume`; sell orders (`updateType=2`, `structId=2`) add `u.value` to `xVolume`. Settlement: buy orders add `u.amountSent` to `xBalance`, subtract `u.value` from `yBalance`; sell orders subtract `u.value` from `xBalance`, add `u.amountSent` to `yBalance`. Fees via `ICCLiquidityTemplate.liquidityDetail`, stored in `dayStartFee` for `queryYield`.
 
 ## State Variables
 - `_routers`: `mapping(address => bool)` - Authorized routers.
@@ -125,7 +124,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### update(UpdateType[] calldata updates)
 - **Purpose**: Updates balances, orders, historical data.
-- **Logic**: Uses `_processBalanceUpdate`, `_processBuyOrderUpdate`, `_processSellOrderUpdate`, `_processHistoricalUpdate` for `updateType=0,1,2,3`. Updates `_balance`, orders, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `dayStartFee`, `_dayStartIndices`. Auto-generates `_historicalData`, updates `listingPrice`, calls `globalizeUpdate`.
+- **Logic**: Uses `_processBalanceUpdate`, `_processBuyOrderUpdate`, `_processSellOrderUpdate`, `_processHistoricalUpdate` for `updateType=0,1,2,3`. Updates `_balance`, orders, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `dayStartFee`, `_dayStartIndices`. Auto-generates `_historicalData` for settlement/cancellation, updates `listingPrice`, calls `globalizeUpdate`.
 - **State Changes**: `_balance`, order mappings, arrays, `_historicalData`, `_dayStartIndices`, `dayStartFee`, `listingPrice`, `nextOrderId`, `orderStatus`.
 - **External Interactions**: `IUniswapV2Pair.token0`, `IERC20.balanceOf`, `ITokenRegistry.initializeTokens`, `ICCLiquidityTemplate.liquidityDetail`, `ICCGlobalizer.globalizeOrders`.
 - **Internal Call Tree**: `_processBalanceUpdate`, `_processBuyOrderUpdate`, `_processSellOrderUpdate`, `_processHistoricalUpdate`, `_updateRegistry`, `globalizeUpdate`, `removePendingOrder`, `normalize`, `_floorToMidnight`, `_isSameDay`.
@@ -205,9 +204,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 - **Purpose**: Returns buy order pricing.
 - **Logic**: Returns `buyOrderPricing[orderId]`.
 
-#### getBuyOrderAmounts(uint256 orderId) returns (uint256 pending
-
-, uint256 filled, uint256 amountSent)
+#### getBuyOrderAmounts(uint256 orderId) returns (uint256 pending, uint256 filled, uint256 amountSent)
 - **Purpose**: Returns buy order amounts.
 - **Logic**: Returns `buyOrderAmounts[orderId]`.
 
@@ -267,7 +264,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### denormalize(uint256 amount, uint8 decimals) returns (uint256)
 - **Purpose**: Converts from 1e18 to token decimals.
-- **Callers**: None in v0.2.17.
+- **Callers**: None in v0.2.20.
 
 #### _isSameDay(uint256 time1, uint256 time2) returns (bool)
 - **Purpose**: Checks same-day timestamps.
@@ -279,7 +276,7 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256)
 - **Purpose**: Returns volume from `_historicalData` at/after `startTime`.
-- **Callers**: None in v0.2.17.
+- **Callers**: None in v0.2.20.
 
 #### _updateRegistry(address maker)
 - **Purpose**: Updates registry with `tokenA`, `tokenB` balances.
@@ -301,12 +298,12 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 - **Purpose**: Updates `_balance` for `updateType=0`.
 - **Callers**: `update`.
 
-#### _processBuyOrderUpdate(UpdateType calldata u, bool hasBalanceUpdate)
-- **Purpose**: Updates buy orders for `updateType=1`.
+#### _processBuyOrderUpdate(UpdateType calldata u, uint256[] memory updatedOrders, uint256 updatedCount)
+- **Purpose**: Updates buy orders for `updateType=1`, sets `pending=0` for `status=0,3`, adds `u.value` to `yVolume`.
 - **Callers**: `update`.
 
-#### _processSellOrderUpdate(UpdateType calldata u, bool hasBalanceUpdate)
-- **Purpose**: Updates sell orders for `updateType=2`.
+#### _processSellOrderUpdate(UpdateType calldata u, uint256[] memory updatedOrders, uint256 updatedCount)
+- **Purpose**: Updates sell orders for `updateType=2`, sets `pending=0` for `status=0,3`, adds `u.value` to `xVolume`.
 - **Callers**: `update`.
 
 #### _processHistoricalUpdate(UpdateType calldata u)
@@ -315,16 +312,16 @@ The `CCListingTemplate` contract (^0.8.2) enables decentralized trading for a to
 
 #### uint2str(uint256 _i) returns (string)
 - **Purpose**: Converts uint to string for errors.
-- **Callers**: None in v0.2.17.
+- **Callers**: None in v0.2.20.
 
 ## Parameters and Interactions
-- **Orders** (`UpdateType`): `updateType=0`: updates `_balance`. Buy (`updateType=1`): inputs `tokenB` (`value`), outputs `tokenA` (`amountSent`). Sell (`updateType=2`): inputs `tokenA` (`value`), outputs `tokenB` (`amountSent`). Creation: buy adds `value` to `yBalance`, sell adds `value` to `xBalance`. Settlement: buy adds `amountSent` to `xBalance`, subtracts `value` from `yBalance`; sell subtracts `value` from `xBalance`, adds `amountSent` to `yBalance`. Cancellation (`status=0`) or settlement (`status=3`): buy updates `yVolume += pending`, sell updates `xVolume += pending`. Tracked via `orderStatus`, emits `OrderUpdatesComplete`/`OrderUpdateIncomplete`.
+- **Orders** (`UpdateType`): `updateType=0`: updates `_balance`. Buy (`updateType=1`): inputs `tokenB` (`value` as filled), outputs `tokenA` (`amountSent`). Sell (`updateType=2`): inputs `tokenA` (`value` as filled), outputs `tokenB` (`amountSent`). Creation: buy adds to `yVolume`, sell adds to `xVolume`. Settlement/cancellation (`status=0,3`): sets `pending=0`, updates `yVolume` (buy) or `xVolume` (sell). Tracked via `orderStatus`, emits `OrderUpdatesComplete`/`OrderUpdateIncomplete`.
 - **Payouts** (`PayoutUpdate`): Long (`payoutType=0`, `tokenB`), short (`payoutType=1`, `tokenA`) via `ssUpdate`, indexed by `nextOrderId`. Supports `filled`, `amountSent` updates.
 - **Price**: Computed via `IUniswapV2Pair`, `IERC20.balanceOf(uniswapV2PairView)`, stored in `listingPrice`.
 - **Registry**: Updated via `_updateRegistry` in `update`.
 - **Globalizer**: Updated via `globalizeUpdate` in `update`.
 - **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` used in `update`, `queryYield`.
-- **Historical Data**: Stored in `_historicalData` via `update` (`updateType=3`) or auto-generated if not same-day, using Uniswap V2 price, carrying forward volumes. Updated on order cancellation/settlement.
+- **Historical Data**: Stored in `_historicalData` via `update` (`updateType=3`) or auto-generated for settlement/cancellation, using Uniswap V2 price, carrying forward volumes.
 - **External Calls**: `IERC20.balanceOf`, `IERC20.transfer`, `IERC20.decimals`, `ITokenRegistry.initializeTokens`, `ICCLiquidityTemplate.liquidityDetail`, `ICCGlobalizer.globalizeOrders`, low-level `call`.
-- **Security**: Router checks, try-catch, explicit casting, no tuple access, relaxed validation, emits `UpdateFailed` for invalid updates.
+- **Security**: Router checks, try-catch, explicit casting, no tuple access, relaxed validation, emits `UpdateFailed`.
 - **Optimization**: Normalized amounts, `maxIterations`, auto-generated historical data, helper functions in `update`.

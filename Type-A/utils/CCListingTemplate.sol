@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.17
+// Version: 0.2.20
 // Changes:
-// - v0.2.17: Relaxed maker address check in update function, refactored into helper functions (_processBalanceUpdate, _processBuyOrderUpdate, _processSellOrderUpdate, _processHistoricalUpdate) to reduce complexity. 
-// - v0.2.16: Adjusted update function to bypass restrictive maker address checks in globalizeUpdate.
-// - v0.2.14: Updated PayoutUpdate struct to include filled and amountSent fields. Modified ssUpdate to initialize filled=0 in LongPayoutStruct and ShortPayoutStruct, and support updates to filled and amountSent for settlement. Ensured router-only access and emitted events for updates.
-// - v0.2.13: Renamed state variables, mappings, and arrays by removing "View" or "Get" from names.
-// - v0.2.12: Restored explicit view functions pendingBuyOrdersView() and pendingSellOrdersView() to match ICCListing interface in CCMainPartial.sol. Renamed public arrays and added private visibility. Simplified globalizeUpdate() to only check for valid globalizerAddress, removing getNextOrderId check to allow updates before orderId is incremented.
+// - v0.2.20: Modified update function to always create a HistoricalData entry during settlement (buy/sell order updates) to ensure historical data is populated, while preserving day-counting behavior for view functions. Compatible with CCUniPartial.sol (v0.1.0), CCSettlementPartial.sol (v0.1.0).
+// - v0.2.19: Modified _processBuyOrderUpdate and _processSellOrderUpdate to set amounts.pending = 0 when Core update (structId == 0) sets status to 0 (cancelled) or 3 (filled), ensuring pending is zeroed for settled or cancelled orders despite Uniswap 0.3% fee impacting filled amount. Compatible with CCUniPartial.sol (v0.1.0), CCSettlementPartial.sol (v0.1.0).
+// - v0.2.18: Fixed _processBuyOrderUpdate and _processSellOrderUpdate to handle u.value as filled amount, recalculating pending as originalTotal - filled. Ensured compatibility with CCUniPartial.sol (v0.0.22) and CCSettlementPartial.sol (v0.1.0).
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -424,6 +422,7 @@ contract CCListingTemplate {
 
     // Processes buy order updates
     function _processBuyOrderUpdate(UpdateType memory u, uint256[] memory updatedOrders, uint256 updatedCount) internal returns (uint256) {
+        // Handles buy order updates for core, pricing, or amounts
         uint256 orderId = u.index;
         if (u.structId == 0) {
             buyOrderCore[orderId] = BuyOrderCore({
@@ -436,6 +435,7 @@ contract CCListingTemplate {
                 _pendingBuyOrders.push(orderId);
                 makerPendingOrders[u.addr].push(orderId);
             } else if (u.value == 0 || u.value == 3) {
+                buyOrderAmounts[orderId].pending = 0; // Zero pending for cancelled or filled orders
                 removePendingOrder(_pendingBuyOrders, orderId);
                 removePendingOrder(makerPendingOrders[u.addr], orderId);
             }
@@ -448,11 +448,12 @@ contract CCListingTemplate {
             orderStatus[orderId].hasPricing = true;
         } else if (u.structId == 2) {
             BuyOrderAmounts storage amounts = buyOrderAmounts[orderId];
-            amounts.pending = u.value;
+            amounts.filled += u.value;  // Add to existing filled amount
             amounts.amountSent = u.amountSent;
-            if (u.value == 0 && buyOrderCore[orderId].status != 0) {
-                amounts.filled += amounts.pending;
-                _historicalData[_historicalData.length - 1].yVolume += amounts.pending;
+            uint256 originalTotal = amounts.pending + amounts.filled;
+            amounts.pending = originalTotal > amounts.filled ? originalTotal - amounts.filled : 0;
+            if (amounts.filled > 0) {
+                _historicalData[_historicalData.length - 1].yVolume += u.value;
             }
             orderStatus[orderId].hasAmounts = true;
         } else {
@@ -468,6 +469,7 @@ contract CCListingTemplate {
 
     // Processes sell order updates
     function _processSellOrderUpdate(UpdateType memory u, uint256[] memory updatedOrders, uint256 updatedCount) internal returns (uint256) {
+        // Handles sell order updates for core, pricing, or amounts
         uint256 orderId = u.index;
         if (u.structId == 0) {
             sellOrderCore[orderId] = SellOrderCore({
@@ -480,6 +482,7 @@ contract CCListingTemplate {
                 _pendingSellOrders.push(orderId);
                 makerPendingOrders[u.addr].push(orderId);
             } else if (u.value == 0 || u.value == 3) {
+                sellOrderAmounts[orderId].pending = 0; // Zero pending for cancelled or filled orders
                 removePendingOrder(_pendingSellOrders, orderId);
                 removePendingOrder(makerPendingOrders[u.addr], orderId);
             }
@@ -492,11 +495,12 @@ contract CCListingTemplate {
             orderStatus[orderId].hasPricing = true;
         } else if (u.structId == 2) {
             SellOrderAmounts storage amounts = sellOrderAmounts[orderId];
-            amounts.pending = u.value;
+            amounts.filled += u.value;  // Add to existing filled amount
             amounts.amountSent = u.amountSent;
-            if (u.value == 0 && sellOrderCore[orderId].status != 0) {
-                amounts.filled += amounts.pending;
-                _historicalData[_historicalData.length - 1].xVolume += amounts.pending;
+            uint256 originalTotal = amounts.pending + amounts.filled;
+            amounts.pending = originalTotal > amounts.filled ? originalTotal - amounts.filled : 0;
+            if (amounts.filled > 0) {
+                _historicalData[_historicalData.length - 1].xVolume += u.value;
             }
             orderStatus[orderId].hasAmounts = true;
         } else {
@@ -527,108 +531,110 @@ contract CCListingTemplate {
         return true;
     }
 
-    // Processes updates for balances, orders, and historical data
-    function update(UpdateType[] calldata updates) external {
-        require(_routers[msg.sender], "Caller not router");
-        bool balanceUpdated = false;
-        bool historicalUpdated = false;
-        uint256[] memory updatedOrders = new uint256[](updates.length);
-        uint256 updatedCount = 0;
+// Processes updates for balances, orders, and historical data
+function update(UpdateType[] calldata updates) external {
+    require(_routers[msg.sender], "Caller not router");
+    bool balanceUpdated = false;
+    bool historicalUpdated = false;
+    bool orderUpdated = false;
+    uint256[] memory updatedOrders = new uint256[](updates.length);
+    uint256 updatedCount = 0;
 
-        for (uint256 i = 0; i < updates.length; i++) {
-            UpdateType memory u = updates[i];
-            if (u.updateType > 3) {
-                emit UpdateFailed(listingId, "Invalid update type");
-                continue;
-            }
-            if (u.addr != address(0)) {
-                _updateRegistry(u.addr);
-            }
-            if (u.updateType == 0) {
-                balanceUpdated = balanceUpdated || _processBalanceUpdate(u);
-            } else if (u.updateType == 1) {
-                updatedCount = _processBuyOrderUpdate(u, updatedOrders, updatedCount);
-            } else if (u.updateType == 2) {
-                updatedCount = _processSellOrderUpdate(u, updatedOrders, updatedCount);
-            } else if (u.updateType == 3) {
-                historicalUpdated = _processHistoricalUpdate(u);
-            }
+    for (uint256 i = 0; i < updates.length; i++) {
+        UpdateType memory u = updates[i];
+        if (u.updateType > 3) {
+            emit UpdateFailed(listingId, "Invalid update type");
+            continue;
         }
-
-        if (!historicalUpdated && _historicalData.length > 0) {
-            uint256 midnight = _floorToMidnight(block.timestamp);
-            HistoricalData storage latest = _historicalData[_historicalData.length - 1];
-            if (!_isSameDay(latest.timestamp, block.timestamp)) {
-                uint256 currentPrice;
-                try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
-                    uint256 balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
-                    try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
-                        uint256 balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
-                        currentPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
-                    } catch {
-                        currentPrice = listingPrice;
-                    }
-                } catch {
-                    currentPrice = listingPrice;
-                }
-                _historicalData.push(HistoricalData({
-                    price: currentPrice,
-                    xBalance: _balance.xBalance,
-                    yBalance: _balance.yBalance,
-                    xVolume: latest.xVolume,
-                    yVolume: latest.yVolume,
-                    timestamp: block.timestamp
-                }));
-                if (_dayStartIndices[midnight] == 0) {
-                    _dayStartIndices[midnight] = _historicalData.length - 1;
-                    dayStartFee = DayStartFee({
-                        dayStartXFeesAcc: 0,
-                        dayStartYFeesAcc: 0,
-                        timestamp: midnight
-                    });
-                    try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
-                        uint256 /* xLiq */,
-                        uint256 /* yLiq */,
-                        uint256,
-                        uint256,
-                        uint256 xFees,
-                        uint256 yFees
-                    ) {
-                        dayStartFee.dayStartXFeesAcc = xFees;
-                        dayStartFee.dayStartYFeesAcc = yFees;
-                    } catch {
-                        emit UpdateFailed(listingId, "Failed to fetch liquidity details");
-                    }
-                }
-            }
+        if (u.addr != address(0)) {
+            _updateRegistry(u.addr);
         }
-
-        for (uint256 i = 0; i < updatedCount; i++) {
-            uint256 orderId = updatedOrders[i];
-            OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
-            if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(listingId, orderId, isBuy);
-            } else {
-                string memory reason;
-                if (!status.hasCore) reason = "Missing Core struct";
-                else if (!status.hasPricing) reason = "Missing Pricing struct";
-                else reason = "Missing Amounts struct";
-                emit OrderUpdateIncomplete(listingId, orderId, reason);
-            }
+        if (u.updateType == 0) {
+            balanceUpdated = balanceUpdated || _processBalanceUpdate(u);
+        } else if (u.updateType == 1) {
+            updatedCount = _processBuyOrderUpdate(u, updatedOrders, updatedCount);
+            orderUpdated = true;
+        } else if (u.updateType == 2) {
+            updatedCount = _processSellOrderUpdate(u, updatedOrders, updatedCount);
+            orderUpdated = true;
+        } else if (u.updateType == 3) {
+            historicalUpdated = _processHistoricalUpdate(u);
         }
-
-        if (balanceUpdated) {
-            try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
-                uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
-                uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
-                listingPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
-            } catch {
-                emit UpdateFailed(listingId, "Failed to update price");
-            }
-        }
-        globalizeUpdate();
     }
+
+    if (!historicalUpdated && (_historicalData.length > 0 || orderUpdated)) {
+        uint256 midnight = _floorToMidnight(block.timestamp);
+        uint256 currentPrice;
+        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+            uint256 balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
+            try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+                uint256 balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
+                currentPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+            } catch {
+                currentPrice = listingPrice;
+            }
+        } catch {
+            currentPrice = listingPrice;
+        }
+        uint256 xVolume = _historicalData.length > 0 ? _historicalData[_historicalData.length - 1].xVolume : 0;
+        uint256 yVolume = _historicalData.length > 0 ? _historicalData[_historicalData.length - 1].yVolume : 0;
+        _historicalData.push(HistoricalData({
+            price: currentPrice,
+            xBalance: _balance.xBalance,
+            yBalance: _balance.yBalance,
+            xVolume: xVolume,
+            yVolume: yVolume,
+            timestamp: block.timestamp
+        }));
+        if (_dayStartIndices[midnight] == 0) {
+            _dayStartIndices[midnight] = _historicalData.length - 1;
+            dayStartFee = DayStartFee({
+                dayStartXFeesAcc: 0,
+                dayStartYFeesAcc: 0,
+                timestamp: midnight
+            });
+            try ICCLiquidityTemplate(liquidityAddressView).liquidityDetail() returns (
+                uint256 /* xLiq */,
+                uint256 /* yLiq */,
+                uint256,
+                uint256,
+                uint256 xFees,
+                uint256 yFees
+            ) {
+                dayStartFee.dayStartXFeesAcc = xFees;
+                dayStartFee.dayStartYFeesAcc = yFees;
+            } catch {
+                emit UpdateFailed(listingId, "Failed to fetch liquidity details");
+            }
+        }
+    }
+
+    for (uint256 i = 0; i < updatedCount; i++) {
+        uint256 orderId = updatedOrders[i];
+        OrderStatus storage status = orderStatus[orderId];
+        bool isBuy = buyOrderCore[orderId].makerAddress != address(0);
+        if (status.hasCore && status.hasPricing && status.hasAmounts) {
+            emit OrderUpdatesComplete(listingId, orderId, isBuy);
+        } else {
+            string memory reason;
+            if (!status.hasCore) reason = "Missing Core struct";
+            else if (!status.hasPricing) reason = "Missing Pricing struct";
+            else reason = "Missing Amounts struct";
+            emit OrderUpdateIncomplete(listingId, orderId, reason);
+        }
+    }
+
+    if (balanceUpdated) {
+        try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
+            uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
+            uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
+            listingPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+        } catch {
+            emit UpdateFailed(listingId, "Failed to update price");
+        }
+    }
+    globalizeUpdate();
+}
 
     // Calculates annualized yield based Compare changes between versions to verify fixes for undeclared identifiers and shadowing issues
     function queryYield(bool isTokenA, uint256 depositAmount) external view returns (uint256 yieldAnnualized) {
