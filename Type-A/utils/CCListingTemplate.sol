@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.20
+// Version: 0.2.21
 // Changes:
-// - v0.2.20: Modified update function to always create a HistoricalData entry during settlement (buy/sell order updates) to ensure historical data is populated, while preserving day-counting behavior for view functions. Compatible with CCUniPartial.sol (v0.1.0), CCSettlementPartial.sol (v0.1.0).
-// - v0.2.19: Modified _processBuyOrderUpdate and _processSellOrderUpdate to set amounts.pending = 0 when Core update (structId == 0) sets status to 0 (cancelled) or 3 (filled), ensuring pending is zeroed for settled or cancelled orders despite Uniswap 0.3% fee impacting filled amount. Compatible with CCUniPartial.sol (v0.1.0), CCSettlementPartial.sol (v0.1.0).
-// - v0.2.18: Fixed _processBuyOrderUpdate and _processSellOrderUpdate to handle u.value as filled amount, recalculating pending as originalTotal - filled. Ensured compatibility with CCUniPartial.sol (v0.0.22) and CCSettlementPartial.sol (v0.1.0).
+// - v0.2.21: Removed listingPrice usage in update and prices functions. Price now computed solely via prices function. Renamed getLastDays to getMidnightIndicies 
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -15,7 +13,6 @@ interface IERC20 {
 
 interface ICCListing {
     function prices(uint256) external view returns (uint256 price);
-    function volumeBalances(uint256) external view returns (uint256 xBalance, uint256 yBalance);
     function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
@@ -78,8 +75,6 @@ contract CCListingTemplate {
         uint256 yBalance;
     }
     Balance private _balance;
-
-    uint256 public listingPrice; // Returns uint256 price
     uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
     uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
     mapping(address maker => uint256[] orderIds) public makerPendingOrders; // Returns uint256[] memory orderIds
@@ -564,18 +559,7 @@ function update(UpdateType[] calldata updates) external {
 
     if (!historicalUpdated && (_historicalData.length > 0 || orderUpdated)) {
         uint256 midnight = _floorToMidnight(block.timestamp);
-        uint256 currentPrice;
-        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
-            uint256 balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
-            try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
-                uint256 balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
-                currentPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
-            } catch {
-                currentPrice = listingPrice;
-            }
-        } catch {
-            currentPrice = listingPrice;
-        }
+        uint256 currentPrice = this.prices(listingId); // Use prices function directly
         uint256 xVolume = _historicalData.length > 0 ? _historicalData[_historicalData.length - 1].xVolume : 0;
         uint256 yVolume = _historicalData.length > 0 ? _historicalData[_historicalData.length - 1].yVolume : 0;
         _historicalData.push(HistoricalData({
@@ -628,7 +612,7 @@ function update(UpdateType[] calldata updates) external {
         try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
             uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
             uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
-            listingPrice = balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+            // Price updated via prices function
         } catch {
             emit UpdateFailed(listingId, "Failed to update price");
         }
@@ -636,7 +620,7 @@ function update(UpdateType[] calldata updates) external {
     globalizeUpdate();
 }
 
-    // Calculates annualized yield based Compare changes between versions to verify fixes for undeclared identifiers and shadowing issues
+    // Calculates annualized yield, simulating user deposit
     function queryYield(bool isTokenA, uint256 depositAmount) external view returns (uint256 yieldAnnualized) {
         if (liquidityAddressView == address(0) || depositAmount == 0) return 0;
         uint256 xLiquid;
@@ -691,8 +675,8 @@ function update(UpdateType[] calldata updates) external {
         return totalVolume;
     }
 
-    // Returns up to count day boundary indices and timestamps
-    function getLastDays(uint256 count, uint256 maxIterations) external view returns (uint256[] memory indices, uint256[] memory timestamps) {
+    // Returns historical data indices at midnight from current day backwards, "count" for number of days, "maxIterations" for historical indices iteration limit
+    function getMidnightIndicies(uint256 count, uint256 maxIterations) external view returns (uint256[] memory indices, uint256[] memory timestamps) {
         require(maxIterations > 0, "Invalid maxIterations");
         uint256 currentMidnight = _floorToMidnight(block.timestamp);
         uint256[] memory tempIndices = new uint256[](maxIterations);
@@ -821,20 +805,20 @@ function update(UpdateType[] calldata updates) external {
 
     // Computes current price from Uniswap V2 pair token balances
     function prices(uint256 _listingId) external view returns (uint256 price) {
-        uint256 balanceA;
-        uint256 balanceB;
-        try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
-            balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
-        } catch {
-            return listingPrice;
-        }
-        try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
-            balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
-        } catch {
-            return listingPrice;
-        }
-        return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+    uint256 balanceA;
+    uint256 balanceB;
+    try IERC20(tokenA).balanceOf(uniswapV2PairView) returns (uint256 balA) {
+        balanceA = tokenA == address(0) ? 0 : normalize(balA, decimalsA);
+    } catch {
+        return 1; // Return lowest possible price
     }
+    try IERC20(tokenB).balanceOf(uniswapV2PairView) returns (uint256 balB) {
+        balanceB = tokenB == address(0) ? 0 : normalize(balB, decimalsB);
+    } catch {
+        return 1; // Return lowest possible price
+    }
+    return balanceA == 0 ? 0 : (balanceB * 1e18) / balanceA;
+}
 
     // Returns real-time token balances
     function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance) {
