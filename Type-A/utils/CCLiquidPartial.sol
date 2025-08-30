@@ -1,26 +1,26 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-
- Version: 0.0.27
+ Version: 0.0.29
  Changes:
- - v0.0.27: Updated _createBuyOrderUpdates and _createSellOrderUpdates to clarify that amountSent represents the amount sent for the current settlement only, preventing incorrect accumulation in CCListingTemplate.sol. Added explicit comments to ensure correct handling of partial settlements. Compatible with CCListingTemplate.sol v0.2.0, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCLiquidRouter.sol v0.0.19.
- - v0.0.26: Refactored _processSingleOrder to resolve "Stack too deep" error by extracting liquidity updates into _updateLiquidityBalances helper function, reducing local variables. Helper function handles liquidity balance updates (subtract outgoing, add incoming) for buy/sell orders.
- - v0.0.25: Removed listingContract.update() calls from _prepBuyOrderUpdate and _prepSellOrderUpdate to prevent double updates. Fixed _processSingleOrder liquidity updates to use differences.
- - v0.0.24: Added UpdateFailed event declaration to fix DeclarationError in _prepBuyOrderUpdate and _prepSellOrderUpdate.
- - v0.0.23: Fixed liquidity updates in _processSingleOrder to decrease balances by setting ICCLiquidity.UpdateType.value to difference.
- - v0.0.22: Fixed liquidity update logic in _processSingleOrder to decrease liquidity balances correctly.
- - v0.0.21: Added step parameter to _collectOrderIdentifiers for gas-efficient order settlement.
- - v0.0.20: Fixed DeclarationError in _processSingleOrder by declaring listingContract as ICCListing.
- - v0.0.19: Fixed liquidity updates in _processSingleOrder and enhanced settlement logic.
- - v0.0.18: Enhanced error logging in _prepBuyOrderUpdate and _prepSellOrderUpdate.
- - v0.0.17: Fixed makerAddress in _createBuyOrderUpdates and _createSellOrderUpdates.
- - v0.0.16: Fixed makerAddress in _prepBuyLiquidUpdates and _prepSellLiquidUpdates.
- - v0.0.15: Updated _computeCurrentPrice to use listingContract.prices(0).
- - v0.0.14: Added _prepBuyLiquidUpdates and _prepSellLiquidUpdates.
- - v0.0.13: Fixed TypeError in _processSingleOrder for liquidityContract.update.
- - v0.0.12: Updated _computeSwapImpact for flipped price calculation.
+ - v0.0.29: Refactored _createBuyOrderUpdates and _createSellOrderUpdates to resolve "Stack too deep" error by splitting into helper functions (_prepareCoreUpdate, _prepareAmountsUpdate, _prepareBalanceUpdate). Each helper handles <=4 variables, segregated by struct group (Core, Amounts, Balance). Maintains ccUpdate with three arrays, using preTransferWithdrawn for pending/filled and pre/post balance checks for amountSent. Compatible with CCListingTemplate.sol v0.3.0, CCMainPartial.sol v0.1.1, CCLiquidityTemplate.sol v0.1.3, CCLiquidRouter.sol v0.0.20.
+ - v0.0.28: Updated _createBuyOrderUpdates and _createSellOrderUpdates to use ccUpdate with three arrays, fetching maker/recipient, updating pending/filled with preTransferWithdrawn, and amountSent via pre/post balance checks.
+ - v0.0.27: Clarified amountSent for current settlement.
+ - v0.0.26: Refactored _processSingleOrder to use _updateLiquidityBalances.
+ - v0.0.25: Removed listingContract.update() from _prepBuy/SellOrderUpdate.
+ - v0.0.24: Added UpdateFailed event.
+ - v0.0.23: Fixed liquidity updates in _processSingleOrder.
+ - v0.0.22: Fixed liquidity balance decreases.
+ - v0.0.21: Added step parameter to _collectOrderIdentifiers.
+ - v0.0.20: Declared listingContract as ICCListing.
+ - v0.0.19: Enhanced settlement logic.
+ - v0.0.18: Improved error logging.
+ - v0.0.17: Fixed makerAddress in _createBuy/SellOrderUpdates.
+ - v0.0.16: Fixed makerAddress in _prepBuy/SellLiquidUpdates.
+ - v0.0.15: Updated _computeCurrentPrice to use prices(0).
+ - v0.0.14: Added _prepBuy/SellLiquidUpdates.
+ - v0.0.13: Fixed TypeError in _processSingleOrder.
+ - v0.0.12: Updated _computeSwapImpact for flipped price.
 */
-
 pragma solidity ^0.8.2;
 
 import "./CCMainPartial.sol";
@@ -48,6 +48,7 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         uint256 amountSent;
+        uint256 preTransferWithdrawn;
     }
 
     struct BuyOrderUpdateContext {
@@ -57,6 +58,7 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         uint256 amountSent;
+        uint256 preTransferWithdrawn;
     }
 
     struct SellOrderUpdateContext {
@@ -66,6 +68,7 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         uint256 amountSent;
+        uint256 preTransferWithdrawn;
     }
 
     struct OrderBatchContext {
@@ -182,84 +185,75 @@ contract CCLiquidPartial is CCMainPartial {
         }
     }
 
-    function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) internal pure returns (ICCListing.UpdateType[] memory updates) {
-        // Creates update structs for buy order settlement, amountSent is for this settlement only
-        updates = new ICCListing.UpdateType[](3);
-        updates[0] = ICCListing.UpdateType({
-            updateType: 1, // Buy order
-            structId: 0,   // Core
-            index: orderIdentifier,
-            value: 0,
-            addr: context.makerAddress,
-            recipient: context.recipient,
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        updates[1] = ICCListing.UpdateType({
-            updateType: 1, // Buy order
-            structId: 2,   // Amounts
-            index: orderIdentifier,
-            value: context.normalizedReceived, // Amount of tokenB received
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: context.amountSent // Amount of tokenA sent for this settlement
-        });
-        updates[2] = ICCListing.UpdateType({
-            updateType: 0, // Balance
-            structId: 0,
-            index: 1,      // yBalance
-            value: context.normalizedReceived, // Increase yBalance by tokenB received
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
+    function _prepareCoreUpdate(uint256 orderIdentifier, address listingAddress, bool isBuyOrder, uint8 status) private view returns (uint8 updateType, uint8 updateSort, uint256 updateData) {
+        // Prepares Core update for buy/sell order
+        ICCListing listingContract = ICCListing(listingAddress);
+        (address maker, address recipient,) = isBuyOrder
+            ? listingContract.getBuyOrderCore(orderIdentifier)
+            : listingContract.getSellOrderCore(orderIdentifier);
+        updateType = isBuyOrder ? 1 : 2; // Buy: 1, Sell: 2
+        updateSort = 0; // Core
+        updateData = uint256(bytes32(abi.encode(maker, recipient, status)));
     }
 
-    function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) internal pure returns (ICCListing.UpdateType[] memory updates) {
-        // Creates update structs for sell order settlement, amountSent is for this settlement only
-        updates = new ICCListing.UpdateType[](3);
-        updates[0] = ICCListing.UpdateType({
-            updateType: 2, // Sell order
-            structId: 0,   // Core
-            index: orderIdentifier,
-            value: 0,
-            addr: context.makerAddress,
-            recipient: context.recipient,
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        updates[1] = ICCListing.UpdateType({
-            updateType: 2, // Sell order
-            structId: 2,   // Amounts
-            index: orderIdentifier,
-            value: context.normalizedReceived, // Amount of tokenA received
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: context.amountSent // Amount of tokenB sent for this settlement
-        });
-        updates[2] = ICCListing.UpdateType({
-            updateType: 0, // Balance
-            structId: 0,
-            index: 0,      // xBalance
-            value: context.normalizedReceived, // Increase xBalance by tokenA received
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
+    function _prepareAmountsUpdate(uint256 orderIdentifier, address listingAddress, bool isBuyOrder, uint256 preTransferWithdrawn, uint256 amountSent) private view returns (uint8 updateType, uint8 updateSort, uint256 updateData) {
+        // Prepares Amounts update for buy/sell order
+        ICCListing listingContract = ICCListing(listingAddress);
+        (uint256 pending, uint256 filled,) = isBuyOrder
+            ? listingContract.getBuyOrderAmounts(orderIdentifier)
+            : listingContract.getSellOrderAmounts(orderIdentifier);
+        uint256 newPending = pending >= preTransferWithdrawn ? pending - preTransferWithdrawn : 0;
+        uint256 newFilled = filled + preTransferWithdrawn;
+        updateType = isBuyOrder ? 1 : 2; // Buy: 1, Sell: 2
+        updateSort = 2; // Amounts
+        updateData = uint256(bytes32(abi.encode(newPending, newFilled, amountSent)));
+    }
+
+    function _prepareBalanceUpdate(uint256 normalizedReceived, bool isBuyOrder) private pure returns (uint8 updateType, uint8 updateSort, uint256 updateData) {
+        // Prepares Balance update for buy/sell order
+        updateType = 0; // Balance
+        updateSort = 0; // Balance
+        updateData = normalizedReceived; // Increase yBalance (buy) or xBalance (sell)
+    }
+
+    function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) internal view returns (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) {
+        // Creates update arrays for buy order settlement using helper functions
+        updateType = new uint8[](3);
+        updateSort = new uint8[](3);
+        updateData = new uint256[](3);
+
+        uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2; // 3: filled, 2: partially filled
+
+        // Core update
+        (updateType[0], updateSort[0], updateData[0]) = _prepareCoreUpdate(orderIdentifier, context.recipient, true, newStatus);
+
+        // Amounts update
+        (updateType[1], updateSort[1], updateData[1]) = _prepareAmountsUpdate(orderIdentifier, context.recipient, true, context.preTransferWithdrawn, context.amountSent);
+
+        // Balance update
+        (updateType[2], updateSort[2], updateData[2]) = _prepareBalanceUpdate(context.normalizedReceived, true);
+    }
+
+    function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) internal view returns (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) {
+        // Creates update arrays for sell order settlement using helper functions
+        updateType = new uint8[](3);
+        updateSort = new uint8[](3);
+        updateData = new uint256[](3);
+
+        uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2; // 3: filled, 2: partially filled
+
+        // Core update
+        (updateType[0], updateSort[0], updateData[0]) = _prepareCoreUpdate(orderIdentifier, context.recipient, false, newStatus);
+
+        // Amounts update
+        (updateType[1], updateSort[1], updateData[1]) = _prepareAmountsUpdate(orderIdentifier, context.recipient, false, context.preTransferWithdrawn, context.amountSent);
+
+        // Balance update
+        (updateType[2], updateSort[2], updateData[2]) = _prepareBalanceUpdate(context.normalizedReceived, false);
     }
 
     function _prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares buy order update data, handles token transfers without updating listing state
+        // Prepares buy order update data, handles token transfers
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
         require(amountReceived <= pending, "Amount exceeds pending");
@@ -283,7 +277,7 @@ contract CCLiquidPartial is CCMainPartial {
         }
         result.amountReceived = amountReceived;
         result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
-        result.amountSent = denormalizedAmountOut;
+        result.preTransferWithdrawn = denormalizedAmount;
         if (result.tokenAddress == address(0)) {
             try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, liquidityAddr) {
                 uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
@@ -305,7 +299,7 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _prepSellOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares sell order update data, handles token transfers without updating listing state
+        // Prepares sell order update data, handles token transfers
         ICCListing listingContract = ICCListing(listingAddress);
         (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
         require(amountReceived <= pending, "Amount exceeds pending");
@@ -329,23 +323,13 @@ contract CCLiquidPartial is CCMainPartial {
         }
         result.amountReceived = amountReceived;
         result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
-        result.amountSent = denormalizedAmountOut;
-        if (result.tokenAddress == address(0)) {
-            try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, liquidityAddr) {
-                uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
-                result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
-            } catch Error(string memory reason) {
-                emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
-                return result;
-            }
-        } else {
-            try listingContract.transactToken(result.tokenAddress, denormalizedAmount, liquidityAddr) {
-                uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
-                result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
-            } catch Error(string memory reason) {
-                emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
-                return result;
-            }
+        result.preTransferWithdrawn = denormalizedAmount;
+        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, liquidityAddr) {
+            uint256 postBalance = IERC20(tokenOut).balanceOf(result.recipientAddress);
+            result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
+        } catch Error(string memory reason) {
+            emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
+            return result;
         }
         return result;
     }
@@ -374,9 +358,16 @@ contract CCLiquidPartial is CCMainPartial {
             status: result.orderStatus,
             amountReceived: result.amountReceived,
             normalizedReceived: result.normalizedReceived,
-            amountSent: result.amountSent
+            amountSent: result.amountSent,
+            preTransferWithdrawn: result.preTransferWithdrawn
         });
-        return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+        (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) = _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+        try context.listingContract.ccUpdate(updateType, updateSort, updateData) {
+        } catch Error(string memory reason) {
+            emit UpdateFailed(address(context.listingContract), reason);
+            return new ICCListing.UpdateType[](0);
+        }
+        return new ICCListing.UpdateType[](0);
     }
 
     function _prepSellLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) internal returns (ICCListing.UpdateType[] memory) {
@@ -403,9 +394,16 @@ contract CCLiquidPartial is CCMainPartial {
             status: result.orderStatus,
             amountReceived: result.amountReceived,
             normalizedReceived: result.normalizedReceived,
-            amountSent: result.amountSent
+            amountSent: result.amountSent,
+            preTransferWithdrawn: result.preTransferWithdrawn
         });
-        return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+        (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) = _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+        try context.listingContract.ccUpdate(updateType, updateSort, updateData) {
+        } catch Error(string memory reason) {
+            emit UpdateFailed(address(context.listingContract), reason);
+            return new ICCListing.UpdateType[](0);
+        }
+        return new ICCListing.UpdateType[](0);
     }
 
     function executeSingleBuyLiquid(address listingAddress, uint256 orderIdentifier) internal returns (ICCListing.UpdateType[] memory) {
@@ -454,38 +452,38 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _updateLiquidityBalances(
-        address listingAddress,
-        uint256 orderIdentifier,
-        bool isBuyOrder,
-        uint256 pendingAmount,
-        uint256 settleAmount
-    ) private {
-        // Updates liquidity balances: subtract outgoing, add incoming
-        ICCListing listingContract = ICCListing(listingAddress);
-        ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
-        (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
-        ICCLiquidity.UpdateType[] memory liquidityUpdates = new ICCLiquidity.UpdateType[](2);
-        uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
-        uint256 normalizedSettle = normalize(settleAmount, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
-        liquidityUpdates[0] = ICCLiquidity.UpdateType({
-            updateType: 0,
-            index: isBuyOrder ? 1 : 0, // Buy: decrease yLiquid (tokenB), Sell: decrease xLiquid (tokenA)
-            value: isBuyOrder ? yAmount - normalizedPending : xAmount - normalizedPending, // Subtract outgoing
-            addr: address(this),
-            recipient: address(0)
-        });
-        liquidityUpdates[1] = ICCLiquidity.UpdateType({
-            updateType: 0,
-            index: isBuyOrder ? 0 : 1, // Buy: increase xLiquid (tokenA), Sell: increase yLiquid (tokenB)
-            value: isBuyOrder ? xAmount + normalizedSettle : yAmount + normalizedSettle, // Add incoming
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.update(address(this), liquidityUpdates) {
-        } catch (bytes memory reason) {
-            emit SwapFailed(listingAddress, orderIdentifier, pendingAmount, string(abi.encodePacked("Liquidity update failed: ", reason)));
-        }
+    address listingAddress,
+    uint256 orderIdentifier,
+    bool isBuyOrder,
+    uint256 pendingAmount,
+    uint256 settleAmount
+) private {
+    // Updates liquidity balances: subtract outgoing, add incoming
+    ICCListing listingContract = ICCListing(listingAddress);
+    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
+    (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
+    ICCLiquidity.UpdateType[] memory liquidityUpdates = new ICCLiquidity.UpdateType[](2);
+    uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
+    uint256 normalizedSettle = normalize(settleAmount, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
+    liquidityUpdates[0] = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: isBuyOrder ? 1 : 0, // Buy: decrease yLiquid (tokenB), Sell: decrease xLiquid (tokenA)
+        value: isBuyOrder ? yAmount - normalizedPending : xAmount - normalizedPending, // Subtract outgoing
+        addr: address(this),
+        recipient: address(0)
+    });
+    liquidityUpdates[1] = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: isBuyOrder ? 0 : 1, // Buy: increase xLiquid (tokenA), Sell: increase yLiquid (tokenB)
+        value: isBuyOrder ? xAmount + normalizedSettle : yAmount + normalizedSettle, // Add incoming
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.update(address(this), liquidityUpdates) {
+    } catch (bytes memory reason) {
+        emit SwapFailed(listingAddress, orderIdentifier, pendingAmount, string(abi.encodePacked("Liquidity update failed: ", reason)));
     }
+}
 
     function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (ICCListing.UpdateType[] memory updates) {
         // Processes a single order, validating pricing and executing settlement
@@ -496,12 +494,10 @@ contract CCLiquidPartial is CCMainPartial {
         uint256 currentPrice = _computeCurrentPrice(listingAddress);
         (uint256 impactPrice, uint256 amountOut) = _computeSwapImpact(listingAddress, pendingAmount, isBuyOrder);
         if (impactPrice >= minPrice && impactPrice <= maxPrice && currentPrice >= minPrice && currentPrice <= maxPrice) {
-            // Settle at current price using available liquidity
             updates = isBuyOrder
                 ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
                 : executeSingleSellLiquid(listingAddress, orderIdentifier);
             if (updates.length > 0) {
-                // Update liquidity balances via helper function
                 _updateLiquidityBalances(listingAddress, orderIdentifier, isBuyOrder, pendingAmount, amountOut);
             }
         } else {
