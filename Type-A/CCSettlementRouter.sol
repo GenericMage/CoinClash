@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.1
 // Changes:
+// - v0.1.1: Fixed TypeError by replacing `listingContract.update` with `listingContract.ccUpdate` in `_updateOrder` to align with CCSettlementPartial.sol v0.1.3 and CCUniPartial.sol v0.1.5. Ensured `context.updates` is converted to `updateType`, `updateSort`, `updateData` arrays for `ccUpdate`. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.1.1, CCUniPartial.sol v0.1.5, CCSettlementPartial.sol v0.1.3.
 // - v0.1.0: Bumped version
 // - v0.0.13: Refactored settleOrders to resolve stack-too-deep error per "do x64" instruction. Split into helper functions (_validateOrder, _processOrder, _updateOrder) with OrderContext struct (orderId, pending, status, updates) to manage at most 4 variables per function. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
 // - v0.0.12: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
 // - v0.0.11: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
-// Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.0.15), CCUniPartial.sol (v0.0.22), CCSettlementPartial.sol (v0.0.27).
+// Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.1.1), CCUniPartial.sol (v0.1.5), CCSettlementPartial.sol (v0.1.3).
 
 import "./utils/CCSettlementPartial.sol";
 
@@ -61,7 +62,22 @@ contract CCSettlementRouter is CCSettlementPartial {
         if (context.updates.length == 0) {
             return (false, "");
         }
-        try listingContract.update(context.updates) {
+        // Prepare data for ccUpdate
+        uint8[] memory updateType = new uint8[](context.updates.length);
+        uint8[] memory updateSort = new uint8[](context.updates.length);
+        uint256[] memory updateData = new uint256[](context.updates.length);
+        for (uint256 i = 0; i < context.updates.length; i++) {
+            updateType[i] = context.updates[i].updateType;
+            updateSort[i] = context.updates[i].structId;
+            if (context.updates[i].structId == 0) {
+                updateData[i] = uint256(bytes32(abi.encode(context.updates[i].addr, context.updates[i].recipient, uint8(context.updates[i].value))));
+            } else if (context.updates[i].structId == 1) {
+                updateData[i] = uint256(bytes32(abi.encode(context.updates[i].maxPrice, context.updates[i].minPrice)));
+            } else if (context.updates[i].structId == 2) {
+                updateData[i] = uint256(bytes32(abi.encode(context.updates[i].value, context.updates[i].amountSent)));
+            }
+        }
+        try listingContract.ccUpdate(updateType, updateSort, updateData) {
             (, , context.status) = listingContract.getBuyOrderCore(context.orderId);
             if (context.status == 0 || context.status == 3) {
                 return (false, "");

@@ -5,18 +5,20 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.2 (updated 2025-08-30)
+**Version:** 0.1.4 (updated 2025-08-30)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.2.26)
-- `CCMainPartial.sol` (v0.0.15)
+- `CCMainPartial.sol` (v0.1.1)
 - `CCUniPartial.sol` (v0.1.5)
-- `CCSettlementPartial.sol` (v0.1.2)
+- `CCSettlementPartial.sol` (v0.1.4)
 
-## Changes
-- **v0.1.2**: Updated to reflect `CCSettlementRouter.sol` v0.1.0 (refactored `settleOrders` with `OrderContext`), `CCSettlementPartial.sol` v0.1.2 (added `_computeMaxAmountIn`, uses `ccUpdate`), and `CCUniPartial.sol` v0.1.5 (fixed `TypeError` for `BuyOrderUpdateContext`/`SellOrderUpdateContext` with `amountIn`). Corrected `listingContract.update` to `ccUpdate`. Updated struct descriptions and call trees for `pending`/`filled` (pre-transfer: tokenB for buys, tokenA for sells) and `amountSent` (post-transfer: tokenA for buys, tokenB for sells).
+### Changes
+- **v0.1.4**: Updated to reflect `CCSettlementPartial.sol` v0.1.4, where `_processBuyOrder` and `_processSellOrder` were refactored to resolve stack-too-deep errors. Split into helper functions (`_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`) using `OrderProcessContext` struct, each handling at most 4 variables. Corrected `_computeSwapAmount` to `internal` (not `view`) due to event emissions (`NonCriticalNoPendingOrder`, `NonCriticalPriceOutOfBounds`, `NonCriticalZeroSwapAmount`). Compatible with `CCListingTemplate.sol` v0.2.26, `CCMainPartial.sol` v0.1.1, `CCUniPartial.sol` v0.1.5.
+- **v0.1.3**: Added events `NonCriticalPriceOutOfBounds`, `NonCriticalNoPendingOrder`, `NonCriticalZeroSwapAmount` to log non-critical issues. Emitted in `_processBuyOrder` and `_processSellOrder` for price out of bounds, no pending orders, and zero swap amount cases to ensure non-reverting behavior with logging.
+- **v0.1.2**: Updated to reflect `CCSettlementRouter.sol` v0.1.0 (refactored `settleOrders` with `OrderContext`), `CCSettlementPartial.sol` v0.1.2 (added `_computeMaxAmountIn`, uses `ccUpdate`), and `CCUniPartial.sol` v0.1.5 (fixed `TypeError` for `BuyOrderUpdateContext`/`SellOrderUpdateContext` with `amountIn`). Corrected `listingContract.update` to `ccUpdate`.
 - **v0.0.13**: Refactored `settleOrders` into `_validateOrder`, `_processOrder`, `_updateOrder` with `OrderContext` to resolve stack-too-deep error.
 - **v0.0.12**: Removed `this.` from `_processBuyOrder` and `_processSellOrder` calls.
 - **v0.0.11**: Enhanced error logging for token transfers, Uniswap swaps, and approvals.
@@ -26,6 +28,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ## Structs
 - **OrderContext** (`CCSettlementRouter`): Contains `orderId` (uint256), `pending` (uint256), `status` (uint8), `updates` (ICCListing.UpdateType[]).
+- **OrderProcessContext** (`CCSettlementPartial`): Contains `orderId` (uint256), `pendingAmount` (uint256), `filled` (uint256), `amountSent` (uint256), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `maxPrice` (uint256), `minPrice` (uint256), `currentPrice` (uint256), `maxAmountIn` (uint256), `swapAmount` (uint256), `updates` (ICCListing.UpdateType[]).
 - **PrepOrderUpdateResult** (`CCSettlementPartial`): Contains `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized).
 - **MaxAmountInContext** (`CCUniPartial`): Contains `reserveIn` (uint256), `decimalsIn` (uint8), `normalizedReserveIn` (uint256), `currentPrice` (uint256).
 - **SwapContext** (`CCUniPartial`): Contains `listingContract` (ICCListing), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `tokenIn` (address), `tokenOut` (address), `decimalsIn` (uint8), `decimalsOut` (uint8), `denormAmountIn` (uint256), `denormAmountOutMin` (uint256), `price` (uint256), `expectedAmountOut` (uint256).
@@ -52,26 +55,24 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
     - Calls `_validateOrder` (checks `status == 1` and `pendingAmount > 0`).
     - Calls `_processOrder` → `_processBuyOrder` or `_processSellOrder` (from `CCSettlementPartial.sol`):
       - `_processBuyOrder`:
-        - Calls `ICCListing.getBuyOrderCore` for `makerAddress`, `recipientAddress`, `status`.
-        - Calls `ICCListing.getBuyOrderAmounts` for `pendingAmount`, `filled`, `amountSent`.
-        - Calls `ICCListing.getBuyOrderPricing` for `maxPrice`, `minPrice`.
-        - Calls `ICCListing.prices(0)` for `currentPrice`.
-        - Calls `_computeMaxAmountIn` (computes `swapAmount` using `_fetchReserves`).
-        - Calls `_executePartialBuySwap` (from `CCUniPartial.sol`):
+        - Calls `_validateOrderParams` (fetches `orderId`, `pendingAmount`, `filled`, `amountSent`, `makerAddress`, `recipientAddress`, `status`, `maxPrice`, `minPrice`, `currentPrice`).
+        - Calls `_computeSwapAmount` (internal, computes `maxAmountIn`, `swapAmount`, emits events for non-critical cases).
+        - Calls `_executeOrderSwap` → `_executePartialBuySwap`:
           - Calls `_prepareSwapData` (sets `SwapContext` with `tokenIn = tokenB`, `tokenOut = tokenA`, `denormAmountIn`, `denormAmountOutMin`).
           - If `tokenIn = address(0)` (ETH buy), calls `_executeBuyETHSwap` → `_performETHBuySwap`.
           - Else, calls `_executeBuyTokenSwap` → `_prepareTokenSwap` → `_executeTokenSwap` → `_finalizeTokenSwap`.
           - `_finalizeTokenSwap` creates `BuyOrderUpdateContext` with `amountIn` (tokenB, pre-transfer), `amountSent` (tokenA, post-transfer).
           - Returns `ICCListing.UpdateType[]` via `_createBuyOrderUpdates`.
-        - Calls `ICCListing.ccUpdate` with `updateType`, `updateSort`, `updateData`.
-      - `_processSellOrder`: Similar, using `getSellOrderCore`, `getSellOrderAmounts`, `getSellOrderPricing`, `_executePartialSellSwap` → `_executeSellTokenSwap` or `_executeSellETHSwapInternal` → `_finalizeSellTokenSwap` → `_createSellOrderUpdates`.
+        - Calls `_applyOrderUpdate` → `_prepareUpdateData` → `ICCListing.ccUpdate`.
+      - `_processSellOrder`: Similar, using `_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap` → `_executePartialSellSwap` → `_executeSellTokenSwap` or `_executeSellETHSwapInternal` → `_finalizeSellTokenSwap` → `_createSellOrderUpdates` → `_applyOrderUpdate` → `_prepareUpdateData` → `ccUpdate`.
     - Calls `_updateOrder` (calls `ccUpdate`, checks status).
   - **Returns**: String reason if no orders settled (e.g., "No pending orders", "Price out of range").
 - **Internal Functions Called**:
   - `_validateOrder`: Validates order status and pending amount.
   - `_processOrder`: Dispatches to `_processBuyOrder` or `_processSellOrder`.
-  - `_updateOrder`: Calls `ccUpdate` with try-catch, returns success or reason.
-  - `_processBuyOrder`, `_processSellOrder`: Fetch order data, compute `swapAmount`, execute swaps, call `ccUpdate`.
+  - `_updateOrder`: Calls `ccUpdate` with error handling.
+  - `_processBuyOrder`, `_processSellOrder`: Fetch order data, compute `swapAmount`, execute swaps, call `ccUpdate` via helper functions.
+  - `_validateOrderParams`, `_computeSwapAmount` (internal, not view, due to event emissions), `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate` (from `CCSettlementPartial.sol`).
   - `_prepBuyOrderUpdate`, `_prepSellOrderUpdate`: Handle token transfers with pre/post balance checks.
   - `_getTokenAndDecimals`, `_checkPricing`, `_computeAmountSent`, `_computeMaxAmountIn`: Support pricing and transfer logic.
   - From `CCUniPartial.sol`: `_computeCurrentPrice`, `_computeSwapImpact`, `_fetchReserves`, `_prepareSwapData`, `_prepareSellSwapData`, `_prepareTokenSwap`, `_executeTokenSwap`, `_performETHBuySwap`, `_performETHSellSwap`, `_finalizeTokenSwap`, `_finalizeSellTokenSwap`, `_executeBuyETHSwap`, `_executeSellETHSwapInternal`, `_executeBuyTokenSwap`, `_executeSellTokenSwap`, `_executePartialBuySwap`, `_executePartialSellSwap`, `_createBuyOrderUpdates`, `_createSellOrderUpdates`.
@@ -91,33 +92,37 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **_validateOrder** (`CCSettlementRouter`): Called by `settleOrders` to validate order status and pending amount.
 - **_processOrder** (`CCSettlementRouter`): Called by `settleOrders`, dispatches to `_processBuyOrder` or `_processSellOrder`.
 - **_updateOrder** (`CCSettlementRouter`): Called by `settleOrders`, handles `ccUpdate` with error handling.
-- **_processBuyOrder**, **_processSellOrder** (`CCSettlementPartial`): Called by `settleOrders` via `_processOrder`. Fetch order data, compute `swapAmount`, execute swaps, call `ccUpdate`.
+- **_processBuyOrder**, **_processSellOrder** (`CCSettlementPartial`): Called by `settleOrders` via `_processOrder`. Use helper functions:
+  - `_validateOrderParams`: Fetches order data (`orderId`, `pendingAmount`, `filled`, `amountSent`, `makerAddress`, `recipientAddress`, `status`, `maxPrice`, `minPrice`, `currentPrice`).
+  - `_computeSwapAmount` (internal): Computes `maxAmountIn`, `swapAmount`, emits non-critical events.
+  - `_executeOrderSwap`: Executes swaps via `_executePartialBuySwap` or `_executePartialSellSwap`.
+  - `_prepareUpdateData`: Prepares `updateType`, `updateSort`, `updateData` for `ccUpdate`.
+  - `_applyOrderUpdate`: Calls `ccUpdate` and updates `updates` array.
 - **_prepBuyOrderUpdate**, **_prepSellOrderUpdate** (`CCSettlementPartial`): Called by `_processBuyOrder`/`_processSellOrder` for token transfers.
 - **_getTokenAndDecimals** (`CCSettlementPartial`): Called by `_prepBuyOrderUpdate`/`_prepSellOrderUpdate`.
-- **_checkPricing** (`CCSettlementPartial`): Called by `_processBuyOrder`/`_processSellOrder`.
+- **_checkPricing** (`CCSettlementPartial`): Called by `_validateOrderParams` via `_processBuyOrder`/`_processSellOrder`.
 - **_computeAmountSent** (`CCSettlementPartial`): Called by `_prepBuyOrderUpdate`/`_prepSellOrderUpdate`.
-- **_computeMaxAmountIn** (`CCSettlementPartial`): Called by `_processBuyOrder`/`_processSellOrder`, uses `_fetchReserves`.
-- **_computeCurrentPrice**, **_computeSwapImpact**, **_fetchReserves**, **_prepareSwapData**, **_prepareSellSwapData**, **_prepareTokenSwap**, **_executeTokenSwap**, **_performETHBuySwap**, **_performETHSellSwap**, **_finalizeTokenSwap**, **_finalizeSellTokenSwap**, **_executeBuyETHSwap**, **_executeSellETHSwapInternal**, **_executeBuyTokenSwap**, **_executeSellTokenSwap**, **_executePartialBuySwap**, **_executePartialSellSwap**, **_createBuyOrderUpdates**, **_createSellOrderUpdates** (`CCUniPartial`): Called by `_processBuyOrder`/`_processSellOrder` via `_executePartialBuySwap`/`_executePartialSellSwap`.
+- **_computeMaxAmountIn** (`CCSettlementPartial`): Called by `_computeSwapAmount`, uses `_fetchReserves`.
+- **_computeCurrentPrice**, **_computeSwapImpact**, **_fetchReserves**, **_prepareSwapData**, **_prepareSellSwapData**, **_prepareTokenSwap**, **_executeTokenSwap**, **_performETHBuySwap**, **_performETHSellSwap**, **_finalizeTokenSwap**, **_finalizeSellTokenSwap**, **_executeBuyETHSwap**, **_executeSellETHSwapInternal**, **_executeBuyTokenSwap**, **_executeSellTokenSwap**, **_executePartialBuySwap**, **_executePartialSellSwap**, **_createBuyOrderUpdates**, **_createSellOrderUpdates** (`CCUniPartial`): Called by `_processBuyOrder`/`_processSellOrder` via `_executeOrderSwap` → `_executePartialBuySwap`/`_executePartialSellSwap`.
 
 ## Key Calculations
 - **Maximum Input Amount** (`_computeMaxAmountIn` in `CCSettlementPartial.sol`):
   - **Formulas**:
-    - Buy: `maxImpactPercent = (maxPrice * 100e18 / currentPrice - 100e18) / 1e18`
-    - Sell: `maxImpactPercent = (currentPrice * 100e18 / minPrice - 100e18) / 1e18`
-    - `maxAmountIn = min((normalizedReserveIn * maxImpactPercent) / (100 * 2), pendingAmount)`
-  - **Description**: Computes `maxAmountIn` (tokenB for buys, tokenA for sells) within price impact limits using `_fetchReserves`. Caps at `pendingAmount`.
-  - **Example**: Buy order with `maxPrice = 5500e18`, `currentPrice = 5000e18`, `pendingAmount = 2000e18`, `reserveIn = 10000e6` (tokenB, 6 decimals):
+    - Buy: `priceAdjustedAmount = (pendingAmount * currentPrice) / 1e18`
+    - Sell: `priceAdjustedAmount = (pendingAmount * 1e18) / currentPrice`
+    - `maxAmountIn = min(priceAdjustedAmount, pendingAmount, normalizedReserveIn)`
+  - **Description**: Computes `maxAmountIn` (tokenB for buys, tokenA for sells) within price constraints using `_fetchReserves`. Caps at `pendingAmount` and `normalizedReserveIn`.
+  - **Example**: Buy order with `currentPrice = 5000e18`, `pendingAmount = 2000e18`, `reserveIn = 10000e6` (tokenB, 6 decimals):
     - `normalizedReserveIn = normalize(10000e6, 6) = 10000e18`
-    - `maxImpactPercent = (5500e18 * 100e18 / 5000e18 - 100e18) / 1e18 = 10`
-    - `maxAmountIn = (10000e18 * 10) / (100 * 2) = 500e18`
-    - `maxAmountIn = min(500e18, 2000e18) = 500e18`.
+    - `priceAdjustedAmount = (2000e18 * 5000e18) / 1e18 = 10000e18`
+    - `maxAmountIn = min(10000e18, 2000e18, 10000e18) = 2000e18`.
 - **Minimum Output** (`_prepareSwapData`/`_prepareSellSwapData` in `CCUniPartial.sol`):
   - **Formulas**:
-    - Buy: `denormAmountOutMin = (expectedAmountOut * 1e18) / maxPrice`
-    - Sell: `denormAmountOutMin = (expectedAmountOut * minPrice) / 1e18`
-  - **Description**: Computes `denormAmountOutMin` (tokenA for buys, tokenB for sells) for Uniswap V2 swaps, ensuring price constraints.
-  - **Example**: Buy order with `expectedAmountOut = 452.73e18` (tokenA), `maxPrice = 5500e18`:
-    - `denormAmountOutMin = (452.73e18 * 1e18) / 5500e18 ≈ 82.31e18`.
+    - Buy: `denormAmountOutMin = expectedAmountOut`
+    - Sell: `denormAmountOutMin = expectedAmountOut`
+  - **Description**: Computes `denormAmountOutMin` (tokenA for buys, tokenB for sells) for Uniswap V2 swaps, derived from `_computeSwapImpact`.
+  - **Example**: Buy order with `expectedAmountOut = 452.73e18` (tokenA):
+    - `denormAmountOutMin = 452.73e18`.
 
 ## Limitations and Assumptions
 - **No Order Creation/Cancellation**: Handled by `CCOrderRouter`.
@@ -137,12 +142,13 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ## Additional Details
 - **Reentrancy Protection**: `nonReentrant` on `settleOrders`.
-- **Gas Optimization**: Uses `step`, `maxIterations`, and dynamic arrays. `settleOrders` refactored with `OrderContext` (v0.0.13).
+- **Gas Optimization**: Uses `step`, `maxIterations`, and dynamic arrays. `settleOrders` refactored with `OrderContext` (v0.0.13). `_processBuyOrder`/`_processSellOrder` refactored with `OrderProcessContext` (v0.1.4).
 - **Listing Validation**: `onlyValidListing` checks `ICCAgent.isValidListing`.
 - **Uniswap V2 Parameters**:
   - `amountIn`: `denormAmountIn` (pre-transfer, tax-adjusted via `amountInReceived`).
-  - `amountOutMin`: `denormAmountOutMin` from `(expectedAmountOut * 1e18) / maxPrice` (buy) or `(expectedAmountOut * minPrice) / 1e18` (sell).
+  - `amountOutMin`: `denormAmountOutMin` from `_computeSwapImpact`.
   - `path`: `[tokenB, tokenA]` (buy), `[tokenA, tokenB]` (sell).
   - `to`: `recipientAddress`.
   - `deadline`: `block.timestamp + 15 minutes`.
 - **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `ccUpdate` with decoded reasons (v0.1.5).
+- **Status Handling**: If `updateContext.status == 1` (active) and `updateContext.amountIn >= pendingAmount`, status is set to `3` (fully settled). Otherwise, status is set to `2` (partially settled). Partially settled orders are also set to fully settled in the same vein. 
