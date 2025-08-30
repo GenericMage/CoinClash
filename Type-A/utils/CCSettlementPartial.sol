@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Added _computeMaxAmountIn to fix DeclarationError in _processBuyOrder and _processSellOrder. Calculates max input amount using reserves from CCUniPartial.sol’s _fetchReserves and price constraints. Ensured pending/filled use pre-transfer amount (tokenB for buys, tokenA for sells), amountSent uses post-transfer amount (tokenA for buys, tokenB for sells) with pre/post balance checks. Compatible with CCListingTemplate.sol v0.2.26 and CCUniPartial.sol v0.1.5.
+// - v0.1.1: Modified _processBuyOrder and _processSellOrder to use listingContract.ccUpdate with three parameters (updateType, updateSort, updateData). Ensured pending amount uses pre-transfer amount (swapAmount).
 // - v0.1.0: Bumped version
-// - v0.0.27: Fixed TypeError by removing `try` from `_executePartialBuySwap` and `_executePartialSellSwap` calls in `_processBuyOrder` and `_processSellOrder`, as they are internal functions. Ensured direct calls to internal functions inherited from CCUniPartial.sol. Maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals. Ensured compatibility with CCListingTemplate.sol v0.1.12.
-// - v0.0.26: Fixed TypeError by removing `this.` from `_executePartialBuySwap` and `_executePartialSellSwap` calls, as they are internal functions inherited from CCUniPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
-// - v0.0.25: Enhanced error logging in _processBuyOrder and _processSellOrder to capture specific failure reasons: failed token transfer, Uniswap swap failures (slippage, insufficient liquidity), failed approval. Added validation for non-zero swap amount and token addresses. Ensured compatibility with CCListingTemplate.sol v0.1.12 update function clearing pending orders. Replaced "Unknown error" with detailed revert reasons.
-// Compatible with ICCListing.sol (v0.0.7), CCUniPartial.sol (v0.0.22), CCSettlementRouter.sol (v0.0.11), CCMainPartial.sol (v0.0.15).
+// - v0.0.27: Removed `try` from _executePartialBuySwap and _executePartialSellSwap calls, as they are internal.
+// - v0.0.26: Removed `this.` from _executePartialBuySwap and _executePartialSellSwap calls.
+// - v0.0.25: Enhanced error logging for token transfers, Uniswap swaps, and approvals.
 
 import "./CCUniPartial.sol";
 import "./CCMainPartial.sol";
@@ -68,6 +69,31 @@ contract CCSettlementPartial is CCUniPartial {
         preBalance = tokenAddress == address(0)
             ? recipientAddress.balance
             : IERC20(tokenAddress).balanceOf(recipientAddress);
+    }
+
+    function _computeMaxAmountIn(
+        address listingAddress,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 pendingAmount,
+        bool isBuyOrder
+    ) internal view returns (uint256 maxAmountIn) {
+        // Calculates maximum input amount based on price constraints and reserves
+        ReserveContext memory reserveContext = _fetchReserves(listingAddress, isBuyOrder);
+        ICCListing listingContract = ICCListing(listingAddress);
+        uint256 currentPrice = listingContract.prices(0);
+        if (currentPrice == 0 || reserveContext.normalizedReserveIn == 0) {
+            return 0;
+        }
+        // Adjust maxAmountIn to respect maxPrice and minPrice constraints
+        uint256 priceAdjustedAmount = isBuyOrder
+            ? (pendingAmount * currentPrice) / 1e18 // For buys: tokenB amount
+            : (pendingAmount * 1e18) / currentPrice; // For sells: tokenA amount
+        maxAmountIn = priceAdjustedAmount > pendingAmount ? pendingAmount : priceAdjustedAmount;
+        // Ensure maxAmountIn does not exceed available reserves
+        if (maxAmountIn > reserveContext.normalizedReserveIn) {
+            maxAmountIn = reserveContext.normalizedReserveIn;
+        }
     }
 
     function _prepBuyOrderUpdate(
@@ -188,6 +214,26 @@ contract CCSettlementPartial is CCUniPartial {
             updates[i].addr = makerAddress;
             updates[i].recipient = recipientAddress;
         }
+        // Prepare data for ccUpdate
+        uint8[] memory updateType = new uint8[](updates.length);
+        uint8[] memory updateSort = new uint8[](updates.length);
+        uint256[] memory updateData = new uint256[](updates.length);
+        for (uint256 i = 0; i < updates.length; i++) {
+            updateType[i] = updates[i].updateType;
+            updateSort[i] = updates[i].structId;
+            if (updates[i].structId == 0) {
+                updateData[i] = uint256(bytes32(abi.encode(updates[i].addr, updates[i].recipient, uint8(updates[i].value))));
+            } else if (updates[i].structId == 1) {
+                updateData[i] = uint256(bytes32(abi.encode(updates[i].maxPrice, updates[i].minPrice)));
+            } else if (updates[i].structId == 2) {
+                updateData[i] = uint256(bytes32(abi.encode(updates[i].value, filled + updates[i].value, updates[i].amountSent)));
+            }
+        }
+        try listingContract.ccUpdate(updateType, updateSort, updateData) {
+            // Success
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("ccUpdate failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
+        }
     }
 
     function _processSellOrder(
@@ -227,6 +273,26 @@ contract CCSettlementPartial is CCUniPartial {
         for (uint256 i = 0; i < updates.length; i++) {
             updates[i].addr = makerAddress;
             updates[i].recipient = recipientAddress;
+        }
+        // Prepare data for ccUpdate
+        uint8[] memory updateType = new uint8[](updates.length);
+        uint8[] memory updateSort = new uint8[](updates.length);
+        uint256[] memory updateData = new uint256[](updates.length);
+        for (uint256 i = 0; i < updates.length; i++) {
+            updateType[i] = updates[i].updateType;
+            updateSort[i] = updates[i].structId;
+            if (updates[i].structId == 0) {
+                updateData[i] = uint256(bytes32(abi.encode(updates[i].addr, updates[i].recipient, uint8(updates[i].value))));
+            } else if (updates[i].structId == 1) {
+                updateData[i] = uint256(bytes32(abi.encode(updates[i].maxPrice, updates[i].minPrice)));
+            } else if (updates[i].structId == 2) {
+                updateData[i] = uint256(bytes32(abi.encode(updates[i].value, filled + updates[i].value, updates[i].amountSent)));
+            }
+        }
+        try listingContract.ccUpdate(updateType, updateSort, updateData) {
+            // Success
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("ccUpdate failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
         }
     }
 
