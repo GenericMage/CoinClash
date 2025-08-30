@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.1
 // Changes:
+// - v0.1.1: Removed settleLong/ShortPayout.
 // - v0.1.0: Bumped version
 // - v0.0.11: Moved payout-related functions (executeLongPayouts, executeShortPayouts, executeLongPayout, executeShortPayout, settleLongLiquid, settleShortLiquid) from CCLiquidityRouter.sol v0.0.16 and CCLiquidityPartial.sol v0.0.11. Updated compatibility to CCOrderPartial.sol v0.0.04.
 // - v0.0.10: Fixed shadowing declaration of 'maker' in clearOrders by reusing the same variable for getBuyOrderCore and getSellOrderCore destructuring.
@@ -165,126 +166,6 @@ contract CCOrderRouter is CCOrderPartial {
             }
             _clearOrderData(listingAddress, orderId, isBuyOrder);
         }
-    }
-
-    function executeLongPayouts(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
-        // Executes multiple long payouts
-        ICCListing listing = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listing.longPayoutByIndexView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; ++i) {
-            ICCListing.PayoutUpdate[] memory payoutUpdates = executeLongPayout(listingAddress, orderIdentifiers[i]);
-            if (payoutUpdates.length == 0) continue;
-            tempUpdates[updateIndex++] = payoutUpdates[0];
-        }
-        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; ++i) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            listing.ssUpdate(finalUpdates);
-        }
-    }
-
-    function executeShortPayouts(address listingAddress, uint256 maxIterations) external onlyValidListing(listingAddress) nonReentrant {
-        // Executes multiple short payouts
-        ICCListing listing = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listing.shortPayoutByIndexView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; ++i) {
-            ICCListing.PayoutUpdate[] memory payoutUpdates = executeShortPayout(listingAddress, orderIdentifiers[i]);
-            if (payoutUpdates.length == 0) continue;
-            tempUpdates[updateIndex++] = payoutUpdates[0];
-        }
-        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; ++i) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            listing.ssUpdate(finalUpdates);
-        }
-    }
-
-    function executeLongPayout(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Executes long payout
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
-        if (payout.required == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.required, context.tokenDecimals);
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(listingAddress),
-                context.amountOut,
-                context.recipientAddress,
-                false
-            );
-        } else {
-            (amountReceived, normalizedReceived) = _transferToken(
-                listingAddress,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                false
-            );
-        }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, true);
-    }
-
-    function executeShortPayout(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Executes short payout
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
-        if (payout.amount == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.amount, context.tokenDecimals);
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(listingAddress),
-                context.amountOut,
-                context.recipientAddress,
-                false
-            );
-        } else {
-            (amountReceived, normalizedReceived) = _transferToken(
-                listingAddress,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                false
-            );
-        }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, false);
     }
 
     function settleLongLiquid(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.3
 // Changes:
+// - v0.1.3: Updated `settleSingleLongLiquid` and `settleSingleShortLiquid` to use `payout.required` or `payout.amount` as `filled` in `PayoutUpdate` to account for transfer taxes, ensuring `filled` reflects the full amount withdrawn from liquidity pool. `amountSent` now uses pre/post balance checks. Removed listing template balance usage for payouts, relying solely on liquidity pool transfers via `_transferNative` or `_transferToken`.
+// - v0.1.2: Updated `_executeSingleOrder` to set `filled=0` in BuyOrderAmounts/SellOrderAmounts (structId=2) to ensure unused fields are zeroed, per CCListingTemplate.sol v0.2.26 requirements.
 // - v0.1.0: Bumped version
 // - v0.0.4: Moved payout-related functionality (PayoutContext, payoutPendingAmounts, _prepPayoutContext, _checkLiquidityBalance, _transferNative, _transferToken, _createPayoutUpdate, settleSingleLongLiquid, settleSingleShortLiquid) from CCLiquidityPartial.sol v0.0.11. Ensured PayoutContext defined before use. Added TransferFailed event and InsufficientAllowance error.
 // - v0.0.3: Removed caller parameter from listingContract.update and transact calls to align with ICCListing.sol v0.0.7 and CCMainPartial.sol v0.0.10. Updated _executeSingleOrder to pass msg.sender as depositor.
@@ -63,44 +65,26 @@ contract CCOrderPartial is CCMainPartial {
         OrderPrep memory prep,
         bool isBuy
     ) internal {
-        // Executes single order creation, initializes amountSent to 0
+        // Executes single order creation, initializes amountSent and filled to 0
         ICCListing listingContract = ICCListing(listing);
         uint256 orderId = listingContract.getNextOrderId();
-        ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](3);
-        updates[0] = ICCListing.UpdateType({
-            updateType: isBuy ? 1 : 2,
-            structId: 0,
-            index: orderId,
-            value: 1,
-            addr: prep.maker,
-            recipient: prep.recipient,
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        updates[1] = ICCListing.UpdateType({
-            updateType: isBuy ? 1 : 2,
-            structId: 1,
-            index: orderId,
-            value: 0,
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: prep.maxPrice,
-            minPrice: prep.minPrice,
-            amountSent: 0
-        });
-        updates[2] = ICCListing.UpdateType({
-            updateType: isBuy ? 1 : 2,
-            structId: 2,
-            index: orderId,
-            value: prep.normalizedReceived,
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        listingContract.update(updates);
+        uint8[] memory updateType = new uint8[](3);
+        uint8[] memory updateSort = new uint8[](3);
+        uint256[] memory updateData = new uint256[](3);
+        
+        updateType[0] = isBuy ? 1 : 2; // Buy or Sell
+        updateSort[0] = 0; // Core
+        updateData[0] = uint256(bytes32(abi.encode(prep.maker, prep.recipient, uint8(1)))); // status=pending
+        
+        updateType[1] = isBuy ? 1 : 2;
+        updateSort[1] = 1; // Pricing
+        updateData[1] = uint256(bytes32(abi.encode(prep.maxPrice, prep.minPrice)));
+        
+        updateType[2] = isBuy ? 1 : 2;
+        updateSort[2] = 2; // Amounts
+        updateData[2] = uint256(bytes32(abi.encode(prep.normalizedReceived, uint256(0), uint256(0)))); // pending, filled=0, amountSent=0
+        
+        listingContract.ccUpdate(updateType, updateSort, updateData);
     }
 
     function _clearOrderData(
@@ -127,19 +111,15 @@ contract CCOrderPartial is CCMainPartial {
                 listingContract.transactToken(tokenAddress, refundAmount, recipient);
             }
         }
-        ICCListing.UpdateType[] memory updates = new ICCListing.UpdateType[](1);
-        updates[0] = ICCListing.UpdateType({
-            updateType: isBuy ? 1 : 2,
-            structId: 0,
-            index: orderId,
-            value: 0,
-            addr: address(0),
-            recipient: address(0),
-            maxPrice: 0,
-            minPrice: 0,
-            amountSent: 0
-        });
-        listingContract.update(updates);
+        uint8[] memory updateType = new uint8[](1);
+        uint8[] memory updateSort = new uint8[](1);
+        uint256[] memory updateData = new uint256[](1);
+        
+        updateType[0] = isBuy ? 1 : 2;
+        updateSort[0] = 0; // Core
+        updateData[0] = uint256(bytes32(abi.encode(address(0), address(0), uint8(0)))); // status=cancelled
+        
+        listingContract.ccUpdate(updateType, updateSort, updateData);
     }
 
     function _prepPayoutContext(
@@ -248,47 +228,23 @@ contract CCOrderPartial is CCMainPartial {
         normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
     }
 
-    function _createPayoutUpdate(
-        uint256 normalizedReceived,
-        address recipientAddress,
-        bool isLong
-    ) internal pure returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Creates payout updates
-        updates = new ICCListing.PayoutUpdate[](1);
-        updates[0] = ICCListing.PayoutUpdate({
-            payoutType: isLong ? 0 : 1,
-            recipient: recipientAddress,
-            required: normalizedReceived
-        });
-    }
-
     function settleSingleLongLiquid(
         address listingAddress,
         uint256 orderIdentifier
     ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Settles single long liquidation payout
+        // Settles single long liquidation payout using liquidity pool
         ICCListing listing = ICCListing(listingAddress);
         ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
         if (payout.required == 0) {
             updates = new ICCListing.PayoutUpdate[](1);
             updates[0] = ICCListing.PayoutUpdate({
-                payoutType: 0,
+                payoutType: 0, // Long
                 recipient: payout.recipientAddress,
-                required: 0
-            });
-            ICCListing.UpdateType[] memory statusUpdate = new ICCListing.UpdateType[](1);
-            statusUpdate[0] = ICCListing.UpdateType({
-                updateType: 0,
-                structId: 0,
-                index: orderIdentifier,
-                value: 3,
-                addr: payout.makerAddress,
-                recipient: payout.recipientAddress,
-                maxPrice: 0,
-                minPrice: 0,
+                required: 0,
+                filled: 0,
                 amountSent: 0
             });
-            listing.update(statusUpdate);
+            listing.ssUpdate(updates);
             return updates;
         }
         PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
@@ -300,13 +256,19 @@ contract CCOrderPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         if (context.tokenOut == address(0)) {
+            uint256 preBalance = context.recipientAddress.balance;
             (amountReceived, normalizedReceived) = _transferNative(
                 payable(context.liquidityAddr),
                 context.amountOut,
                 context.recipientAddress,
                 true
             );
+            amountReceived = context.recipientAddress.balance > preBalance
+                ? context.recipientAddress.balance - preBalance
+                : 0;
+            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
         } else {
+            uint256 preBalance = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
             (amountReceived, normalizedReceived) = _transferToken(
                 context.liquidityAddr,
                 context.tokenOut,
@@ -315,41 +277,43 @@ contract CCOrderPartial is CCMainPartial {
                 context.tokenDecimals,
                 true
             );
+            amountReceived = IERC20(context.tokenOut).balanceOf(context.recipientAddress) > preBalance
+                ? IERC20(context.tokenOut).balanceOf(context.recipientAddress) - preBalance
+                : 0;
+            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
         }
         if (normalizedReceived == 0) {
             return new ICCListing.PayoutUpdate[](0);
         }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, true);
+        payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.required;
+        updates = new ICCListing.PayoutUpdate[](1);
+        updates[0] = ICCListing.PayoutUpdate({
+            payoutType: 0, // Long
+            recipient: payout.recipientAddress,
+            required: payout.required,
+            filled: payout.required, // Full amount withdrawn
+            amountSent: normalizedReceived // Tax-affected amount
+        });
+        listing.ssUpdate(updates);
     }
 
     function settleSingleShortLiquid(
         address listingAddress,
         uint256 orderIdentifier
     ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Settles single short liquidation payout
+        // Settles single short liquidation payout using liquidity pool
         ICCListing listing = ICCListing(listingAddress);
         ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
         if (payout.amount == 0) {
             updates = new ICCListing.PayoutUpdate[](1);
             updates[0] = ICCListing.PayoutUpdate({
-                payoutType: 1,
+                payoutType: 1, // Short
                 recipient: payout.recipientAddress,
-                required: 0
-            });
-            ICCListing.UpdateType[] memory statusUpdate = new ICCListing.UpdateType[](1);
-            statusUpdate[0] = ICCListing.UpdateType({
-                updateType: 0,
-                structId: 0,
-                index: orderIdentifier,
-                value: 3,
-                addr: payout.makerAddress,
-                recipient: payout.recipientAddress,
-                maxPrice: 0,
-                minPrice: 0,
+                required: 0,
+                filled: 0,
                 amountSent: 0
             });
-            listing.update(statusUpdate);
+            listing.ssUpdate(updates);
             return updates;
         }
         PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
@@ -361,13 +325,19 @@ contract CCOrderPartial is CCMainPartial {
         uint256 amountReceived;
         uint256 normalizedReceived;
         if (context.tokenOut == address(0)) {
+            uint256 preBalance = context.recipientAddress.balance;
             (amountReceived, normalizedReceived) = _transferNative(
                 payable(context.liquidityAddr),
                 context.amountOut,
                 context.recipientAddress,
                 true
             );
+            amountReceived = context.recipientAddress.balance > preBalance
+                ? context.recipientAddress.balance - preBalance
+                : 0;
+            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
         } else {
+            uint256 preBalance = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
             (amountReceived, normalizedReceived) = _transferToken(
                 context.liquidityAddr,
                 context.tokenOut,
@@ -376,11 +346,23 @@ contract CCOrderPartial is CCMainPartial {
                 context.tokenDecimals,
                 true
             );
+            amountReceived = IERC20(context.tokenOut).balanceOf(context.recipientAddress) > preBalance
+                ? IERC20(context.tokenOut).balanceOf(context.recipientAddress) - preBalance
+                : 0;
+            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
         }
         if (normalizedReceived == 0) {
             return new ICCListing.PayoutUpdate[](0);
         }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= normalizedReceived;
-        updates = _createPayoutUpdate(normalizedReceived, payout.recipientAddress, false);
+        payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.amount;
+        updates = new ICCListing.PayoutUpdate[](1);
+        updates[0] = ICCListing.PayoutUpdate({
+            payoutType: 1, // Short
+            recipient: payout.recipientAddress,
+            required: payout.amount,
+            filled: payout.amount, // Full amount withdrawn
+            amountSent: normalizedReceived // Tax-affected amount
+        });
+        listing.ssUpdate(updates);
     }
 }

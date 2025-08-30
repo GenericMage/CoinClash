@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.1
 // Changes:
+// - v0.1.1: Updated `ICCListing.PayoutUpdate` struct to include `filled` and `amountSent` fields, aligning with CCListingTemplate.sol v0.3.0 to fix TypeError in CCOrderPartial.sol.
 // - v0.1.0: Bumped version
 // - v0.0.14: Updated onlyValidListing modifier to use try-catch for ICCAgent.isValidListing, explicitly destructure ListingDetails, and validate non-zero addresses. Added detailed revert reason for debugging. Updated compatibility comments.
 // - v0.0.13: Added nextXSlotIDView and nextYSlotIDView to ICCLiquidity interface for CCLiquidityTemplate.sol v0.1.1 compatibility.
@@ -25,11 +26,14 @@ interface ICCListing {
         uint256 minPrice; // for Pricing struct
         uint256 amountSent; // for Amounts struct
     }
-    struct PayoutUpdate {
-        uint8 payoutType; // 0=Long, 1=Short
-        address recipient;
-        uint256 required;
-    }
+        struct PayoutUpdate {
+            uint8 payoutType; // 0=Long, 1=Short
+            address recipient;
+            uint256 required;
+            uint256 filled;
+            uint256 amountSent;
+        }
+        
     struct LongPayoutStruct {
         address makerAddress;
         address recipientAddress;
@@ -57,7 +61,6 @@ interface ICCListing {
     function getListingId() external view returns (uint256);
     function getNextOrderId() external view returns (uint256);
     function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
-    function listingPriceView() external view returns (uint256);
     function pendingBuyOrdersView() external view returns (uint256[] memory);
     function pendingSellOrdersView() external view returns (uint256[] memory);
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
@@ -82,7 +85,11 @@ interface ICCListing {
     function setTokens(address _tokenA, address _tokenB) external;
     function setAgent(address _agent) external;
     function setRegistry(address _registryAddress) external;
-    function update(UpdateType[] calldata updates) external;
+    function ccUpdate(
+        uint8[] calldata updateType,
+        uint8[] calldata updateSort,
+        uint256[] calldata updateData
+    ) external;
     function agentView() external view returns (address);
 }
 
