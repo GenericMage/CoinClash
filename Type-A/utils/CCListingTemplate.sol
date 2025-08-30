@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.2.25
+// Version: 0.3.0
 // Changes:
+// - v0.3.0: Bumped version
 // - v0.2.25: Modified ccUpdate and helper functions (_processBuyOrderUpdate, _processSellOrderUpdate) to remove logic reducing pending relative to filled or assigning pending/filled based on order creation vs settlement. Routers now directly assign all fields except where data is unavailable or auto-generated (e.g., historical data timestamps, order status tracking).
 // - Retained auto-generated fields: orderStatus tracking, _historicalData timestamp, _dayStartIndices, and volume updates.
 // Changes:
