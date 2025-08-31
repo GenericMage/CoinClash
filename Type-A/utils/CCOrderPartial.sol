@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.3
+// Version: 0.1.4
 // Changes:
+// - v0.1.4: Updated settleSingleLongLiquid and settleSingleShortLiquid to use active payout arrays, fetch liquidity balances, settle required amount, reduce required by requested amount, update filled and amountSent based on pre/post checks, and update liquidity balances via ICCLiquidity.updateLiquidity.
 // - v0.1.3: Updated `settleSingleLongLiquid` and `settleSingleShortLiquid` to use `payout.required` or `payout.amount` as `filled` in `PayoutUpdate` to account for transfer taxes, ensuring `filled` reflects the full amount withdrawn from liquidity pool. `amountSent` now uses pre/post balance checks. Removed listing template balance usage for payouts, relying solely on liquidity pool transfers via `_transferNative` or `_transferToken`.
 // - v0.1.2: Updated `_executeSingleOrder` to set `filled=0` in BuyOrderAmounts/SellOrderAmounts (structId=2) to ensure unused fields are zeroed, per CCListingTemplate.sol v0.2.26 requirements.
 // - v0.1.0: Bumped version
@@ -229,140 +230,150 @@ contract CCOrderPartial is CCMainPartial {
     }
 
     function settleSingleLongLiquid(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Settles single long liquidation payout using liquidity pool
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
-        if (payout.required == 0) {
-            updates = new ICCListing.PayoutUpdate[](1);
-            updates[0] = ICCListing.PayoutUpdate({
-                payoutType: 0, // Long
-                recipient: payout.recipientAddress,
-                required: 0,
-                filled: 0,
-                amountSent: 0
-            });
-            listing.ssUpdate(updates);
-            return updates;
-        }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.required, context.tokenDecimals);
-        if (!_checkLiquidityBalance(context, payout.required, true)) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            uint256 preBalance = context.recipientAddress.balance;
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(context.liquidityAddr),
-                context.amountOut,
-                context.recipientAddress,
-                true
-            );
-            amountReceived = context.recipientAddress.balance > preBalance
-                ? context.recipientAddress.balance - preBalance
-                : 0;
-            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
-        } else {
-            uint256 preBalance = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-            (amountReceived, normalizedReceived) = _transferToken(
-                context.liquidityAddr,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                true
-            );
-            amountReceived = IERC20(context.tokenOut).balanceOf(context.recipientAddress) > preBalance
-                ? IERC20(context.tokenOut).balanceOf(context.recipientAddress) - preBalance
-                : 0;
-            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
-        }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.required;
+    address listingAddress,
+    uint256 orderIdentifier
+) internal returns (ICCListing.PayoutUpdate[] memory updates) {
+    // Settles single long liquidation payout using liquidity pool, updates liquidity balances
+    ICCListing listing = ICCListing(listingAddress);
+    ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
+    if (payout.required == 0 || payout.status != 1) {
         updates = new ICCListing.PayoutUpdate[](1);
         updates[0] = ICCListing.PayoutUpdate({
             payoutType: 0, // Long
             recipient: payout.recipientAddress,
-            required: payout.required,
-            filled: payout.required, // Full amount withdrawn
-            amountSent: normalizedReceived // Tax-affected amount
+            orderId: orderIdentifier,
+            required: 0,
+            filled: payout.filled,
+            amountSent: payout.amountSent
         });
         listing.ssUpdate(updates);
+        return updates;
     }
+    PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
+    context.recipientAddress = payout.recipientAddress;
+    context.amountOut = denormalize(payout.required, context.tokenDecimals);
+    if (!_checkLiquidityBalance(context, payout.required, true)) {
+        return new ICCListing.PayoutUpdate[](0);
+    }
+    ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+    uint256 amountReceived;
+    uint256 normalizedReceived;
+    if (context.tokenOut == address(0)) {
+        uint256 preBalance = context.recipientAddress.balance;
+        (amountReceived, normalizedReceived) = _transferNative(
+            payable(context.liquidityAddr),
+            context.amountOut,
+            context.recipientAddress,
+            true
+        );
+        amountReceived = context.recipientAddress.balance > preBalance
+            ? context.recipientAddress.balance - preBalance
+            : 0;
+        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
+    } else {
+        uint256 preBalance = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        (amountReceived, normalizedReceived) = _transferToken(
+            context.liquidityAddr,
+            context.tokenOut,
+            context.amountOut,
+            context.recipientAddress,
+            context.tokenDecimals,
+            true
+        );
+        amountReceived = IERC20(context.tokenOut).balanceOf(context.recipientAddress) > preBalance
+            ? IERC20(context.tokenOut).balanceOf(context.recipientAddress) - preBalance
+            : 0;
+        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
+    }
+    if (normalizedReceived == 0) {
+        return new ICCListing.PayoutUpdate[](0);
+    }
+    payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.required;
+    // Update liquidity balance
+    liquidityContract.updateLiquidity(context.recipientAddress, true, payout.required);
+    updates = new ICCListing.PayoutUpdate[](1);
+    updates[0] = ICCListing.PayoutUpdate({
+        payoutType: 0, // Long
+        recipient: payout.recipientAddress,
+        orderId: orderIdentifier,
+        required: 0, // Reduce required by requested amount
+        filled: payout.filled + payout.required, // Update filled by requested amount
+        amountSent: normalizedReceived // Actual amount sent after pre/post checks
+    });
+    listing.ssUpdate(updates);
+}
 
-    function settleSingleShortLiquid(
-        address listingAddress,
-        uint256 orderIdentifier
-    ) internal returns (ICCListing.PayoutUpdate[] memory updates) {
-        // Settles single short liquidation payout using liquidity pool
-        ICCListing listing = ICCListing(listingAddress);
-        ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
-        if (payout.amount == 0) {
-            updates = new ICCListing.PayoutUpdate[](1);
-            updates[0] = ICCListing.PayoutUpdate({
-                payoutType: 1, // Short
-                recipient: payout.recipientAddress,
-                required: 0,
-                filled: 0,
-                amountSent: 0
-            });
-            listing.ssUpdate(updates);
-            return updates;
-        }
-        PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
-        context.recipientAddress = payout.recipientAddress;
-        context.amountOut = denormalize(payout.amount, context.tokenDecimals);
-        if (!_checkLiquidityBalance(context, payout.amount, false)) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        if (context.tokenOut == address(0)) {
-            uint256 preBalance = context.recipientAddress.balance;
-            (amountReceived, normalizedReceived) = _transferNative(
-                payable(context.liquidityAddr),
-                context.amountOut,
-                context.recipientAddress,
-                true
-            );
-            amountReceived = context.recipientAddress.balance > preBalance
-                ? context.recipientAddress.balance - preBalance
-                : 0;
-            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
-        } else {
-            uint256 preBalance = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-            (amountReceived, normalizedReceived) = _transferToken(
-                context.liquidityAddr,
-                context.tokenOut,
-                context.amountOut,
-                context.recipientAddress,
-                context.tokenDecimals,
-                true
-            );
-            amountReceived = IERC20(context.tokenOut).balanceOf(context.recipientAddress) > preBalance
-                ? IERC20(context.tokenOut).balanceOf(context.recipientAddress) - preBalance
-                : 0;
-            normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
-        }
-        if (normalizedReceived == 0) {
-            return new ICCListing.PayoutUpdate[](0);
-        }
-        payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.amount;
+function settleSingleShortLiquid(
+    address listingAddress,
+    uint256 orderIdentifier
+) internal returns (ICCListing.PayoutUpdate[] memory updates) {
+    // Settles single short liquidation payout using liquidity pool, updates liquidity balances
+    ICCListing listing = ICCListing(listingAddress);
+    ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
+    if (payout.amount == 0 || payout.status != 1) {
         updates = new ICCListing.PayoutUpdate[](1);
         updates[0] = ICCListing.PayoutUpdate({
             payoutType: 1, // Short
             recipient: payout.recipientAddress,
-            required: payout.amount,
-            filled: payout.amount, // Full amount withdrawn
-            amountSent: normalizedReceived // Tax-affected amount
+            orderId: orderIdentifier,
+            required: 0,
+            filled: payout.filled,
+            amountSent: payout.amountSent
         });
         listing.ssUpdate(updates);
+        return updates;
     }
+    PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
+    context.recipientAddress = payout.recipientAddress;
+    context.amountOut = denormalize(payout.amount, context.tokenDecimals);
+    if (!_checkLiquidityBalance(context, payout.amount, false)) {
+        return new ICCListing.PayoutUpdate[](0);
+    }
+    ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+    uint256 amountReceived;
+    uint256 normalizedReceived;
+    if (context.tokenOut == address(0)) {
+        uint256 preBalance = context.recipientAddress.balance;
+        (amountReceived, normalizedReceived) = _transferNative(
+            payable(context.liquidityAddr),
+            context.amountOut,
+            context.recipientAddress,
+            true
+        );
+        amountReceived = context.recipientAddress.balance > preBalance
+            ? context.recipientAddress.balance - preBalance
+            : 0;
+        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
+    } else {
+        uint256 preBalance = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+        (amountReceived, normalizedReceived) = _transferToken(
+            context.liquidityAddr,
+            context.tokenOut,
+            context.amountOut,
+            context.recipientAddress,
+            context.tokenDecimals,
+            true
+        );
+        amountReceived = IERC20(context.tokenOut).balanceOf(context.recipientAddress) > preBalance
+            ? IERC20(context.tokenOut).balanceOf(context.recipientAddress) - preBalance
+            : 0;
+        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
+    }
+    if (normalizedReceived == 0) {
+        return new ICCListing.PayoutUpdate[](0);
+    }
+    payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.amount;
+    // Update liquidity balance
+    liquidityContract.updateLiquidity(context.recipientAddress, false, payout.amount);
+    updates = new ICCListing.PayoutUpdate[](1);
+    updates[0] = ICCListing.PayoutUpdate({
+        payoutType: 1, // Short
+        recipient: payout.recipientAddress,
+        orderId: orderIdentifier,
+        required: 0, // Reduce required by requested amount
+        filled: payout.filled + payout.amount, // Update filled by requested amount
+        amountSent: normalizedReceived // Actual amount sent after pre/post checks
+    });
+    listing.ssUpdate(updates);
+}
 }

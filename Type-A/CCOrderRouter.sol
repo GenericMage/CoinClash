@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.1
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Updated settleLongLiquid and settleShortLiquid to use activeLongPayoutsView and activeShortPayoutsView for fetching active payout IDs, integrating with updated settleSingleLongLiquid and settleSingleShortLiquid from CCOrderPartial.sol v0.1.4.
 // - v0.1.1: Removed settleLong/ShortPayout.
 // - v0.1.0: Bumped version
 // - v0.0.11: Moved payout-related functions (executeLongPayouts, executeShortPayouts, executeLongPayout, executeShortPayout, settleLongLiquid, settleShortLiquid) from CCLiquidityRouter.sol v0.0.16 and CCLiquidityPartial.sol v0.0.11. Updated compatibility to CCOrderPartial.sol v0.0.04.
@@ -169,44 +170,44 @@ contract CCOrderRouter is CCOrderPartial {
     }
 
     function settleLongLiquid(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
-        // Settles multiple long liquidations up to maxIterations
-        ICCListing listingContract = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listingContract.longPayoutByIndexView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; ++i) {
-            ICCListing.PayoutUpdate[] memory updates = settleSingleLongLiquid(listingAddress, orderIdentifiers[i]);
-            if (updates.length == 0) continue;
-            tempUpdates[updateIndex++] = updates[0];
-        }
-        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; ++i) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            listingContract.ssUpdate(finalUpdates);
-        }
+    // Settles multiple long liquidations up to maxIterations using active payout IDs
+    ICCListing listingContract = ICCListing(listingAddress);
+    uint256[] memory orderIdentifiers = listingContract.activeLongPayoutsView();
+    uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
+    ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
+    uint256 updateIndex = 0;
+    for (uint256 i = 0; i < iterationCount; ++i) {
+        ICCListing.PayoutUpdate[] memory updates = settleSingleLongLiquid(listingAddress, orderIdentifiers[i]);
+        if (updates.length == 0) continue;
+        tempUpdates[updateIndex++] = updates[0];
     }
+    ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
+    for (uint256 i = 0; i < updateIndex; ++i) {
+        finalUpdates[i] = tempUpdates[i];
+    }
+    if (updateIndex > 0) {
+        listingContract.ssUpdate(finalUpdates);
+    }
+}
 
-    function settleShortLiquid(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
-        // Settles multiple short liquidations up to maxIterations
-        ICCListing listingContract = ICCListing(listingAddress);
-        uint256[] memory orderIdentifiers = listingContract.shortPayoutByIndexView();
-        uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
-        ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
-        uint256 updateIndex = 0;
-        for (uint256 i = 0; i < iterationCount; ++i) {
-            ICCListing.PayoutUpdate[] memory updates = settleSingleShortLiquid(listingAddress, orderIdentifiers[i]);
-            if (updates.length == 0) continue;
-            tempUpdates[updateIndex++] = updates[0];
-        }
-        ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
-        for (uint256 i = 0; i < updateIndex; ++i) {
-            finalUpdates[i] = tempUpdates[i];
-        }
-        if (updateIndex > 0) {
-            listingContract.ssUpdate(finalUpdates);
-        }
+function settleShortLiquid(address listingAddress, uint256 maxIterations) external nonReentrant onlyValidListing(listingAddress) {
+    // Settles multiple short liquidations up to maxIterations using active payout IDs
+    ICCListing listingContract = ICCListing(listingAddress);
+    uint256[] memory orderIdentifiers = listingContract.activeShortPayoutsView();
+    uint256 iterationCount = maxIterations < orderIdentifiers.length ? maxIterations : orderIdentifiers.length;
+    ICCListing.PayoutUpdate[] memory tempUpdates = new ICCListing.PayoutUpdate[](iterationCount);
+    uint256 updateIndex = 0;
+    for (uint256 i = 0; i < iterationCount; ++i) {
+        ICCListing.PayoutUpdate[] memory updates = settleSingleShortLiquid(listingAddress, orderIdentifiers[i]);
+        if (updates.length == 0) continue;
+        tempUpdates[updateIndex++] = updates[0];
     }
+    ICCListing.PayoutUpdate[] memory finalUpdates = new ICCListing.PayoutUpdate[](updateIndex);
+    for (uint256 i = 0; i < updateIndex; ++i) {
+        finalUpdates[i] = tempUpdates[i];
+    }
+    if (updateIndex > 0) {
+        listingContract.ssUpdate(finalUpdates);
+    }
+}
 }

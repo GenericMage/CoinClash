@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.1
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Updated ICCListing interface to include new PayoutUpdate struct with orderId and added activeLongPayoutsView, activeShortPayoutsView, activeUserPayoutIDsView functions per CCListingTemplatePatch.txt v0.3.2.
 // - v0.1.1: Updated `ICCListing.PayoutUpdate` struct to include `filled` and `amountSent` fields, aligning with CCListingTemplate.sol v0.3.0 to fix TypeError in CCOrderPartial.sol.
 // - v0.1.0: Bumped version
 // - v0.0.14: Updated onlyValidListing modifier to use try-catch for ICCAgent.isValidListing, explicitly destructure ListingDetails, and validate non-zero addresses. Added detailed revert reason for debugging. Updated compatibility comments.
@@ -27,18 +28,20 @@ interface ICCListing {
         uint256 amountSent; // for Amounts struct
     }
         struct PayoutUpdate {
-            uint8 payoutType; // 0=Long, 1=Short
-            address recipient;
-            uint256 required;
-            uint256 filled;
-            uint256 amountSent;
-        }
+        uint8 payoutType; // 0=Long, 1=Short
+        address recipient;
+        uint256 orderId; // Explicit orderId for targeting
+        uint256 required; // Amount required for payout
+        uint256 filled; // Amount filled during settlement
+        uint256 amountSent; // Amount of opposite token sent
+    }
         
     struct LongPayoutStruct {
         address makerAddress;
         address recipientAddress;
         uint256 required;
         uint256 filled;
+        uint256 amountSent; // Added for payout settlement tracking
         uint256 orderId;
         uint8 status;
     }
@@ -47,9 +50,11 @@ interface ICCListing {
         address recipientAddress;
         uint256 amount;
         uint256 filled;
+        uint256 amountSent; // Added for payout settlement tracking
         uint256 orderId;
         uint8 status;
     }
+    
     function prices(uint256 _listingId) external view returns (uint256);
     function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function liquidityAddressView() external view returns (address);
@@ -91,6 +96,10 @@ interface ICCListing {
         uint256[] calldata updateData
     ) external;
     function agentView() external view returns (address);
+    // New view functions for active payouts
+    function activeLongPayoutsView() external view returns (uint256[] memory orderIds);
+    function activeShortPayoutsView() external view returns (uint256[] memory orderIds);
+    function activeUserPayoutIDsView(address user) external view returns (uint256[] memory orderIds);
 }
 
 interface ICCLiquidity {
