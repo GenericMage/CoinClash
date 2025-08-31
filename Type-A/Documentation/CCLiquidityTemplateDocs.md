@@ -5,12 +5,13 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.4 (Updated 2025-08-25)
+**Version**: 0.1.6 (Updated 2025-08-31)
 
 **Changes**:
-- v0.1.4: Removed fixed gas limit in `globalizeUpdate` for `ICCAgent.globalizerAddress` and `ITokenRegistry.initializeBalances`. Modified `globalizeUpdate` to emit events (`GlobalizeUpdateFailed`, `UpdateRegistryFailed`) on failure without reverting, ensuring deposits succeed. Consolidated registry update into `globalizeUpdate` for atomicity. Maintained compatibility with `CCGlobalizer.sol` v0.2.1, `CCSEntryPartial.sol` v0.0.18.
-- v0.1.3: Removed duplicate subtraction in `transactToken` and `transactNative`, as `xExecuteOut`/`yExecuteOut` handle subtraction via `update`. Updated balance checks to use `xLiquid`/`yLiquid` instead of total contract balance, ensuring fees are excluded.
-- v0.1.2: Integrated `update` calls with `updateType == 0` for subtraction. No new `updateType` added. Maintained fee segregation and compatibility with `CCGlobalizer.sol` v0.2.1, `CCSEntryPartial.sol` v0.0.18.
+- v0.1.6: Added `resetRouters` function to fetch lister via `ICCAgent.getLister`, restrict to lister, and update `routers` and `routerAddresses` with `ICCAgent.getRouters`. Removed `routers[msg.sender]` check in `xPrepOut` and `yPrepOut` for user-initiated calls via `CCLiquidityRouter.sol`. Kept restrictions in `xExecuteOut` and `yExecuteOut`.
+- v0.1.4: Removed fixed gas limit in `globalizeUpdate` for `ICCAgent.globalizerAddress` and `ITokenRegistry.initializeBalances`. Modified `globalizeUpdate` to emit events (`GlobalizeUpdateFailed`, `UpdateRegistryFailed`) on failure without reverting, ensuring deposits succeed. Consolidated registry update into `globalizeUpdate` for atomicity.
+- v0.1.3: Removed duplicate subtraction in `transactToken` and `transactNative`, as `xExecuteOut`/`yExecuteOut` handle subtraction via `update`. Updated balance checks to use `xLiquid`/`yLiquid`, excluding fees.
+- v0.1.2: Integrated `update` calls with `updateType == 0` for subtraction. Maintained fee segregation.
 
 **Compatibility**:
 - CCListingTemplate.sol (v0.0.10)
@@ -24,7 +25,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 ## Interfaces
 - **IERC20**: Provides `decimals()` for normalization, `transfer(address, uint256)` for token transfers.
 - **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`).
-- **ICCAgent**: Provides `registryAddress()` (returns `address`), `globalizerAddress()` (returns `address`).
+- **ICCAgent**: Provides `registryAddress()`, `globalizerAddress()`, `getLister(address)` (returns lister address), `getRouters()` (returns router addresses).
 - **ITokenRegistry**: Provides `initializeBalances(address token, address[] memory users)` for balance updates.
 - **ICCGlobalizer**: Provides `globalizeLiquidity(address depositor, address token)` for liquidity tracking.
 
@@ -93,14 +94,14 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 ## Internal Functions
 ### globalizeUpdate(address depositor, address token, bool isX, uint256 amount)
-- **Behavior**: Fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, fetches registry via `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances` with `depositor` as a single-user array. Emits `GlobalizeUpdateFailed` or `UpdateRegistryFailed` on failure but does not revert, ensuring deposits succeed. Handles both globalization and registry updates atomically.
+- **Behavior**: Fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, fetches registry via `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances` with `depositor` as a single-user array. Emits `GlobalizeUpdateFailed` or `UpdateRegistryFailed` on failure but does not revert, ensuring deposits succeed. Handles globalization and registry updates atomically.
 - **Parameters**:
   - `depositor`: Address of the user depositing liquidity.
   - `token`: Token address (tokenA or tokenB, or zero for ETH).
   - `isX`: True if updating xSlot (tokenA), false for ySlot (tokenB).
   - `amount`: Normalized liquidity amount (1e18 precision).
 - **Used in**: `update` (for x/y slot deposits), `transactToken`, `transactNative` (for withdrawals).
-- **Gas**: Two external calls (`globalizerAddress`, `globalizeLiquidity`) and two registry calls (`registryAddress`, `initializeBalances`), all with try-catch for graceful degradation.
+- **Gas**: Two external calls (`globalizerAddress`, `globalizeLiquidity`) and two registry calls (`registryAddress`, `initializeBalances`), all with try-catch.
 - **Call Tree**: Calls `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`.
 
 ## External Functions
@@ -111,6 +112,13 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Restrictions**: Reverts if `routersSet` or `_routers` invalid/empty.
 - **Gas**: Single loop, array push.
 - **Call Tree**: None.
+
+### resetRouters()
+- **Behavior**: Fetches lister via `ICCAgent.getLister(listingAddress)`, restricts to lister (`msg.sender`), fetches routers via `ICCAgent.getRouters`, clears `routers` mapping and `routerAddresses` array, updates with new routers, sets `routersSet` to true.
+- **Parameters**: None.
+- **Restrictions**: Reverts if `msg.sender` not lister or no routers available in agent.
+- **Gas**: Two external calls (`getLister`, `getRouters`), loops for clearing and updating arrays.
+- **Call Tree**: Calls `ICCAgent.getLister`, `ICCAgent.getRouters`.
 
 ### setListingId(uint256 _listingId)
 - **Behavior**: Sets `listingId`, callable once.
@@ -150,7 +158,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Parameters**:
   - `depositor`: Address initiating the update (via router).
   - `updates`: Array of `UpdateType` structs specifying balance, fee, or slot updates.
-- **Internal**: Processes `updates` for balances (updateType=0), fees (updateType=1), or slots (updateType=2/3). Adds/removes slot indices. Calls `globalizeUpdate` for slot updates, which handles globalization and registry updates.
+- **Internal**: Processes `updates` for balances (updateType=0), fees (updateType=1), or slots (updateType=2/3). Adds/removes slot indices. Calls `globalizeUpdate` for slot updates.
 - **Restrictions**: Router-only (`routers[msg.sender]`).
 - **Gas**: Loop over `updates`, array resizing, external calls via `globalizeUpdate`.
 - **Call Tree**: Calls `globalizeUpdate` (for `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
@@ -204,7 +212,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - `amount`: Normalized withdrawal amount.
   - `index`: xSlot index.
 - **Internal**: Checks `xLiquid`, `allocation`, uses `ICCListing.prices(0)` for compensation.
-- **Restrictions**: Router-only, `depositor` must be slot owner.
+- **Restrictions**: `depositor` must be slot owner.
 - **Gas**: Single `prices` call.
 - **Call Tree**: Calls `ICCListing.prices`.
 
@@ -225,7 +233,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - `amount`: Normalized withdrawal amount.
   - `index`: ySlot index.
 - **Internal**: Checks `yLiquid`, `allocation`, uses `ICCListing.prices(0)` for compensation.
-- **Restrictions**: Router-only, `depositor` must be slot owner.
+- **Restrictions**: `depositor` must be slot owner.
 - **Gas**: Single `prices` call.
 - **Call Tree**: Calls `ICCListing.prices`.
 
@@ -288,6 +296,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - Try-catch for external calls with detailed revert strings.
   - Public state variables accessed via auto-generated getters or unique view functions.
   - No reserved keywords, no `virtual`/`override`.
-- **Router Security**: Only `routers[msg.sender]` can call restricted functions.
+- **Router Security**: Only `routers[msg.sender]` can call restricted functions, except `xPrepOut`/`yPrepOut` (user-initiated via `CCLiquidityRouter`).
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
 - **Globalization**: In `update`, `transactToken`, `transactNative`, calls `globalizeUpdate` for x/y slot updates or withdrawals, fetching globalizer via `ICCAgent.globalizerAddress`, calling `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)`, and registry via `ICCAgent.registryAddress`, calling `ITokenRegistry.initializeBalances`.

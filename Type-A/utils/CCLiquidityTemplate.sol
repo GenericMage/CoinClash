@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- // Version: 0.1.5
-// Changes:
+ * Version: 0.1.6
+ * Changes:
+ * - v0.1.6: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's routers.
 // - v0.1.5: Removed routers[msg.sender] check from xPrepOut and yPrepOut to allow user-initiated calls via CCLiquidityRouter.sol. Kept restriction in xExecuteOut and yExecuteOut for state-changing operations.
  - v0.1.4: Removed fixed gas limit in globalizeUpdate for ICCAgent.globalizerAddress and ITokenRegistry.initializeBalances. Modified globalizeUpdate to emit event on failure without reverting, ensuring deposits succeed. Consolidated registry update into globalizeUpdate for atomicity. Maintained compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
  - v0.1.3: Removed duplicate subtraction in transactToken and transactNative, as xExecuteOut/yExecuteOut already handle subtraction via update calls. Modified balance checks in transactToken and transactNative to use xLiquid/yLiquid instead of total contract balance, ensuring fees are excluded from liquidity operations.
@@ -20,6 +21,8 @@ interface ICCListing {
 }
 
 interface ICCAgent {
+    function getLister(address listingAddress) external view returns (address);
+    function getRouters() external view returns (address[] memory);
     function globalizerAddress() external view returns (address);
     function registryAddress() external view returns (address);
 }
@@ -176,6 +179,31 @@ contract CCLiquidityTemplate {
         require(_agent != address(0), "Invalid agent address");
         agent = _agent;
     }
+    
+    // Resets routers array to agent's latest routers, restricted to lister
+function resetRouters() external {
+    // Fetch lister from agent for the current listing
+    address lister = ICCAgent(agent).getLister(listingAddress);
+    require(msg.sender == lister, "Only lister can reset routers");
+    
+    // Fetch latest routers from agent
+    address[] memory newRouters = ICCAgent(agent).getRouters();
+    require(newRouters.length > 0, "No routers available in agent");
+
+    // Clear existing routers mapping and array
+    for (uint256 i = 0; i < routerAddresses.length; i++) {
+        routers[routerAddresses[i]] = false;
+    }
+    delete routerAddresses;
+
+    // Update with new routers
+    for (uint256 i = 0; i < newRouters.length; i++) {
+        require(newRouters[i] != address(0), "Invalid router address");
+        routers[newRouters[i]] = true;
+        routerAddresses.push(newRouters[i]);
+    }
+    routersSet = true;
+}
 
     function update(address depositor, UpdateType[] memory updates) external {
         // Updates liquidity and slot details
