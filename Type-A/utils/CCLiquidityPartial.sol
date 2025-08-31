@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.1
 // Changes:
+// - v0.1.1: Updated _validateDeposit, _executeTokenTransfer, _executeNativeTransfer, _depositToken, and _depositNative to explicitly use depositInitiator (msg.sender) for fund transfers and depositor for slot assignment, clarifying roles.
 // - v0.1.0: Bumped version
 // - v0.0.19: Removed pool check (xAmount == 0 && yAmount == 0 || (isTokenA ? xAmount : yAmount) > 0) in _validateDeposit to allow deposits in any pool state. Updated compatibility comments.
 // - v0.0.18: Removed redundant isRouter checks in _validateDeposit, _prepWithdrawal, _executeWithdrawal, _validateFeeClaim, as CCLiquidityTemplate validates routers[msg.sender]. Updated _executeTokenTransfer to use receivedAmount for transfer and balance checks, handling tax-on-transfer tokens.
@@ -53,68 +54,73 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _validateDeposit(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal view returns (DepositContext memory) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-        (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
-        return DepositContext({
-            listingAddress: listingAddress,
-            depositor: depositor,
-            inputAmount: inputAmount,
-            isTokenA: isTokenA,
-            tokenAddress: tokenAddress,
-            liquidityAddr: liquidityAddr,
-            xAmount: xAmount,
-            yAmount: yAmount,
-            receivedAmount: 0,
-            normalizedAmount: 0,
-            index: isTokenA ? liquidityContract.activeXLiquiditySlotsView().length : liquidityContract.activeYLiquiditySlotsView().length
-        });
-    }
+    // Validates deposit parameters, using depositor for slot assignment and msg.sender as depositInitiator
+    ICCListing listingContract = ICCListing(listingAddress);
+    address tokenAddress = isTokenA ? listingContract.tokenA() : listingContract.tokenB();
+    address liquidityAddr = listingContract.liquidityAddressView();
+    ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+    (uint256 xAmount, uint256 yAmount) = liquidityContract.liquidityAmounts();
+    return DepositContext({
+        listingAddress: listingAddress,
+        depositor: depositor,
+        inputAmount: inputAmount,
+        isTokenA: isTokenA,
+        tokenAddress: tokenAddress,
+        liquidityAddr: liquidityAddr,
+        xAmount: xAmount,
+        yAmount: yAmount,
+        receivedAmount: 0,
+        normalizedAmount: 0,
+        index: isTokenA ? liquidityContract.activeXLiquiditySlotsView().length : liquidityContract.activeYLiquiditySlotsView().length
+    });
+}
 
-    function _executeTokenTransfer(DepositContext memory context) internal returns (DepositContext memory) {
-        require(context.tokenAddress != address(0), "Use depositNative for ETH");
-        uint256 allowance = IERC20(context.tokenAddress).allowance(context.depositor, address(this));
-        if (allowance < context.inputAmount) revert InsufficientAllowance(context.depositor, context.tokenAddress, context.inputAmount, allowance);
-        uint256 preBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
-        try IERC20(context.tokenAddress).transferFrom(context.depositor, address(this), context.inputAmount) {
-        } catch (bytes memory reason) {
-            emit TransferFailed(context.depositor, context.tokenAddress, context.inputAmount, reason);
-            revert("TransferFrom failed");
-        }
-        uint256 postBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
-        context.receivedAmount = postBalanceRouter - preBalanceRouter;
-        require(context.receivedAmount > 0, "No tokens received");
-        uint256 preBalanceTemplate = IERC20(context.tokenAddress).balanceOf(context.liquidityAddr);
-        try IERC20(context.tokenAddress).transfer(context.liquidityAddr, context.receivedAmount) {
-        } catch (bytes memory reason) {
-            emit TransferFailed(address(this), context.tokenAddress, context.receivedAmount, reason);
-            revert("Transfer to liquidity template failed");
-        }
-        uint256 postBalanceTemplate = IERC20(context.tokenAddress).balanceOf(context.liquidityAddr);
-        context.receivedAmount = postBalanceTemplate - preBalanceTemplate;
-        require(context.receivedAmount > 0, "No tokens received by liquidity template");
-        uint8 decimals = IERC20(context.tokenAddress).decimals();
-        context.normalizedAmount = normalize(context.receivedAmount, decimals);
-        return context;
+function _executeTokenTransfer(DepositContext memory context) internal returns (DepositContext memory) {
+    // Transfers ERC20 tokens from depositInitiator (msg.sender) to liquidity template
+    require(context.tokenAddress != address(0), "Use depositNative for ETH");
+    address depositInitiator = msg.sender;
+    uint256 allowance = IERC20(context.tokenAddress).allowance(depositInitiator, address(this));
+    if (allowance < context.inputAmount) revert InsufficientAllowance(depositInitiator, context.tokenAddress, context.inputAmount, allowance);
+    uint256 preBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
+    try IERC20(context.tokenAddress).transferFrom(depositInitiator, address(this), context.inputAmount) {
+    } catch (bytes memory reason) {
+        emit TransferFailed(depositInitiator, context.tokenAddress, context.inputAmount, reason);
+        revert("TransferFrom failed");
     }
+    uint256 postBalanceRouter = IERC20(context.tokenAddress).balanceOf(address(this));
+    context.receivedAmount = postBalanceRouter - preBalanceRouter;
+    require(context.receivedAmount > 0, "No tokens received");
+    uint256 preBalanceTemplate = IERC20(context.tokenAddress).balanceOf(context.liquidityAddr);
+    try IERC20(context.tokenAddress).transfer(context.liquidityAddr, context.receivedAmount) {
+    } catch (bytes memory reason) {
+        emit TransferFailed(address(this), context.tokenAddress, context.receivedAmount, reason);
+        revert("Transfer to liquidity template failed");
+    }
+    uint256 postBalanceTemplate = IERC20(context.tokenAddress).balanceOf(context.liquidityAddr);
+    context.receivedAmount = postBalanceTemplate - preBalanceTemplate;
+    require(context.receivedAmount > 0, "No tokens received by liquidity template");
+    uint8 decimals = IERC20(context.tokenAddress).decimals();
+    context.normalizedAmount = normalize(context.receivedAmount, decimals);
+    return context;
+}
 
-    function _executeNativeTransfer(DepositContext memory context) internal returns (DepositContext memory) {
-        require(context.tokenAddress == address(0), "Use depositToken for ERC20");
-        require(context.inputAmount == msg.value, "Incorrect ETH amount");
-        uint256 preBalanceTemplate = context.liquidityAddr.balance;
-        (bool success, bytes memory reason) = context.liquidityAddr.call{value: context.inputAmount}("");
-        if (!success) {
-            emit TransferFailed(context.depositor, address(0), context.inputAmount, reason);
-            revert("ETH transfer to liquidity template failed");
-        }
-        uint256 postBalanceTemplate = context.liquidityAddr.balance;
-        context.receivedAmount = postBalanceTemplate - preBalanceTemplate;
-        require(context.receivedAmount > 0, "No ETH received by liquidity template");
-        context.normalizedAmount = normalize(context.receivedAmount, 18);
-        return context;
+function _executeNativeTransfer(DepositContext memory context) internal returns (DepositContext memory) {
+    // Transfers native tokens (ETH) from depositInitiator (msg.sender) to liquidity template
+    require(context.tokenAddress == address(0), "Use depositToken for ERC20");
+    address depositInitiator = msg.sender;
+    require(context.inputAmount == msg.value, "Incorrect ETH amount");
+    uint256 preBalanceTemplate = context.liquidityAddr.balance;
+    (bool success, bytes memory reason) = context.liquidityAddr.call{value: context.inputAmount}("");
+    if (!success) {
+        emit TransferFailed(depositInitiator, address(0), context.inputAmount, reason);
+        revert("ETH transfer to liquidity template failed");
     }
+    uint256 postBalanceTemplate = context.liquidityAddr.balance;
+    context.receivedAmount = postBalanceTemplate - preBalanceTemplate;
+    require(context.receivedAmount > 0, "No ETH received by liquidity template");
+    context.normalizedAmount = normalize(context.receivedAmount, 18);
+    return context;
+}
 
     function _updateDeposit(DepositContext memory context) internal {
         ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
@@ -129,31 +135,33 @@ contract CCLiquidityPartial is CCMainPartial {
     }
 
     function _depositToken(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal returns (uint256) {
-        DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
-        context = _executeTokenTransfer(context);
-        _updateDeposit(context);
-        return context.receivedAmount;
-    }
+    // Deposits ERC20 tokens from depositInitiator (msg.sender) to liquidity pool, assigns slot to depositor
+    DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
+    context = _executeTokenTransfer(context);
+    _updateDeposit(context);
+    return context.receivedAmount;
+}
 
-    function _depositNative(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal {
-        DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
-        context = _executeNativeTransfer(context);
-        _updateDeposit(context);
-    }
+function _depositNative(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal {
+    // Deposits ETH from depositInitiator (msg.sender) to liquidity pool, assigns slot to depositor
+    DepositContext memory context = _validateDeposit(listingAddress, depositor, inputAmount, isTokenA);
+    context = _executeNativeTransfer(context);
+    _updateDeposit(context);
+}
 
-    function _prepWithdrawal(address listingAddress, address depositor, uint256 inputAmount, uint256 index, bool isX) internal returns (ICCLiquidity.PreparedWithdrawal memory) {
+    function _prepWithdrawal(address listingAddress, address depositor, uint256 outputAmount, uint256 index, bool isX) internal returns (ICCLiquidity.PreparedWithdrawal memory) {
         ICCListing listingContract = ICCListing(listingAddress);
         address liquidityAddr = listingContract.liquidityAddressView();
         ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
         require(depositor != address(0), "Invalid depositor");
         if (isX) {
-            try liquidityContract.xPrepOut(depositor, inputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
+            try liquidityContract.xPrepOut(depositor, outputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
                 return result;
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Withdrawal preparation failed: ", reason)));
             }
         } else {
-            try liquidityContract.yPrepOut(depositor, inputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
+            try liquidityContract.yPrepOut(depositor, outputAmount, index) returns (ICCLiquidity.PreparedWithdrawal memory result) {
                 return result;
             } catch (bytes memory reason) {
                 revert(string(abi.encodePacked("Withdrawal preparation failed: ", reason)));

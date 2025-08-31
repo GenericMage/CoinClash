@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- Version: 0.1.4
- Changes:
+ // Version: 0.1.5
+// Changes:
+// - v0.1.5: Removed routers[msg.sender] check from xPrepOut and yPrepOut to allow user-initiated calls via CCLiquidityRouter.sol. Kept restriction in xExecuteOut and yExecuteOut for state-changing operations.
  - v0.1.4: Removed fixed gas limit in globalizeUpdate for ICCAgent.globalizerAddress and ITokenRegistry.initializeBalances. Modified globalizeUpdate to emit event on failure without reverting, ensuring deposits succeed. Consolidated registry update into globalizeUpdate for atomicity. Maintained compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
  - v0.1.3: Removed duplicate subtraction in transactToken and transactNative, as xExecuteOut/yExecuteOut already handle subtraction via update calls. Modified balance checks in transactToken and transactNative to use xLiquid/yLiquid instead of total contract balance, ensuring fees are excluded from liquidity operations.
  - v0.1.2: Integrated update function calls with updateType == 0 for subtraction. No new updateType added. Maintained fee segregation and compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
@@ -333,29 +334,28 @@ contract CCLiquidityTemplate {
     }
 
     function xPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory withdrawal) {
-        // Prepares withdrawal for xLiquidity slot
-        require(routers[msg.sender], "Router only");
-        require(depositor != address(0), "Invalid depositor");
-        LiquidityDetails storage details = liquidityDetail;
-        Slot storage slot = xLiquiditySlots[index];
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        require(slot.allocation >= amount, "Amount exceeds allocation");
-        uint256 withdrawAmountA = amount > details.xLiquid ? details.xLiquid : amount;
-        uint256 deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0;
-        uint256 withdrawAmountB = 0;
-        if (deficit > 0) {
-            uint256 currentPrice;
-            try ICCListing(listingAddress).prices(0) returns (uint256 price) {
-                currentPrice = price;
-            } catch (bytes memory reason) {
-                revert(string(abi.encodePacked("Price fetch failed: ", reason)));
-            }
-            if (currentPrice == 0) return PreparedWithdrawal(withdrawAmountA, 0);
-            uint256 compensation = (deficit * 1e18) / currentPrice;
-            withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
+    // Prepares withdrawal for xLiquidity slot
+    require(depositor != address(0), "Invalid depositor");
+    LiquidityDetails storage details = liquidityDetail;
+    Slot storage slot = xLiquiditySlots[index];
+    require(slot.depositor == depositor, "Depositor not slot owner");
+    require(slot.allocation >= amount, "Amount exceeds allocation");
+    uint256 withdrawAmountA = amount > details.xLiquid ? details.xLiquid : amount;
+    uint256 deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0;
+    uint256 withdrawAmountB = 0;
+    if (deficit > 0) {
+        uint256 currentPrice;
+        try ICCListing(listingAddress).prices(0) returns (uint256 price) {
+            currentPrice = price;
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Price fetch failed: ", reason)));
         }
-        return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+        if (currentPrice == 0) return PreparedWithdrawal(withdrawAmountA, 0);
+        uint256 compensation = (deficit * 1e18) / currentPrice;
+        withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
     }
+    return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+}
 
     function xExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external {
         // Executes withdrawal for xLiquidity slot
@@ -402,29 +402,28 @@ contract CCLiquidityTemplate {
     }
 
     function yPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory withdrawal) {
-        // Prepares withdrawal for yLiquidity slot
-        require(routers[msg.sender], "Router only");
-        require(depositor != address(0), "Invalid depositor");
-        LiquidityDetails storage details = liquidityDetail;
-        Slot storage slot = yLiquiditySlots[index];
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        require(slot.allocation >= amount, "Amount exceeds allocation");
-        uint256 withdrawAmountB = amount > details.yLiquid ? details.yLiquid : amount;
-        uint256 deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0;
-        uint256 withdrawAmountA = 0;
-        if (deficit > 0) {
-            uint256 currentPrice;
-            try ICCListing(listingAddress).prices(0) returns (uint256 price) {
-                currentPrice = price;
-            } catch (bytes memory reason) {
-                revert(string(abi.encodePacked("Price fetch failed: ", reason)));
-            }
-            if (currentPrice == 0) return PreparedWithdrawal(0, withdrawAmountB);
-            uint256 compensation = (deficit * currentPrice) / 1e18;
-            withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
+    // Prepares withdrawal for yLiquidity slot
+    require(depositor != address(0), "Invalid depositor");
+    LiquidityDetails storage details = liquidityDetail;
+    Slot storage slot = yLiquiditySlots[index];
+    require(slot.depositor == depositor, "Depositor not slot owner");
+    require(slot.allocation >= amount, "Amount exceeds allocation");
+    uint256 withdrawAmountB = amount > details.yLiquid ? details.yLiquid : amount;
+    uint256 deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0;
+    uint256 withdrawAmountA = 0;
+    if (deficit > 0) {
+        uint256 currentPrice;
+        try ICCListing(listingAddress).prices(0) returns (uint256 price) {
+            currentPrice = price;
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Price fetch failed: ", reason)));
         }
-        return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+        if (currentPrice == 0) return PreparedWithdrawal(0, withdrawAmountB);
+        uint256 compensation = (deficit * currentPrice) / 1e18;
+        withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
     }
+    return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
+}
 
     function yExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external {
         // Executes withdrawal for yLiquidity slot

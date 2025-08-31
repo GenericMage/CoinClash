@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.0
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Added depositor parameter to depositToken and depositNativeToken, renamed inputAmount to outputAmount in withdraw function.
+// - v0.1.1: Added depositor parameter to depositToken and depositNative to support third-party deposits. Renamed inputAmount to amount for clarity.
 // - v0.1.0: Bumped version
 // - v0.0.25: Removed invalid try-catch in depositNativeToken and depositToken, as _depositNative and _depositToken are internal. Errors are handled by internal reverts and DepositFailed event in CCLiquidityPartial. Updated compatibility comments.
 // - v0.0.24: Fixed TypeError by removing 'this' from _depositNative and _depositToken calls.
@@ -15,21 +17,21 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     event DepositTokenFailed(address indexed depositor, address token, uint256 amount, string reason);
     event DepositNativeFailed(address indexed depositor, uint256 amount, string reason);
 
-    function depositNativeToken(address listingAddress, uint256 inputAmount, bool isTokenA) external payable nonReentrant onlyValidListing(listingAddress) {
-        // Deposits ETH to liquidity pool for msg.sender, supports zero-balance initialization
-        _depositNative(listingAddress, msg.sender, inputAmount, isTokenA);
-    }
+    function depositNativeToken(address listingAddress, address depositor, uint256 amount, bool isTokenA) external payable nonReentrant onlyValidListing(listingAddress) {
+    // Deposits ETH to liquidity pool for specified depositor, supports zero-balance initialization
+    _depositNative(listingAddress, depositor, amount, isTokenA);
+}
 
-    function depositToken(address listingAddress, uint256 inputAmount, bool isTokenA) external nonReentrant onlyValidListing(listingAddress) {
-        // Deposits ERC20 tokens to liquidity pool for msg.sender, supports zero-balance initialization
-        _depositToken(listingAddress, msg.sender, inputAmount, isTokenA);
-    }
+    function depositToken(address listingAddress, address depositor, uint256 amount, bool isTokenA) external nonReentrant onlyValidListing(listingAddress) {
+    // Deposits ERC20 tokens to liquidity pool for specified depositor, supports zero-balance initialization
+    _depositToken(listingAddress, depositor, amount, isTokenA);
+}
 
-    function withdraw(address listingAddress, uint256 inputAmount, uint256 index, bool isX) external nonReentrant onlyValidListing(listingAddress) {
-        // Withdraws tokens from liquidity pool for msg.sender
-        ICCLiquidity.PreparedWithdrawal memory withdrawal = _prepWithdrawal(listingAddress, msg.sender, inputAmount, index, isX);
-        _executeWithdrawal(listingAddress, msg.sender, index, isX, withdrawal);
-    }
+    function withdraw(address listingAddress, uint256 outputAmount, uint256 index, bool isX) external nonReentrant onlyValidListing(listingAddress) {
+    // Withdraws tokens from liquidity pool for msg.sender
+    ICCLiquidity.PreparedWithdrawal memory withdrawal = _prepWithdrawal(listingAddress, msg.sender, outputAmount, index, isX);
+    _executeWithdrawal(listingAddress, msg.sender, index, isX, withdrawal);
+}
 
     function claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 /* volumeAmount */) external nonReentrant onlyValidListing(listingAddress) {
         // Claims fees from liquidity pool for msg.sender
