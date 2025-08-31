@@ -36,7 +36,7 @@ interface ICCGlobalizer {
 }
 
 contract CCLiquidityTemplate {
-    mapping(address => bool) public routers;
+    mapping(address router => bool isRouter) public routers;
     address[] public routerAddresses;
     bool public routersSet;
     address public listingAddress;
@@ -76,8 +76,8 @@ contract CCLiquidityTemplate {
     }
 
     LiquidityDetails public liquidityDetail;
-    mapping(uint256 => Slot) public xLiquiditySlots;
-    mapping(uint256 => Slot) public yLiquiditySlots;
+    mapping(uint256 slotID => Slot) public xLiquiditySlots;
+    mapping(uint256 slotID => Slot) public yLiquiditySlots;
     uint256[] public activeXLiquiditySlots;
     uint256[] public activeYLiquiditySlots;
     mapping(address => uint256[]) public userXIndex;

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.3
+// Version: 0.3.4
 // Changes:
+// - v0.3.4: Changed routers visibility. 
 // - v0.3.3: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's latest routers.
 // - v0.3.2: Added view functions for active payout arrays/mappings: activeLongPayoutsView, activeShortPayoutsView, and activeUserPayoutIDsView.
 // - v0.3.1: Added activeLongPayouts, activeShortPayouts, and activeUserPayoutIDs arrays to track active payout IDs.
@@ -48,7 +49,7 @@ interface ICCAgent {
 }
 
 contract CCListingTemplate {
-    mapping(address router => bool isRouter) private _routers;
+    mapping(address router => bool isRouter) public routers;
     bool private _routersSet;
     address public tokenA; // Returns address token
     address public tokenB; // Returns address token
@@ -314,7 +315,7 @@ mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Trac
 
     // Transfers ERC20 tokens to recipient
     function transactToken(address token, uint256 amount, address recipient) external {
-        require(_routers[msg.sender], "Caller not router");
+        require(routers[msg.sender], "Caller not router");
         require(token == tokenA || token == tokenB, "Invalid token");
         require(recipient != address(0), "Invalid recipient");
         require(amount > 0, "Invalid amount");
@@ -336,7 +337,7 @@ mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Trac
 
     // Transfers native ETH to recipient
     function transactNative(uint256 amount, address recipient) external payable {
-        require(_routers[msg.sender], "Caller not router");
+        require(routers[msg.sender], "Caller not router");
         require(tokenA == address(0) || tokenB == address(0), "Native not supported");
         require(recipient != address(0), "Invalid recipient");
         require(amount > 0, "Invalid amount");
@@ -355,7 +356,7 @@ mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Trac
 
     // Modified ssUpdate function to handle explicit orderId and active payout tracking
 function ssUpdate(PayoutUpdate[] calldata updates) external {
-    require(_routers[msg.sender], "Caller not router");
+    require(routers[msg.sender], "Caller not router");
     for (uint256 i = 0; i < updates.length; i++) {
         PayoutUpdate memory u = updates[i];
         if (u.recipient == address(0)) {
@@ -583,7 +584,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
         uint256[] calldata updateData
     ) external {
         // Updates balances, orders, and historical data, only callable by routers
-        require(_routers[msg.sender], "Caller not router");
+        require(routers[msg.sender], "Caller not router");
         require(updateType.length == updateSort.length && updateType.length == updateData.length,
                 "Array length mismatch");
         uint256 currentMidnight = (block.timestamp / 86400) * 86400;
@@ -673,7 +674,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
         require(routers_.length > 0, "No routers provided");
         for (uint256 i = 0; i < routers_.length; i++) {
             require(routers_[i] != address(0), "Invalid router address");
-            _routers[routers_[i]] = true;
+            routers[routers_[i]] = true;
         }
         _routersSet = true;
     }
@@ -767,7 +768,7 @@ function _clearRouters() private {
     }
     // Clears mapping entries
     for (uint256 i = 0; i < currentRouters.length; i++) {
-        _routers[currentRouters[i]] = false;
+        routers[currentRouters[i]] = false;
     }
     _routersSet = false;
 }
@@ -788,7 +789,7 @@ function _setNewRouters(address[] memory newRouters) private {
     // Sets new routers in mapping
     for (uint256 i = 0; i < newRouters.length; i++) {
         require(newRouters[i] != address(0), "Invalid router address");
-        _routers[newRouters[i]] = true;
+        routers[newRouters[i]] = true;
     }
     _routersSet = true;
 }
