@@ -91,6 +91,64 @@ contract CCLiquidityTemplate {
     event UpdateRegistryFailed(address indexed depositor, bool isX, bytes reason);
     event TransactFailed(address indexed depositor, address token, uint256 amount, string reason);
 
+// Added Payout mappings/arrays/structs
+
+uint256 private nextPayoutId; // Tracks next payout ID
+struct LongPayoutStruct {
+    address makerAddress; // Payout creator
+    address recipientAddress; // Payout recipient
+    uint256 required; // Amount required
+    uint256 filled; // Amount filled
+    uint256 amountSent; // Amount of opposite token sent
+    uint256 orderId; // Payout order ID
+    uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+}
+struct ShortPayoutStruct {
+        address makerAddress;
+        address recipientAddress;
+        uint256 amount;
+        uint256 filled;
+        uint256 amountSent; // Added for payout settlement tracking
+        uint256 orderId;
+        uint8 status;
+    }
+    
+struct PayoutUpdate {
+    uint8 payoutType; // 0: Long, 1: Short
+    address recipient; // Payout recipient
+    uint256 orderId; // Explicit orderId for targeting
+    uint256 required; // Amount required for payout
+    uint256 filled; // Amount filled during settlement
+    uint256 amountSent; // Amount of opposite token sent
+}
+mapping(uint256 orderId => LongPayoutStruct) public longPayout; // Stores long payout details
+mapping(uint256 orderId => ShortPayoutStruct) public shortPayout; // Stores short payout details
+uint256[] private longPayoutByIndex; // Tracks long payout orderIds
+uint256[] private shortPayoutByIndex; // Tracks short payout orderIds
+mapping(address user => uint256[] orderIds) private userPayoutIDs; // Tracks payout orderIds per user
+uint256[] private activeLongPayouts; // Tracks active long payout orderIds
+uint256[] private activeShortPayouts; // Tracks active short payout orderIds
+mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Tracks active payout orderIds per user
+
+event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
+event PayoutOrderUpdated(uint256 indexed orderId, bool isLong, uint256 filled, uint256 amountSent, uint8 status);
+
+function removePendingOrder(uint256[] storage orders, uint256 orderId) internal {
+    // Removes order ID from array
+    for (uint256 i = 0; i < orders.length; i++) {
+        if (orders[i] == orderId) {
+            orders[i] = orders[orders.length - 1];
+            orders.pop();
+            break;
+        }
+    }
+}
+
+function getNextPayoutID() external view returns (uint256 payoutId) {
+    // Returns the next available payout ID
+    return nextPayoutId;
+}
+
     function normalize(uint256 amount, uint8 decimals) internal pure returns (uint256 normalizedAmount) {
         // Normalizes amount to 18 decimals
         if (decimals == 18) return amount;
@@ -204,6 +262,96 @@ function resetRouters() external {
         routerAddresses.push(newRouters[i]);
     }
     routersSet = true;
+}
+
+// Added payout creation/management from listing template
+
+function ssUpdate(PayoutUpdate[] calldata updates) external {
+    // Updates payout details, restricted to routers
+    require(routers[msg.sender], "Router only");
+    for (uint256 i = 0; i < updates.length; i++) {
+        PayoutUpdate memory u = updates[i];
+        if (u.recipient == address(0)) {
+            emit UpdateRegistryFailed(u.recipient, u.payoutType == 0, "Invalid recipient");
+            continue;
+        }
+        if (u.payoutType > 1) {
+            emit UpdateRegistryFailed(u.recipient, u.payoutType == 0, "Invalid payout type");
+            continue;
+        }
+        if (u.required == 0 && u.filled == 0) {
+            emit UpdateRegistryFailed(u.recipient, u.payoutType == 0, "Invalid required or filled amount");
+            continue;
+        }
+        bool isLong = u.payoutType == 0;
+        uint256 orderId = u.orderId;
+        if (isLong) {
+            LongPayoutStruct storage payout = longPayout[orderId];
+            if (payout.orderId == 0) { // New payout
+                payout.makerAddress = u.recipient;
+                payout.recipientAddress = u.recipient;
+                payout.required = u.required;
+                payout.filled = 0;
+                payout.orderId = orderId;
+                payout.status = u.required > 0 ? 1 : 0;
+                longPayoutByIndex.push(orderId);
+                userPayoutIDs[u.recipient].push(orderId);
+                if (payout.status == 1) { // Add to active arrays only if pending
+                    activeLongPayouts.push(orderId);
+                    activeUserPayoutIDs[u.recipient].push(orderId);
+                }
+                emit PayoutOrderCreated(orderId, true, payout.status);
+            } else { // Update existing payout
+                if (u.filled > 0) payout.filled = u.filled;
+                if (u.amountSent > 0) payout.amountSent = u.amountSent;
+                if (u.required > 0) payout.required = u.required;
+                uint8 oldStatus = payout.status;
+                payout.status = u.filled >= payout.required ? 3 : (u.filled > 0 ? 2 : 1);
+                if ((payout.status == 0 || payout.status == 3) && oldStatus == 1) {
+                    removePendingOrder(activeLongPayouts, orderId);
+                    removePendingOrder(activeUserPayoutIDs[u.recipient], orderId);
+                } else if (payout.status == 1 && oldStatus != 1) {
+                    activeLongPayouts.push(orderId);
+                    activeUserPayoutIDs[u.recipient].push(orderId);
+                }
+                emit PayoutOrderUpdated(orderId, true, payout.filled, payout.amountSent, payout.status);
+            }
+        } else {
+            ShortPayoutStruct storage payout = shortPayout[orderId];
+            if (payout.orderId == 0) { // New payout
+                payout.makerAddress = u.recipient;
+                payout.recipientAddress = u.recipient;
+                payout.amount = u.required;
+                payout.filled = 0;
+                payout.orderId = orderId;
+                payout.status = u.required > 0 ? 1 : 0;
+                shortPayoutByIndex.push(orderId);
+                userPayoutIDs[u.recipient].push(orderId);
+                if (payout.status == 1) { // Add to active arrays only if pending
+                    activeShortPayouts.push(orderId);
+                    activeUserPayoutIDs[u.recipient].push(orderId);
+                }
+                emit PayoutOrderCreated(orderId, false, payout.status);
+            } else { // Update existing payout
+                if (u.filled > 0) payout.filled = u.filled;
+                if (u.amountSent > 0) payout.amountSent = u.amountSent;
+                if (u.required > 0) payout.amount = u.required;
+                uint8 oldStatus = payout.status;
+                payout.status = u.filled >= payout.amount ? 3 : (u.filled > 0 ? 2 : 1);
+                if ((payout.status == 0 || payout.status == 3) && oldStatus == 1) {
+                    removePendingOrder(activeShortPayouts, orderId);
+                    removePendingOrder(activeUserPayoutIDs[u.recipient], orderId);
+                } else if (payout.status == 1 && oldStatus != 1) {
+                    activeShortPayouts.push(orderId);
+                    activeUserPayoutIDs[u.recipient].push(orderId);
+                }
+                emit PayoutOrderUpdated(orderId, false, payout.filled, payout.amountSent, payout.status);
+            }
+        }
+        if (longPayout[orderId].orderId == 0 && shortPayout[orderId].orderId == 0) {
+            nextPayoutId = orderId + 1; // Increment nextPayoutId for new payouts
+        }
+    }
 }
 
 // Renamed from "update"
@@ -402,4 +550,46 @@ function resetRouters() external {
         // Returns router addresses
         return routerAddresses;
     }
+    
+    // Added Payout view functions 
+    
+    function longPayoutByIndexView() external view returns (uint256[] memory orderIds) {
+    // Returns long payout order IDs
+    return longPayoutByIndex;
+}
+
+function shortPayoutByIndexView() external view returns (uint256[] memory orderIds) {
+    // Returns short payout order IDs
+    return shortPayoutByIndex;
+}
+
+function userPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
+    // Returns payout order IDs for a user
+    return userPayoutIDs[user];
+}
+
+function activeLongPayoutsView() external view returns (uint256[] memory orderIds) {
+    // Returns active long payout order IDs
+    return activeLongPayouts;
+}
+
+function activeShortPayoutsView() external view returns (uint256[] memory orderIds) {
+    // Returns active short payout order IDs
+    return activeShortPayouts;
+}
+
+function activeUserPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
+    // Returns active payout order IDs for a user
+    return activeUserPayoutIDs[user];
+}
+
+function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory payout) {
+    // Returns long payout details
+    return longPayout[orderId];
+}
+
+function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory payout) {
+    // Returns short payout details
+    return shortPayout[orderId];
+}
 }

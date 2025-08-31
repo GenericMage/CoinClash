@@ -1,13 +1,15 @@
 # CCLiquidityTemplate Documentation
 
 ## Overview
-The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity pools, fees, and slot updates in a decentralized trading platform. It integrates with `ICCAgent`, `ITokenRegistry`, `ICCListing`, `IERC20`, and `ICCGlobalizer` for registry updates, token operations, and liquidity globalization. State variables are public, accessed via auto-generated getters or unique view functions, with amounts normalized to 1e18. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation with try-catch for external calls. Reentrancy protection is handled at the router level.
+The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity pools, fees, slot updates, and payout functionality in a decentralized trading platform. It integrates with `ICCAgent`, `ITokenRegistry`, `ICCListing`, `IERC20`, and `ICCGlobalizer` for registry updates, token operations, and liquidity globalization. State variables are public, accessed via auto-generated getters or unique view functions, with amounts normalized to 1e18. The contract avoids reserved keywords, uses explicit casting, and ensures graceful degradation with try-catch for external calls. Reentrancy protection is handled at the router level.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.7 (Updated 2025-08-31)
+**Version**: 0.1.9 (Updated 2025-08-31)
 
 **Changes**:
+- v0.1.9: Removed redundant `globalizeUpdate` call from `ssUpdate`.
+- v0.1.8: Added payout functionality (`ssUpdate`, `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`, `longPayout`, `shortPayout`, `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs`, `PayoutOrderCreated`, `PayoutOrderUpdated`, `removePendingOrder`, `getNextPayoutID`, and view functions) from `CCListingTemplate.sol`.
 - v0.1.7: Removed `xPrepOut`, `xExecuteOut`, `yPrepOut`, `yExecuteOut`, moved to `CCLiquidityPartial.sol` (v0.1.4). Renamed `update` to `ccUpdate` to align with `CCLiquidityPartial.sol` and avoid call forwarding.
 - v0.1.6: Added `resetRouters` function to fetch lister via `ICCAgent.getLister`, restrict to lister, and update `routers` and `routerAddresses` with `ICCAgent.getRouters`.
 - v0.1.4: Removed fixed gas limit in `globalizeUpdate` for `ICCAgent.globalizerAddress` and `ITokenRegistry.initializeBalances`. Modified `globalizeUpdate` to emit events (`GlobalizeUpdateFailed`, `UpdateRegistryFailed`) on failure without reverting, ensuring deposits succeed. Consolidated registry update into `globalizeUpdate` for atomicity.
@@ -15,7 +17,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - v0.1.2: Integrated `update` calls with `updateType == 0` for subtraction. Maintained fee segregation.
 
 **Compatibility**:
-- CCListingTemplate.sol (v0.0.10)
+- CCListingTemplate.sol (v0.3.5)
 - CCLiquidityRouter.sol (v0.0.25)
 - CCMainPartial.sol (v0.1.3)
 - CCGlobalizer.sol (v0.2.1)
@@ -25,7 +27,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 ## Interfaces
 - **IERC20**: Provides `decimals()` for normalization, `transfer(address, uint256)` for token transfers.
-- **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`), `decimalsA()`, `decimalsB()`, `tokenA()`, `tokenB()`.
+- **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`).
 - **ICCAgent**: Provides `registryAddress()`, `globalizerAddress()`, `getLister(address)` (returns lister address), `getRouters()` (returns router addresses).
 - **ITokenRegistry**: Provides `initializeBalances(address token, address[] memory users)` for balance updates.
 - **ICCGlobalizer**: Provides `globalizeLiquidity(address depositor, address token)` for liquidity tracking.
@@ -41,6 +43,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **`activeXLiquiditySlots`**: `uint256[] public` - Active xSlot indices.
 - **`activeYLiquiditySlots`**: `uint256[] public` - Active ySlot indices.
 - **`routerAddresses`**: `address[] public` - Authorized router addresses.
+- **`nextPayoutId`**: `uint256 private` - Tracks next payout ID.
 
 ## Mappings
 - **`routers`**: `mapping(address => bool) public` - Authorized routers.
@@ -48,6 +51,16 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **`yLiquiditySlots`**: `mapping(uint256 => Slot) public` - Token B slot data.
 - **`userXIndex`**: `mapping(address => uint256[]) public` - User xSlot indices.
 - **`userYIndex`**: `mapping(address => uint256[]) public` - User ySlot indices.
+- **`longPayout`**: `mapping(uint256 => LongPayoutStruct) public` - Long payout details.
+- **`shortPayout`**: `mapping(uint256 => ShortPayoutStruct) public` - Short payout details.
+- **`userPayoutIDs`**: `mapping(address => uint256[]) private` - Payout order IDs per user.
+- **`activeUserPayoutIDs`**: `mapping(address => uint256[]) private` - Active payout order IDs per user.
+
+## Arrays
+- **`longPayoutByIndex`**: `uint256[] private` - Tracks all long payout order IDs.
+- **`shortPayoutByIndex`**: `uint256[] private` - Tracks all short payout order IDs.
+- **`activeLongPayouts`**: `uint256[] private` - Tracks active long payout order IDs (status = 1).
+- **`activeShortPayouts`**: `uint256[] private` - Tracks active short payout order IDs (status = 1).
 
 ## Structs
 1. **LiquidityDetails**:
@@ -76,162 +89,260 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
    - `amountA`: Normalized token A withdrawal.
    - `amountB`: Normalized token B withdrawal.
 
-## Internal Functions
-### globalizeUpdate(address depositor, address token, bool isX, uint256 amount)
-- **Behavior**: Fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, fetches registry via `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances` with `depositor` as a single-user array. Emits `GlobalizeUpdateFailed` or `UpdateRegistryFailed` on failure but does not revert, ensuring deposits succeed. Handles globalization and registry updates atomically.
-- **Parameters**:
-  - `depositor`: Address of the user depositing liquidity.
-  - `token`: Token address (tokenA or tokenB, or zero for ETH).
-  - `isX`: True if updating xSlot (tokenA), false for ySlot (tokenB).
-  - `amount`: Normalized liquidity amount (1e18 precision).
-- **Used in**: `ccUpdate` (for x/y slot deposits), `transactToken`, `transactNative` (for withdrawals).
-- **Gas**: Two external calls (`globalizerAddress`, `globalizeLiquidity`) and two registry calls (`registryAddress`, `initializeBalances`), all with try-catch.
-- **Call Tree**: Calls `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`.
+5. **LongPayoutStruct**:
+   - `makerAddress`: Payout creator.
+   - `recipientAddress`: Payout recipient.
+   - `required`: Normalized token B amount required.
+   - `filled`: Normalized amount filled.
+   - `amountSent`: Normalized token A amount sent.
+   - `orderId`: Payout order ID.
+   - `status`: 0 (cancelled), 1 (pending), 2 (partially filled), 3 (filled).
 
-### ccUpdate(address depositor, UpdateType[] memory updates)
-- **Behavior**: Updates liquidity and slot details for `xLiquiditySlots` or `yLiquiditySlots`, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate` for registry updates, emits `LiquidityUpdated` or `FeesUpdated`.
+6. **ShortPayoutStruct**:
+   - `makerAddress`: Payout creator.
+   - `recipientAddress`: Payout recipient.
+   - `amount`: Normalized token A amount required.
+   - `filled`: Normalized amount filled.
+   - `amountSent`: Normalized token B amount sent.
+   - `orderId`: Payout order ID.
+   - `status`: 0 (cancelled), 1 (pending), 2 (partially filled), 3 (filled).
+
+7. **PayoutUpdate**:
+   - `payoutType`: 0 (long, tokenB), 1 (short, tokenA).
+   - `recipient`: Payout recipient.
+   - `orderId`: Explicit order ID for targeting.
+   - `required`: Normalized amount required.
+   - `filled`: Normalized amount filled.
+   - `amountSent`: Normalized amount of opposite token sent.
+
+## Events
+- **`LiquidityUpdated`**: Emitted on `xLiquid` or `yLiquid` updates (`listingId`, `xLiquid`, `yLiquid`).
+- **`FeesUpdated`**: Emitted on `xFees` or `yFees` updates (`listingId`, `xFees`, `yFees`).
+- **`SlotDepositorChanged`**: Emitted on slot depositor changes (`isX`, `slotIndex`, `oldDepositor`, `newDepositor`).
+- **`GlobalizeUpdateFailed`**: Emitted on `globalizeUpdate` failure (`depositor`, `listingId`, `isX`, `amount`, `reason`).
+- **`UpdateRegistryFailed`**: Emitted on registry update failure (`depositor`, `isX`, `reason`).
+- **`TransactFailed`**: Emitted on transfer failure (`depositor`, `token`, `amount`, `reason`).
+- **`PayoutOrderCreated`**: Emitted on new payout creation (`orderId`, `isLong`, `status`).
+- **`PayoutOrderUpdated`**: Emitted on payout updates (`orderId`, `isLong`, `filled`, `amountSent`, `status`).
+
+## Internal Functions
+### normalize(uint256 amount, uint8 decimals) returns (uint256 normalizedAmount)
+- **Purpose**: Converts amounts to 1e18 precision.
+- **Callers**: `transactToken`, `transactNative`.
+- **Parameters/Interactions**: Uses `IERC20.decimals` for `tokenA` or `tokenB`.
+
+### denormalize(uint256 amount, uint8 decimals) returns (uint256 denormalizedAmount)
+- **Purpose**: Converts amounts from 1e18 to token decimals.
+- **Callers**: `transactToken`, `transactNative`.
+- **Parameters/Interactions**: Uses `IERC20.decimals` for `tokenA` or `tokenB`.
+
+### globalizeUpdate(address depositor, address token, bool isX, uint256 amount)
+- **Purpose**: Fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, fetches registry via `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances` with `depositor` as a single-user array. Emits `GlobalizeUpdateFailed` or `UpdateRegistryFailed` on failure without reverting.
+- **Callers**: `ccUpdate` (x/y slot updates), `transactToken`, `transactNative`.
 - **Parameters**:
-  - `depositor`: Address associated with the update.
-  - `updates`: Array of `UpdateType` structs specifying balance, fee, or slot updates.
-- **Internal Call Flow**:
-  - Iterates `updates`, handling:
-    - `updateType == 0`: Updates `xLiquid` (`index == 0`) or `yLiquid` (`index == 1`).
-    - `updateType == 1`: Updates `xFees` (`index == 0`) or `yFees` (`index == 1`), emits `FeesUpdated`.
-    - `updateType == 2`: Updates `xLiquiditySlots`, adds/removes from `activeXLiquiditySlots`, `userXIndex`, calls `globalizeUpdate` for tokenA.
-    - `updateType == 3`: Updates `yLiquiditySlots`, adds/removes from `activeYLiquiditySlots`, `userYIndex`, calls `globalizeUpdate` for tokenB.
-- **Restrictions**: Router-only (`routers[msg.sender]`).
-- **Gas**: Loop over `updates`, array operations, `globalizeUpdate` calls.
-- **Call Tree**: Calls `globalizeUpdate` (for `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
+  - `depositor`: User depositing liquidity.
+  - `token`: Token address (tokenA, tokenB, or zero for ETH).
+  - `isX`: True for xSlot (tokenA), false for ySlot (tokenB).
+  - `amount`: Normalized amount (1e18).
+- **Internal Call Tree**: `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`.
+- **Gas**: Two external calls (`globalizerAddress`, `globalizeLiquidity`) and two registry calls (`registryAddress`, `initializeBalances`), all with try-catch.
+
+### removePendingOrder(uint256[] storage orders, uint256 orderId)
+- **Purpose**: Removes `orderId` from payout arrays.
+- **Callers**: `ssUpdate`.
+- **Parameters/Interactions**: Manages `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs`.
 
 ## External Functions
 ### setRouters(address[] memory _routers)
-- **Behavior**: Sets routers, stores in `routers` and `routerAddresses`, callable once.
+- **Purpose**: Sets routers, stores in `routers` and `routerAddresses`, callable once.
 - **Parameters**:
   - `_routers`: Array of router addresses.
 - **Restrictions**: Reverts if `routersSet` or `_routers` invalid/empty.
+- **Internal Call Tree**: None.
 - **Gas**: Single loop, array push.
-- **Call Tree**: None.
 
 ### resetRouters()
-- **Behavior**: Fetches lister via `ICCAgent.getLister(listingAddress)`, restricts to lister (`msg.sender`), fetches routers via `ICCAgent.getRouters`, clears `routers` mapping and `routerAddresses` array, updates with new routers, sets `routersSet` to true.
+- **Purpose**: Fetches lister via `ICCAgent.getLister(listingAddress)`, restricts to lister, fetches routers via `ICCAgent.getRouters`, clears `routers` and `routerAddresses`, updates with new routers, sets `routersSet`.
 - **Parameters**: None.
-- **Restrictions**: Reverts if `msg.sender` not lister or no routers available in agent.
-- **Gas**: Two external calls (`getLister`, `getRouters`), loops for clearing and updating arrays.
-- **Call Tree**: Calls `ICCAgent.getLister`, `ICCAgent.getRouters`.
+- **Restrictions**: Reverts if `msg.sender` not lister or no routers available.
+- **Internal Call Tree**: `ICCAgent.getLister`, `ICCAgent.getRouters`.
+- **Gas**: Two external calls, loops for clearing/updating arrays.
 
 ### setListingId(uint256 _listingId)
-- **Behavior**: Sets `listingId`, callable once.
+- **Purpose**: Sets `listingId`, callable once.
 - **Parameters**:
   - `_listingId`: Listing identifier.
 - **Restrictions**: Reverts if `listingId` set.
+- **Internal Call Tree**: None.
 - **Gas**: Single assignment.
-- **Call Tree**: None.
 
 ### setListingAddress(address _listingAddress)
-- **Behavior**: Sets `listingAddress`, callable once.
+- **Purpose**: Sets `listingAddress`, callable once.
 - **Parameters**:
   - `_listingAddress`: Listing contract address.
 - **Restrictions**: Reverts if `listingAddress` set or `_listingAddress` invalid.
+- **Internal Call Tree**: None.
 - **Gas**: Single assignment.
-- **Call Tree**: None.
 
 ### setTokens(address _tokenA, address _tokenB)
-- **Behavior**: Sets `tokenA` and `tokenB`, callable once.
+- **Purpose**: Sets `tokenA` and `tokenB`, callable once.
 - **Parameters**:
   - `_tokenA`: Token A address (ETH if zero).
   - `_tokenB`: Token B address (ETH if zero).
 - **Restrictions**: Reverts if tokens set, identical, or both zero.
+- **Internal Call Tree**: None.
 - **Gas**: Two assignments.
-- **Call Tree**: None.
 
 ### setAgent(address _agent)
-- **Behavior**: Sets `agent`, callable once.
+- **Purpose**: Sets `agent`, callable once.
 - **Parameters**:
   - `_agent`: Agent contract address.
 - **Restrictions**: Reverts if `agent` set or `_agent` invalid.
+- **Internal Call Tree**: None.
 - **Gas**: Single assignment.
-- **Call Tree**: None.
+
+### ccUpdate(address depositor, UpdateType[] memory updates)
+- **Purpose**: Updates liquidity and slot details for `xLiquiditySlots` or `yLiquiditySlots`, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate`, emits `LiquidityUpdated` or `FeesUpdated`.
+- **Parameters**:
+  - `depositor`: Address associated with the update.
+  - `updates`: Array of `UpdateType` structs.
+- **Restrictions**: Router-only (`routers[msg.sender]`).
+- **Internal Call Flow**:
+  - Iterates `updates`:
+    - `updateType == 0`: Updates `xLiquid` (`index == 0`) or `yLiquid` (`index == 1`).
+    - `updateType == 1`: Updates `xFees` (`index == 0`) or `yFees` (`index == 1`), emits `FeesUpdated`.
+    - `updateType == 2`: Updates `xLiquiditySlots`, `activeXLiquiditySlots`, `userXIndex`, calls `globalizeUpdate` (tokenA).
+    - `updateType == 3`: Updates `yLiquiditySlots`, `activeYLiquiditySlots`, `userYIndex`, calls `globalizeUpdate` (tokenB).
+- **Internal Call Tree**: `globalizeUpdate` (`ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
+- **Gas**: Loop over `updates`, array operations, `globalizeUpdate` calls.
+
+### ssUpdate(PayoutUpdate[] calldata updates)
+- **Purpose**: Manages long (tokenB) and short (tokenA) payouts, updates `longPayout` or `shortPayout`, `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs`, increments `nextPayoutId`, emits `PayoutOrderCreated` or `PayoutOrderUpdated`.
+- **Parameters**:
+  - `updates`: Array of `PayoutUpdate` structs.
+- **Restrictions**: Router-only (`routers[msg.sender]`).
+- **Internal Call Flow**:
+  - Iterates `updates`:
+    - Validates `recipient`, `payoutType`, `required`/`filled`.
+    - For `payoutType == 0` (long):
+      - New payout: Sets `makerAddress`, `recipientAddress`, `required`, `orderId`, `status`, updates arrays, emits `PayoutOrderCreated`.
+      - Existing payout: Updates `filled`, `amountSent`, `required`, `status`, manages active arrays, emits `PayoutOrderUpdated`.
+    - For `payoutType == 1` (short): Similar logic for `shortPayout`.
+    - Increments `nextPayoutId` for new payouts.
+- **Internal Call Tree**: `removePendingOrder`.
+- **Gas**: Loop over `updates`, array operations.
 
 ### transactToken(address depositor, address token, uint256 amount, address recipient)
-- **Behavior**: Transfers ERC20 tokens via `IERC20.transfer`, checks `xLiquid`/`yLiquid`, calls `globalizeUpdate`, emits `TransactFailed` on failure.
+- **Purpose**: Transfers ERC20 tokens via `IERC20.transfer`, checks `xLiquid`/`yLiquid`, calls `globalizeUpdate`, emits `TransactFailed` on failure.
 - **Parameters**:
   - `depositor`: Address initiating the transfer (via router).
   - `token`: Token address (tokenA or tokenB).
   - `amount`: Denormalized transfer amount.
   - `recipient`: Address receiving tokens.
 - **Restrictions**: Router-only, valid token, non-zero amount, sufficient `xLiquid`/`yLiquid`.
+- **Internal Call Tree**: `normalize`, `globalizeUpdate` (`ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`), `IERC20.decimals`, `IERC20.transfer`.
 - **Gas**: Single transfer, `globalizeUpdate` call.
-- **Call Tree**: Calls `IERC20.decimals`, `IERC20.transfer`, `globalizeUpdate` (for `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
 
 ### transactNative(address depositor, uint256 amount, address recipient)
-- **Behavior**: Transfers ETH via low-level `call`, checks `xLiquid`/`yLiquid`, calls `globalizeUpdate`, emits `TransactFailed` on failure.
+- **Purpose**: Transfers ETH via low-level `call`, checks `xLiquid`/`yLiquid`, calls `globalizeUpdate`, emits `TransactFailed` on failure.
 - **Parameters**:
   - `depositor`: Address initiating the transfer (via router).
   - `amount`: Denormalized transfer amount (ETH).
   - `recipient`: Address receiving ETH.
 - **Restrictions**: Router-only, non-zero amount, sufficient `xLiquid`/`yLiquid`.
+- **Internal Call Tree**: `normalize`, `globalizeUpdate` (`ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
 - **Gas**: Single transfer, `globalizeUpdate` call.
-- **Call Tree**: Calls `globalizeUpdate` (for `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
 
 ### updateLiquidity(address depositor, bool isX, uint256 amount)
-- **Behavior**: Reduces `xLiquid` (if `isX`) or `yLiquid`, emits `LiquidityUpdated`.
+- **Purpose**: Reduces `xLiquid` (if `isX`) or `yLiquid`, emits `LiquidityUpdated`.
 - **Parameters**:
   - `depositor`: Address initiating the update (via router).
-  - `isX`: True to reduce `xLiquid`, false for `yLiquid`.
+  - `isX`: True for `xLiquid`, false for `yLiquid`.
   - `amount`: Normalized amount to subtract.
 - **Restrictions**: Router-only, sufficient liquidity.
+- **Internal Call Tree**: None.
 - **Gas**: Single update.
-- **Call Tree**: None.
+
+### getNextPayoutID() view returns (uint256 payoutId)
+- **Purpose**: Returns `nextPayoutId`.
+- **Parameters**: None.
+- **Internal Call Tree**: None.
+- **Gas**: Single read.
 
 ## View Functions
 ### getListingAddress(uint256) view returns (address listingAddressReturn)
-- **Behavior**: Returns `listingAddress`.
+- **Purpose**: Returns `listingAddress`.
 
 ### liquidityAmounts() view returns (uint256 xAmount, uint256 yAmount)
-- **Behavior**: Returns `xLiquid`, `yLiquid`.
+- **Purpose**: Returns `xLiquid`, `yLiquid`.
 
 ### liquidityDetailsView(address) view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees)
-- **Behavior**: Returns `liquidityDetail` fields for `CCSEntryPartial` compatibility.
+- **Purpose**: Returns `liquidityDetail` fields for `CCSEntryPartial` compatibility.
 
 ### activeXLiquiditySlotsView() view returns (uint256[] memory slots)
-- **Behavior**: Returns `activeXLiquiditySlots`.
+- **Purpose**: Returns `activeXLiquiditySlots`.
 
 ### activeYLiquiditySlotsView() view returns (uint256[] memory slots)
-- **Behavior**: Returns `activeYLiquiditySlots`.
+- **Purpose**: Returns `activeYLiquiditySlots`.
 
 ### userXIndexView(address user) view returns (uint256[] memory indices)
-- **Behavior**: Returns xSlot indices for `user` from `userXIndex`.
+- **Purpose**: Returns xSlot indices for `user` from `userXIndex`.
 
 ### userYIndexView(address user) view returns (uint256[] memory indices)
-- **Behavior**: Returns ySlot indices for `user` from `userYIndex`.
+- **Purpose**: Returns ySlot indices for `user` from `userYIndex`.
 
 ### getActiveXLiquiditySlots() view returns (uint256[] memory slots)
-- **Behavior**: Returns `activeXLiquiditySlots`.
+- **Purpose**: Returns `activeXLiquiditySlots`.
 
 ### getActiveYLiquiditySlots() view returns (uint256[] memory slots)
-- **Behavior**: Returns `activeYLiquiditySlots`.
+- **Purpose**: Returns `activeYLiquiditySlots`.
 
 ### getXSlotView(uint256 index) view returns (Slot memory slot)
-- **Behavior**: Returns xSlot details.
+- **Purpose**: Returns xSlot details.
 
 ### getYSlotView(uint256 index) view returns (Slot memory slot)
-- **Behavior**: Returns ySlot details.
+- **Purpose**: Returns ySlot details.
 
 ### routerAddressesView() view returns (address[] memory addresses)
-- **Behavior**: Returns `routerAddresses`.
+- **Purpose**: Returns `routerAddresses`.
+
+### longPayoutByIndexView() view returns (uint256[] memory orderIds)
+- **Purpose**: Returns `longPayoutByIndex`.
+
+### shortPayoutByIndexView() view returns (uint256[] memory orderIds)
+- **Purpose**: Returns `shortPayoutByIndex`.
+
+### userPayoutIDsView(address user) view returns (uint256[] memory orderIds)
+- **Purpose**: Returns `userPayoutIDs[user]`.
+
+### activeLongPayoutsView() view returns (uint256[] memory orderIds)
+- **Purpose**: Returns `activeLongPayouts`.
+
+### activeShortPayoutsView() view returns (uint256[] memory orderIds)
+- **Purpose**: Returns `activeShortPayouts`.
+
+### activeUserPayoutIDsView(address user) view returns (uint256[] memory orderIds)
+- **Purpose**: Returns `activeUserPayoutIDs[user]`.
+
+### getLongPayout(uint256 orderId) view returns (LongPayoutStruct memory payout)
+- **Purpose**: Returns `longPayout[orderId]`.
+
+### getShortPayout(uint256 orderId) view returns (ShortPayoutStruct memory payout)
+- **Purpose**: Returns `shortPayout[orderId]`.
 
 ## Additional Details
 - **Decimal Handling**: Normalizes to 1e18 using `IERC20.decimals`, denormalizes for transfers.
 - **Reentrancy Protection**: Handled by routers (`CCLiquidityRouter`).
 - **Gas Optimization**: Dynamic arrays, minimal external calls, try-catch for safety.
-- **Token Usage**: xSlots provide token A, claim yFees; ySlots provide token B, claim xFees.
-- **Events**: `LiquidityUpdated`, `FeesUpdated`, `SlotDepositorChanged`, `GlobalizeUpdateFailed`, `UpdateRegistryFailed`, `TransactFailed`.
+- **Token Usage**: xSlots provide token A, claim yFees; ySlots provide token B, claim xFees. Long payouts (tokenB), short payouts (tokenA).
+- **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
+- **Payout System**: Long/short payouts tracked in `longPayout`, `shortPayout`, with active arrays for status=1, historical arrays for all orders.
+- **Globalization**: In `ccUpdate`, `transactToken`, `transactNative`, calls `globalizeUpdate` for x/y slot updates or withdrawals.
 - **Safety**:
   - Explicit casting for interfaces.
   - No inline assembly, high-level Solidity.
   - Try-catch for external calls with detailed revert strings.
-  - Public state variables accessed via auto-generated getters or unique view functions.
+  - Public state variables accessed via getters or view functions.
   - No reserved keywords, no `virtual`/`override`.
-- **Router Security**: Only `routers[msg.sender]` can call restricted functions (`ccUpdate`, `transactToken`, `transactNative`, etc.).
-- **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
-- **Globalization**: In `ccUpdate`, `transactToken`, `transactNative`, calls `globalizeUpdate` for x/y slot updates or withdrawals, fetching globalizer via `ICCAgent.globalizerAddress`, calling `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)`, and registry via `ICCAgent.registryAddress`, calling `ITokenRegistry.initializeBalances`.
+- **Router Security**: Only `routers[msg.sender]` can call restricted functions (`ccUpdate`, `ssUpdate`, `transactToken`, `transactNative`, etc.).
+- **Events**: Comprehensive event emission for all state changes and failures.

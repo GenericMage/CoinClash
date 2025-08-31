@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.4
+// Version: 0.3.5
 // Changes:
+// - v0.3.5: Moved payout functionality to liquidity template .
 // - v0.3.4: Changed routers visibility. 
 // - v0.3.3: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's latest routers.
 // - v0.3.2: Added view functions for active payout arrays/mappings: activeLongPayoutsView, activeShortPayoutsView, and activeUserPayoutIDsView.
@@ -65,15 +66,6 @@ contract CCListingTemplate {
     bool private _globalizerSet;
     uint256 private nextOrderId; // Returns uint256 nextOrderId
 
-    // Updated PayoutUpdate struct with explicit orderId
-struct PayoutUpdate {
-    uint8 payoutType; // 0: Long, 1: Short
-    address recipient;
-    uint256 orderId; // Explicit orderId for targeting
-    uint256 required; // Amount required for payout
-    uint256 filled; // Amount filled during settlement
-    uint256 amountSent; // Amount of opposite token sent
-}
     struct DayStartFee {
         uint256 dayStartXFeesAcc; // Tracks xFeesAcc at midnight
         uint256 dayStartYFeesAcc; // Tracks yFeesAcc at midnight
@@ -89,14 +81,6 @@ struct PayoutUpdate {
     uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
     uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
     mapping(address maker => uint256[] orderIds) public makerPendingOrders; // Returns uint256[] memory orderIds
-    uint256[] private longPayoutByIndex; // Returns uint256[] memory orderIds
-    uint256[] private shortPayoutByIndex; // Returns uint256[] memory orderIds
-    mapping(address user => uint256[] orderIds) private userPayoutIDs; // Returns uint256[] memory orderIds
-
-// New storage variables for active payouts
-uint256[] private activeLongPayouts; // Tracks active long payout orderIds
-uint256[] private activeShortPayouts; // Tracks active short payout orderIds
-mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Tracks active payout orderIds per user
 
     struct HistoricalData {
         uint256 price;
@@ -139,24 +123,7 @@ mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Trac
         uint256 filled;     // Amount of tokenA filled
         uint256 amountSent; // Amount of tokenB sent during settlement
     }
-    struct LongPayoutStruct {
-        address makerAddress;
-        address recipientAddress;
-        uint256 required;
-        uint256 filled;
-        uint256 amountSent;
-        uint256 orderId;
-        uint8 status;
-    }
-    struct ShortPayoutStruct {
-        address makerAddress;
-        address recipientAddress;
-        uint256 amount;
-        uint256 filled;
-        uint256 amountSent;
-        uint256 orderId;
-        uint8 status;
-    }
+    
     struct UpdateType {
         uint8 updateType; // 0: balance, 1: buy order, 2: sell order, 3: historical
         uint8 structId;   // 0: Core, 1: Pricing, 2: Amounts
@@ -180,13 +147,9 @@ mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Trac
     mapping(uint256 orderId => SellOrderCore) public sellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
     mapping(uint256 orderId => SellOrderPricing) public sellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
     mapping(uint256 orderId => SellOrderAmounts) public sellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => LongPayoutStruct) public longPayout; // Returns LongPayoutStruct memory payout
-    mapping(uint256 orderId => ShortPayoutStruct) public shortPayout; // Returns ShortPayoutStruct memory payout
     mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
 
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
-    event PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status);
-    event PayoutOrderUpdated(uint256 indexed orderId, bool isLong, uint256 filled, uint256 amountSent, uint8 status);
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
     event GlobalizerAddressSet(address indexed globalizer);
     event GlobalUpdateFailed(uint256 indexed listingId, string reason);
@@ -353,94 +316,6 @@ mapping(address user => uint256[] orderIds) private activeUserPayoutIDs; // Trac
             emit TransactionFailed(recipient, "No ETH received");
         }
     }
-
-    // Modified ssUpdate function to handle explicit orderId and active payout tracking
-function ssUpdate(PayoutUpdate[] calldata updates) external {
-    require(routers[msg.sender], "Caller not router");
-    for (uint256 i = 0; i < updates.length; i++) {
-        PayoutUpdate memory u = updates[i];
-        if (u.recipient == address(0)) {
-            emit UpdateFailed(listingId, "Invalid recipient");
-            continue;
-        }
-        if (u.payoutType > 1) {
-            emit UpdateFailed(listingId, "Invalid payout type");
-            continue;
-        }
-        if (u.required == 0 && u.filled == 0) {
-            emit UpdateFailed(listingId, "Invalid required or filled amount");
-            continue;
-        }
-        bool isLong = u.payoutType == 0;
-        uint256 orderId = u.orderId;
-        if (isLong) {
-            LongPayoutStruct storage payout = longPayout[orderId];
-            if (payout.orderId == 0) { // New payout
-                payout.makerAddress = u.recipient;
-                payout.recipientAddress = u.recipient;
-                payout.required = u.required;
-                payout.filled = 0;
-                payout.orderId = orderId;
-                payout.status = u.required > 0 ? 1 : 0;
-                longPayoutByIndex.push(orderId);
-                userPayoutIDs[u.recipient].push(orderId);
-                if (payout.status == 1) { // Add to active arrays only if pending
-                    activeLongPayouts.push(orderId);
-                    activeUserPayoutIDs[u.recipient].push(orderId);
-                }
-                emit PayoutOrderCreated(orderId, true, payout.status);
-            } else { // Update existing payout
-                if (u.filled > 0) payout.filled = u.filled;
-                if (u.amountSent > 0) payout.amountSent = u.amountSent;
-                if (u.required > 0) payout.required = u.required;
-                uint8 oldStatus = payout.status;
-                payout.status = u.filled >= payout.required ? 3 : (u.filled > 0 ? 2 : 1);
-                if ((payout.status == 0 || payout.status == 3) && oldStatus == 1) {
-                    removePendingOrder(activeLongPayouts, orderId);
-                    removePendingOrder(activeUserPayoutIDs[u.recipient], orderId);
-                } else if (payout.status == 1 && oldStatus != 1) {
-                    activeLongPayouts.push(orderId);
-                    activeUserPayoutIDs[u.recipient].push(orderId);
-                }
-                emit PayoutOrderUpdated(orderId, true, payout.filled, payout.amountSent, payout.status);
-            }
-        } else {
-            ShortPayoutStruct storage payout = shortPayout[orderId];
-            if (payout.orderId == 0) { // New payout
-                payout.makerAddress = u.recipient;
-                payout.recipientAddress = u.recipient;
-                payout.amount = u.required;
-                payout.filled = 0;
-                payout.orderId = orderId;
-                payout.status = u.required > 0 ? 1 : 0;
-                shortPayoutByIndex.push(orderId);
-                userPayoutIDs[u.recipient].push(orderId);
-                if (payout.status == 1) { // Add to active arrays only if pending
-                    activeShortPayouts.push(orderId);
-                    activeUserPayoutIDs[u.recipient].push(orderId);
-                }
-                emit PayoutOrderCreated(orderId, false, payout.status);
-            } else { // Update existing payout
-                if (u.filled > 0) payout.filled = u.filled;
-                if (u.amountSent > 0) payout.amountSent = u.amountSent;
-                if (u.required > 0) payout.amount = u.required;
-                uint8 oldStatus = payout.status;
-                payout.status = u.filled >= payout.amount ? 3 : (u.filled > 0 ? 2 : 1);
-                if ((payout.status == 0 || payout.status == 3) && oldStatus == 1) {
-                    removePendingOrder(activeShortPayouts, orderId);
-                    removePendingOrder(activeUserPayoutIDs[u.recipient], orderId);
-                } else if (payout.status == 1 && oldStatus != 1) {
-                    activeShortPayouts.push(orderId);
-                    activeUserPayoutIDs[u.recipient].push(orderId);
-                }
-                emit PayoutOrderUpdated(orderId, false, payout.filled, payout.amountSent, payout.status);
-            }
-        }
-        if (longPayout[orderId].orderId == 0 && shortPayout[orderId].orderId == 0) {
-            nextOrderId = orderId + 1; // Increment nextOrderId for new payouts
-        }
-    }
-}
 
     // Processes balance updates
     function _processBalanceUpdate(uint8 structId, uint256 value) internal returns (bool balanceUpdated) {
@@ -804,17 +679,7 @@ function _setNewRouters(address[] memory newRouters) private {
     function getNextOrderId() external view returns (uint256 orderId_) {
         return nextOrderId;
     }
-
-    // Returns long payout details
-    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory payout) {
-        return longPayout[orderId];
-    }
-
-    // Returns short payout details
-    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory payout) {
-        return shortPayout[orderId];
-    }
-
+    
     // Computes current price from Uniswap V2 pair token balances
     function prices(uint256 _listingId) external view returns (uint256 price) {
     uint256 balanceA;
@@ -941,36 +806,6 @@ function getDayStartIndex(uint256 midnightTimestamp) external view returns (uint
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory orderIds) {
         return makerPendingOrders[maker];
     }
-
-    // Returns long payout IDs
-    function longPayoutByIndexView() external view returns (uint256[] memory orderIds) {
-        return longPayoutByIndex;
-    }
-
-    // Returns short payout IDs
-    function shortPayoutByIndexView() external view returns (uint256[] memory orderIds) {
-        return shortPayoutByIndex;
-    }
-
-    // Returns payout IDs for a user
-    function userPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
-        return userPayoutIDs[user];
-    }
-    
-    // View function to return active long payout order IDs
-function activeLongPayoutsView() external view returns (uint256[] memory orderIds) {
-    return activeLongPayouts;
-}
-
-// View function to return active short payout order IDs
-function activeShortPayoutsView() external view returns (uint256[] memory orderIds) {
-    return activeShortPayouts;
-}
-
-// View function to return active payout order IDs for a user
-function activeUserPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
-    return activeUserPayoutIDs[user];
-}
 
     // Returns historical data at index
     function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data) {
