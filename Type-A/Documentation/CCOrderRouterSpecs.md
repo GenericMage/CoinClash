@@ -1,15 +1,15 @@
 # CCOrderRouter Contract Documentation
 
 ## Overview
-The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a router for creating, canceling, and settling buy/sell orders and long/short liquidation payouts on a decentralized trading platform. It inherits from `CCOrderPartial` (v0.1.4), which extends `CCMainPartial` (v0.1.3), and integrates with `ICCListing` (v0.3.2), `ICCLiquidity` (v0.0.5), and `IERC20` interfaces, using `ReentrancyGuard` for security. The contract handles order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`), cancellation (`clearSingleOrder`, `clearOrders`), and liquidation payout settlement (`settleLongLiquid`, `settleShortLiquid`). State variables are hidden, accessed via view functions, with normalized amounts (1e18 decimals) for precision.
+The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a router for creating, canceling, and settling buy/sell orders and long/short liquidation payouts on a decentralized trading platform. It inherits from `CCOrderPartial` (v0.1.5), which extends `CCMainPartial` (v0.1.4), and integrates with `ICCListing` (v0.3.2), `ICCLiquidity` (v0.0.5), and `IERC20` interfaces, using `ReentrancyGuard` for security. The contract handles order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`), cancellation (`clearSingleOrder`, `clearOrders`), and liquidation payout settlement (`settleLongLiquid`, `settleShortLiquid`). State variables are hidden, accessed via view functions, with normalized amounts (1e18 decimals) for precision.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.2 (Updated 2025-08-31)
+**Version:** 0.1.4 (Updated 2025-08-31)
 
 **Inheritance Tree:** `CCOrderRouter` → `CCOrderPartial` → `CCMainPartial`
 
-**Compatibility:** `CCListingTemplate.sol` (v0.3.2), `CCOrderPartial.sol` (v0.1.4), `CCMainPartial.sol` (v0.1.3), `ICCLiquidity.sol` (v0.0.5).
+**Compatibility:** `CCListingTemplate.sol` (v0.3.2), `CCOrderPartial.sol` (v0.1.5), `CCMainPartial.sol` (v0.1.4), `ICCLiquidity.sol` (v0.0.5), `CCLiquidityTemplate.sol` (v0.1.9).
 
 ## Mappings
 - **`payoutPendingAmounts`**: `mapping(address => mapping(uint256 => uint256))` (inherited from `CCOrderPartial`)
@@ -19,14 +19,14 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 ## Structs
 - **OrderPrep**: Defined in `CCOrderPartial`, contains `maker` (address), `recipient` (address), `amount` (uint256, normalized), `maxPrice` (uint256), `minPrice` (uint256), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256).
 - **PayoutContext**: Defined in `CCOrderPartial`, contains `listingAddress` (address), `liquidityAddr` (address), `tokenOut` (address), `tokenDecimals` (uint8), `amountOut` (uint256, denormalized), `recipientAddress` (address).
-- **ICCListing.PayoutUpdate**: Contains `payoutType` (uint8, 0=Long, 1=Short), `recipient` (address), `orderId` (uint256), `required` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized).
-- **ICCListing.LongPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `required` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized), `orderId` (uint256), `status` (uint8).
-- **ICCListing.ShortPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `amount` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized), `orderId` (uint256), `status` (uint8).
+- **ICCLiquidity.PayoutUpdate**: Contains `payoutType` (uint8, 0=Long, 1=Short), `recipient` (address), `orderId` (uint256), `required` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized).
+- **ICCLiquidity.LongPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `required` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized), `orderId` (uint256), `status` (uint8).
+- **ICCLiquidity.ShortPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `amount` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized), `orderId` (uint256), `status` (uint8).
 - **ICCListing.UpdateType**: Contains `updateType` (uint8), `structId` (uint8), `index` (uint256), `value` (uint256), `addr` (address), `recipient` (address), `maxPrice` (uint256), `minPrice` (uint256), `amountSent` (uint256).
 
 ## Formulas
 1. **Payout Amount**:
-   - **Formula**: `amountOut = denormalize(payout.required, tokenDecimals)` (long), `amountOut = denormalize(payout.amount, tokenDecimals)` (short).
+   - **Formula**: `amountOut = denormalize(payout.required, tokenDecimals)` (long), `amountOut = denormalize(payout.amount, tokenDecimals)` (normal).
    - **Used in**: `settleSingleLongLiquid`, `settleSingleShortLiquid`.
 2. **Liquidity Check**:
    - **Formula**: `sufficient = isLong ? yAmount >= requiredAmount : xAmount >= requiredAmount`.
@@ -96,7 +96,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Parameters**: `listingAddress` (listing contract), `maxIterations` (maximum payouts to process).
 - **Behavior**: Settles long liquidation payouts (tokenB) via liquidity pool using active payout IDs.
 - **Internal Call Flow**:
-  - Calls `ICCListing.activeLongPayoutsView` to fetch active payout IDs.
+  - Calls `ICCLiquidity.activeLongPayoutsView` to fetch active payout IDs.
   - Iterates up to `maxIterations`, calls `settleSingleLongLiquid`:
     - Checks `LongPayoutStruct.required` and `status == 1` (pending).
     - `_prepPayoutContext`: Initializes context (`listingAddress`, `liquidityAddr`, `tokenOut`, `tokenDecimals`, `recipientAddress`).
@@ -105,7 +105,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
     - Calls `ICCLiquidity.updateLiquidity` to reduce liquidity balance by `payout.required`.
     - Updates `payoutPendingAmounts` (subtracts `payout.required`).
     - Creates `PayoutUpdate` (`payoutType=0`, `orderId`, `required=0`, `filled=payout.filled + payout.required`, `amountSent=normalizedReceived`).
-  - Resizes updates array, calls `ICCListing.ssUpdate`.
+  - Resizes updates array, calls `ICCLiquidity.ssUpdate`.
 - **Balance Checks**: Pre/post balance in `_transferNative`/`_transferToken` for `amountSent`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Events/Errors**: Emits `TransferFailed` on transfer failure, returns empty updates array if insufficient liquidity or transfer fails.
@@ -114,7 +114,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Parameters**: Same as `settleLongLiquid`.
 - **Behavior**: Settles short liquidation payouts (tokenA) via liquidity pool using active payout IDs.
 - **Internal Call Flow**:
-  - Calls `ICCListing.activeShortPayoutsView` to fetch active payout IDs.
+  - Calls `ICCLiquidity.activeShortPayoutsView` to fetch active payout IDs.
   - Iterates up to `maxIterations`, calls `settleSingleShortLiquid`:
     - Checks `ShortPayoutStruct.amount` and `status == 1`.
     - `_prepPayoutContext`: Initializes context for tokenA.
@@ -123,7 +123,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
     - Calls `ICCLiquidity.updateLiquidity` to reduce liquidity balance by `payout.amount`.
     - Updates `payoutPendingAmounts` (subtracts `payout.amount`).
     - Creates `PayoutUpdate` (`payoutType=1`, `orderId`, `required=0`, `filled=payout.filled + payout.amount`, `amountSent=normalizedReceived`).
-  - Resizes updates array, calls `ICCListing.ssUpdate`.
+  - Resizes updates array, calls `ICCLiquidity.ssUpdate`.
 - **Balance Checks**: Pre/post balance in `_transferNative`/`_transferToken` for `amountSent`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Events/Errors**: Emits `TransferFailed` on transfer failure, returns empty updates array if insufficient liquidity or transfer fails.
@@ -149,7 +149,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 ## Clarifications and Nuances
 - **Payout Mechanics**:
   - **Long vs. Short**: Long payouts transfer tokenB, short payouts transfer tokenA, both via `ICCLiquidity` liquidity pool.
-  - **Active Payouts**: Uses `activeLongPayoutsView`/`activeShortPayoutsView` to fetch only pending payouts, improving efficiency.
+  - **Active Payouts**: Uses `ICCLiquidity.activeLongPayoutsView`/`activeShortPayoutsView` to fetch only pending payouts, improving efficiency.
   - **Zero-Amount Payouts**: If `required`/`amount` is zero or `status != 1`, sets `PayoutUpdate.required=0`, retains existing `filled` and `amountSent`.
   - **Liquidity Updates**: `settleSingleLongLiquid`/`settleSingleShortLiquid` call `ICCLiquidity.updateLiquidity` to reduce liquidity balances by the requested amount (`payout.required`/`payout.amount`).
   - **Amount Handling**: `required` set to 0 post-settlement, `filled` incremented by requested amount, `amountSent` reflects actual transferred amount (post-tax).

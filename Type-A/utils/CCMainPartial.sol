@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.3
+// Version: 0.1.4
 // Changes:
+// - v0.1.4: Updated ICCListing interface to move payout-related structs and functions aligning with CCListingTemplate.sol v0.3.5 where payout functionality was moved to CCLiquidityTemplate.sol v0.1.9. 
 // - v0.1.3: Updated ICCLiquidity interface to rename update to ccUpdate, reflecting changes in CCLiquidityTemplate.sol.
 // - v0.1.2: Updated ICCListing interface to include new PayoutUpdate struct with orderId and added activeLongPayoutsView, activeShortPayoutsView, activeUserPayoutIDsView functions per CCListingTemplatePatch.txt v0.3.2.
 // - v0.1.1: Updated `ICCListing.PayoutUpdate` struct to include `filled` and `amountSent` fields, aligning with CCListingTemplate.sol v0.3.0 to fix TypeError in CCOrderPartial.sol.
@@ -28,40 +29,12 @@ interface ICCListing {
         uint256 minPrice; // for Pricing struct
         uint256 amountSent; // for Amounts struct
     }
-        struct PayoutUpdate {
-        uint8 payoutType; // 0=Long, 1=Short
-        address recipient;
-        uint256 orderId; // Explicit orderId for targeting
-        uint256 required; // Amount required for payout
-        uint256 filled; // Amount filled during settlement
-        uint256 amountSent; // Amount of opposite token sent
-    }
-        
-    struct LongPayoutStruct {
-        address makerAddress;
-        address recipientAddress;
-        uint256 required;
-        uint256 filled;
-        uint256 amountSent; // Added for payout settlement tracking
-        uint256 orderId;
-        uint8 status;
-    }
-    struct ShortPayoutStruct {
-        address makerAddress;
-        address recipientAddress;
-        uint256 amount;
-        uint256 filled;
-        uint256 amountSent; // Added for payout settlement tracking
-        uint256 orderId;
-        uint8 status;
-    }
     
     function prices(uint256 _listingId) external view returns (uint256);
     function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
-    function ssUpdate(PayoutUpdate[] calldata updates) external;
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
     function getListingId() external view returns (uint256);
@@ -70,11 +43,6 @@ interface ICCListing {
     function pendingBuyOrdersView() external view returns (uint256[] memory);
     function pendingSellOrdersView() external view returns (uint256[] memory);
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
-    function longPayoutByIndexView() external view returns (uint256[] memory);
-    function shortPayoutByIndexView() external view returns (uint256[] memory);
-    function userPayoutIDsView(address user) external view returns (uint256[] memory);
-    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory);
-    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory);
     function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
     function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
     function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
@@ -97,10 +65,6 @@ interface ICCListing {
         uint256[] calldata updateData
     ) external;
     function agentView() external view returns (address);
-    // New view functions for active payouts
-    function activeLongPayoutsView() external view returns (uint256[] memory orderIds);
-    function activeShortPayoutsView() external view returns (uint256[] memory orderIds);
-    function activeUserPayoutIDsView(address user) external view returns (uint256[] memory orderIds);
 }
 
 interface ICCLiquidity {
@@ -111,17 +75,49 @@ interface ICCLiquidity {
         address addr; // Depositor address
         address recipient; // Unused recipient address
     }
-    struct PreparedWithdrawal {
-        uint256 amountA; // Normalized withdrawal amount for token A
-        uint256 amountB; // Normalized withdrawal amount for token B
-    }
+
     struct Slot {
-        address depositor; // Address of the slot owner
-        address recipient; // Unused recipient address
-        uint256 allocation; // Normalized liquidity allocation
-        uint256 dFeesAcc; // Cumulative fees at deposit or last claim
-        uint256 timestamp; // Slot creation timestamp
+        address depositor;
+        address recipient;
+        uint256 allocation;
+        uint256 dFeesAcc;
+        uint256 timestamp;
     }
+
+    struct PreparedWithdrawal {
+        uint256 amountA;
+        uint256 amountB;
+    }
+
+    struct LongPayoutStruct {
+        address makerAddress; // Payout creator
+        address recipientAddress; // Payout recipient
+        uint256 required; // Amount required
+        uint256 filled; // Amount filled
+        uint256 amountSent; // Amount of opposite token sent
+        uint256 orderId; // Payout order ID
+        uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+    }
+
+    struct ShortPayoutStruct {
+        address makerAddress;
+        address recipientAddress;
+        uint256 amount; // Amount required
+        uint256 filled; // Amount filled
+        uint256 amountSent; // Amount of opposite token sent
+        uint256 orderId; // Payout order ID
+        uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+    }
+
+    struct PayoutUpdate {
+        uint8 payoutType; // 0: Long, 1: Short
+        address recipient; // Payout recipient
+        uint256 orderId; // Explicit orderId for targeting
+        uint256 required; // Amount required for payout
+        uint256 filled; // Amount filled during settlement
+        uint256 amountSent; // Amount of opposite token sent
+    }
+
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function getPrice() external view returns (uint256);
     function getRegistryAddress() external view returns (address);
@@ -153,6 +149,15 @@ interface ICCLiquidity {
     function getYSlotView(uint256 index) external view returns (Slot memory);
     function nextXSlotIDView() external view returns (uint256);
     function nextYSlotIDView() external view returns (uint256);
+    function ssUpdate(PayoutUpdate[] calldata updates) external;
+    function longPayoutByIndexView() external view returns (uint256[] memory);
+    function shortPayoutByIndexView() external view returns (uint256[] memory);
+    function userPayoutIDsView(address user) external view returns (uint256[] memory);
+    function activeLongPayoutsView() external view returns (uint256[] memory);
+    function activeShortPayoutsView() external view returns (uint256[] memory);
+    function activeUserPayoutIDsView(address user) external view returns (uint256[] memory);
+    function getLongPayout(uint256 orderId) external view returns (LongPayoutStruct memory);
+    function getShortPayout(uint256 orderId) external view returns (ShortPayoutStruct memory);
 }
 
 interface ICCAgent {

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.4
+// Version: 0.1.5
 // Changes:
+// - v0.1.5: Updated settleSingleLongLiquid and settleSingleShortLiquid to use ICCLiquidity instead of ICCListing for getLongPayout, getShortPayout, and ssUpdate, aligning with payout functionality move to CCLiquidityTemplate.sol v0.1.9.
 // - v0.1.4: Updated settleSingleLongLiquid and settleSingleShortLiquid to use active payout arrays, fetch liquidity balances, settle required amount, reduce required by requested amount, update filled and amountSent based on pre/post checks, and update liquidity balances via ICCLiquidity.updateLiquidity.
 // - v0.1.3: Updated `settleSingleLongLiquid` and `settleSingleShortLiquid` to use `payout.required` or `payout.amount` as `filled` in `PayoutUpdate` to account for transfer taxes, ensuring `filled` reflects the full amount withdrawn from liquidity pool. `amountSent` now uses pre/post balance checks. Removed listing template balance usage for payouts, relying solely on liquidity pool transfers via `_transferNative` or `_transferToken`.
 // - v0.1.2: Updated `_executeSingleOrder` to set `filled=0` in BuyOrderAmounts/SellOrderAmounts (structId=2) to ensure unused fields are zeroed, per CCListingTemplate.sol v0.2.26 requirements.
@@ -232,13 +233,14 @@ contract CCOrderPartial is CCMainPartial {
     function settleSingleLongLiquid(
     address listingAddress,
     uint256 orderIdentifier
-) internal returns (ICCListing.PayoutUpdate[] memory updates) {
+) internal returns (ICCLiquidity.PayoutUpdate[] memory updates) {
     // Settles single long liquidation payout using liquidity pool, updates liquidity balances
     ICCListing listing = ICCListing(listingAddress);
-    ICCListing.LongPayoutStruct memory payout = listing.getLongPayout(orderIdentifier);
+    ICCLiquidity liquidityContract = ICCLiquidity(listing.liquidityAddressView());
+    ICCLiquidity.LongPayoutStruct memory payout = liquidityContract.getLongPayout(orderIdentifier);
     if (payout.required == 0 || payout.status != 1) {
-        updates = new ICCListing.PayoutUpdate[](1);
-        updates[0] = ICCListing.PayoutUpdate({
+        updates = new ICCLiquidity.PayoutUpdate[](1);
+        updates[0] = ICCLiquidity.PayoutUpdate({
             payoutType: 0, // Long
             recipient: payout.recipientAddress,
             orderId: orderIdentifier,
@@ -246,16 +248,15 @@ contract CCOrderPartial is CCMainPartial {
             filled: payout.filled,
             amountSent: payout.amountSent
         });
-        listing.ssUpdate(updates);
+        liquidityContract.ssUpdate(updates);
         return updates;
     }
     PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, true);
     context.recipientAddress = payout.recipientAddress;
     context.amountOut = denormalize(payout.required, context.tokenDecimals);
     if (!_checkLiquidityBalance(context, payout.required, true)) {
-        return new ICCListing.PayoutUpdate[](0);
+        return new ICCLiquidity.PayoutUpdate[](0);
     }
-    ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
     uint256 amountReceived;
     uint256 normalizedReceived;
     if (context.tokenOut == address(0)) {
@@ -286,13 +287,13 @@ contract CCOrderPartial is CCMainPartial {
         normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
     }
     if (normalizedReceived == 0) {
-        return new ICCListing.PayoutUpdate[](0);
+        return new ICCLiquidity.PayoutUpdate[](0);
     }
     payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.required;
     // Update liquidity balance
     liquidityContract.updateLiquidity(context.recipientAddress, true, payout.required);
-    updates = new ICCListing.PayoutUpdate[](1);
-    updates[0] = ICCListing.PayoutUpdate({
+    updates = new ICCLiquidity.PayoutUpdate[](1);
+    updates[0] = ICCLiquidity.PayoutUpdate({
         payoutType: 0, // Long
         recipient: payout.recipientAddress,
         orderId: orderIdentifier,
@@ -300,19 +301,20 @@ contract CCOrderPartial is CCMainPartial {
         filled: payout.filled + payout.required, // Update filled by requested amount
         amountSent: normalizedReceived // Actual amount sent after pre/post checks
     });
-    listing.ssUpdate(updates);
+    liquidityContract.ssUpdate(updates);
 }
 
 function settleSingleShortLiquid(
     address listingAddress,
     uint256 orderIdentifier
-) internal returns (ICCListing.PayoutUpdate[] memory updates) {
+) internal returns (ICCLiquidity.PayoutUpdate[] memory updates) {
     // Settles single short liquidation payout using liquidity pool, updates liquidity balances
     ICCListing listing = ICCListing(listingAddress);
-    ICCListing.ShortPayoutStruct memory payout = listing.getShortPayout(orderIdentifier);
+    ICCLiquidity liquidityContract = ICCLiquidity(listing.liquidityAddressView());
+    ICCLiquidity.ShortPayoutStruct memory payout = liquidityContract.getShortPayout(orderIdentifier);
     if (payout.amount == 0 || payout.status != 1) {
-        updates = new ICCListing.PayoutUpdate[](1);
-        updates[0] = ICCListing.PayoutUpdate({
+        updates = new ICCLiquidity.PayoutUpdate[](1);
+        updates[0] = ICCLiquidity.PayoutUpdate({
             payoutType: 1, // Short
             recipient: payout.recipientAddress,
             orderId: orderIdentifier,
@@ -320,16 +322,15 @@ function settleSingleShortLiquid(
             filled: payout.filled,
             amountSent: payout.amountSent
         });
-        listing.ssUpdate(updates);
+        liquidityContract.ssUpdate(updates);
         return updates;
     }
     PayoutContext memory context = _prepPayoutContext(listingAddress, orderIdentifier, false);
     context.recipientAddress = payout.recipientAddress;
     context.amountOut = denormalize(payout.amount, context.tokenDecimals);
     if (!_checkLiquidityBalance(context, payout.amount, false)) {
-        return new ICCListing.PayoutUpdate[](0);
+        return new ICCLiquidity.PayoutUpdate[](0);
     }
-    ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
     uint256 amountReceived;
     uint256 normalizedReceived;
     if (context.tokenOut == address(0)) {
@@ -360,20 +361,20 @@ function settleSingleShortLiquid(
         normalizedReceived = amountReceived > 0 ? normalize(amountReceived, context.tokenDecimals) : 0;
     }
     if (normalizedReceived == 0) {
-        return new ICCListing.PayoutUpdate[](0);
+        return new ICCLiquidity.PayoutUpdate[](0);
     }
     payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.amount;
     // Update liquidity balance
     liquidityContract.updateLiquidity(context.recipientAddress, false, payout.amount);
-    updates = new ICCListing.PayoutUpdate[](1);
-    updates[0] = ICCListing.PayoutUpdate({
+    updates = new ICCLiquidity.PayoutUpdate[](1);
+    updates[0] = ICCLiquidity.PayoutUpdate({
         payoutType: 1, // Short
         recipient: payout.recipientAddress,
         orderId: orderIdentifier,
         required: 0, // Reduce required by requested amount
-        filled: payout.filled + payout.amount, // Update filled by requested amount
+        filled: payout.filled + payout.amount, // Update filled by requested amount amount
         amountSent: normalizedReceived // Actual amount sent after pre/post checks
     });
-    listing.ssUpdate(updates);
+    liquidityContract.ssUpdate(updates);
 }
 }
