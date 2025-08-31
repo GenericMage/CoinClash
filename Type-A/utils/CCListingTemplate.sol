@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.2
+// Version: 0.3.3
 // Changes:
+// - v0.3.3: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's latest routers.
 // - v0.3.2: Added view functions for active payout arrays/mappings: activeLongPayoutsView, activeShortPayoutsView, and activeUserPayoutIDsView.
 // - v0.3.1: Added activeLongPayouts, activeShortPayouts, and activeUserPayoutIDs arrays to track active payout IDs.
 // - Modified PayoutUpdate struct to include orderId for explicit targeting.
@@ -39,6 +40,11 @@ interface ITokenRegistry {
 
 interface ICCGlobalizer {
     function globalizeOrders(address maker, address token) external;
+}
+
+interface ICCAgent {
+    function getLister(address listingAddress) external view returns (address lister);
+    function getRouters() external view returns (address[] memory routers);
 }
 
 contract CCListingTemplate {
@@ -724,6 +730,68 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
         require(registryAddress_ != address(0), "Invalid registry address");
         registryAddress = registryAddress_;
     }
+    
+// New function to reset routers to agent's latest routers, restricted to lister
+function resetRouters() external {
+    // Fetches lister address from agent
+    address lister;
+    try ICCAgent(agentView).getLister(address(this)) returns (address _lister) {
+        lister = _lister;
+    } catch (bytes memory reason) {
+        emit ExternalCallFailed(agentView, "getLister", string(reason));
+        return;
+    }
+    require(lister == msg.sender, "Caller not lister");
+
+    // Clears existing routers
+    _clearRouters();
+
+    // Fetches and sets new routers from agent
+    address[] memory newRouters = _fetchAgentRouters();
+    if (newRouters.length == 0) {
+        emit UpdateFailed(listingId, "No routers fetched from agent");
+        return;
+    }
+    _setNewRouters(newRouters);
+}
+
+// Helper function to clear existing routers
+function _clearRouters() private {
+    // Fetches current routers from agent to clear mapping
+    address[] memory currentRouters;
+    try ICCAgent(agentView).getRouters() returns (address[] memory routerList) {
+        currentRouters = routerList;
+    } catch (bytes memory reason) {
+        emit ExternalCallFailed(agentView, "getRouters", string(reason));
+        return;
+    }
+    // Clears mapping entries
+    for (uint256 i = 0; i < currentRouters.length; i++) {
+        _routers[currentRouters[i]] = false;
+    }
+    _routersSet = false;
+}
+
+// Helper function to fetch routers from agent
+function _fetchAgentRouters() private returns (address[] memory newRouters) {
+    // Attempts to fetch routers from agent
+    try ICCAgent(agentView).getRouters() returns (address[] memory routerList) {
+        return routerList;
+    } catch (bytes memory reason) {
+        emit ExternalCallFailed(agentView, "getRouters", string(reason));
+        return new address[](0);
+    }
+}
+
+// Helper function to set new routers
+function _setNewRouters(address[] memory newRouters) private {
+    // Sets new routers in mapping
+    for (uint256 i = 0; i < newRouters.length; i++) {
+        require(newRouters[i] != address(0), "Invalid router address");
+        _routers[newRouters[i]] = true;
+    }
+    _routersSet = true;
+}
 
     // Returns token pair
     function getTokens() external view returns (address tokenA_, address tokenB_) {

@@ -4,8 +4,9 @@
 The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized trading for a token pair, using Uniswap V2 for price discovery via `IERC20.balanceOf`. It manages buy and sell orders, long and short payouts, and normalized (1e18 precision) balances. Volumes are tracked in `_historicalData` during order settlement or cancellation, with auto-generated historical data if not provided by routers. Payouts are tracked with active and historical arrays for efficient querying. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
 
 ## Version
-- **0.3.2**
+- **0.3.3**
 - **Changes**:
+  - v0.3.3: Added `resetRouters` function to fetch lister from `CCAgent`, restrict to lister, and update `_routers` mapping with agent's latest routers. Added helper functions `_clearRouters`, `_fetchAgentRouters`, `_setNewRouters` to manage router updates.
   - v0.3.2: Added view functions `activeLongPayoutsView`, `activeShortPayoutsView`, `activeUserPayoutIDsView` for active payout arrays/mappings.
   - v0.3.1: Added `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs` to track active payout IDs (status = 1). Modified `PayoutUpdate` to include `orderId` for explicit targeting. Updated `ssUpdate` to use `orderId`, populate/depopulate active payout arrays, and retain historical arrays.
   - v0.3.0: Bumped version.
@@ -23,6 +24,7 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **ICCLiquidityTemplate**: Defines `liquidityDetail()`.
 - **ITokenRegistry**: Defines `initializeTokens(address, address[])`.
 - **ICCGlobalizer**: Defines `globalizeOrders(address, address)`.
+- **ICCAgent**: Defines `getLister(address)`, `getRouters()`.
 
 ## Structs
 - **PayoutUpdate**: `payoutType` (0: Long, 1: Short), `recipient`, `orderId`, `required`, `filled`, `amountSent`.
@@ -91,6 +93,20 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **Internal Call Tree**: None.
 - **Parameters/Interactions**: `routers_` authorizes addresses for restricted functions.
 
+#### resetRouters()
+- **Purpose**: Resets `_routers` mapping to agent's latest routers, restricted to lister.
+- **Logic**:
+  1. Calls `ICCAgent.getLister` to fetch lister for current contract address.
+  2. Verifies `msg.sender` is lister.
+  3. Calls `_clearRouters` to reset `_routers` mapping and `_routersSet`.
+  4. Calls `_fetchAgentRouters` to get agent's routers via `ICCAgent.getRouters`.
+  5. Calls `_setNewRouters` to update `_routers` mapping with new routers.
+- **State Changes**: `_routers`, `_routersSet`.
+- **External Interactions**: `ICCAgent.getLister`, `ICCAgent.getRouters`.
+- **Internal Call Tree**: `_clearRouters` (fetches current routers via `ICCAgent.getRouters`, clears `_routers`), `_fetchAgentRouters` (calls `ICCAgent.getRouters`), `_setNewRouters` (updates `_routers`, sets `_routersSet`).
+- **Errors**: Emits `ExternalCallFailed` for failed external calls, `UpdateFailed` if no routers fetched, reverts if caller not lister or invalid router addresses.
+- **Parameters/Interactions**: Uses `agentView` for `ICCAgent` interactions, updates `_routers` to match `CCAgent` routers.
+
 #### setListingId(uint256 _listingId)
 - **Purpose**: Sets listing identifier (callable once).
 - **State Changes**: `listingId`.
@@ -118,7 +134,7 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **State Changes**: `agentView`.
 - **Errors**: Reverts if already set or invalid address.
 - **Internal Call Tree**: None.
-- **Parameters/Interactions**: Sets `agentView` (view-only, no direct interactions).
+- **Parameters/Interactions**: Sets `agentView` for `resetRouters` interactions with `ICCAgent`.
 
 #### setRegistry(address registryAddress_)
 - **Purpose**: Sets registry address (callable once).
@@ -151,8 +167,7 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **Purpose**: Updates balances, buy/sell orders, or historical data, callable by routers.
 - **Parameters**:
   - `updateType`: Array of update types (0: balance, 1: buy order, 2: sell order, 3: historical).
-  - `updateSort`: Array specifying struct to update (0: Core, 1: Pricing, 2: Amounts for orders; 0 for balance/historical).
-  - `updateData`: Array of encoded data for struct fields, decoded via `abi.decode`.
+  - `updateSort`: Array specifying struct to update (0: Core, 1: Pricing, 2: Amounts for orders;  assent
 - **Logic**:
   1. Verifies router caller and array length consistency.
   2. Computes current midnight timestamp (`(block.timestamp / 86400) * 86400`).
@@ -172,7 +187,7 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
   8. Calls `globalizeUpdate`.
 - **State Changes**: `_balance`, `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `_dayStartIndices`, `dayStartFee`.
 - **External Interactions**: `IUniswapV2Pair.token0`, `IERC20.balanceOf`, `ICCLiquidityTemplate.liquidityDetail`, `ITokenRegistry.initializeTokens` (via `_updateRegistry`), `ICCGlobalizer.globalizeOrders` (via `globalizeUpdate`).
-- **Internal Call Tree**: `_processBalanceUpdate` (sets `_balance`, emits `BalancesUpdated`), `_processBuyOrderUpdate` (updates buy orders, calls `removePendingOrder`, `uint2str`), `_processSellOrderUpdate` (updates sell orders, calls `removePendingOrder`, `uint2str`), `_processHistoricalUpdate` (creates `HistoricalData`, calls `_floorToMidnight`), `_updateRegistry` (calls `ITokenRegistry.initializeTokens`), `globalizeUpdate` (calls `ICCGlobalizer.globalizeOrders`, `uint2str`), `_floorToMidnight` (timestamp rounding), `_isSameDay` (day check), `removePendingOrder` (array management), `uint2str` (error messages).
+- **Internal Call Tree**: `_processBalanceUpdate` (sets `_balance`, emits `BalancesUpdated`), `_processBuyOrderUpdate` (updates buy orders, calls `removePendingOrder`, `uint2str`, `_updateRegistry`), `_processSellOrderUpdate` (updates sell orders, calls `removePendingOrder`, `uint2str`, `_updateRegistry`), `_processHistoricalUpdate` (creates `HistoricalData`, calls `_floorToMidnight`), `_updateRegistry` (calls `ITokenRegistry.initializeTokens`), `globalizeUpdate` (calls `ICCGlobalizer.globalizeOrders`, `uint2str`), `_floorToMidnight` (timestamp rounding), `_isSameDay` (day check), `removePendingOrder` (array management), `uint2str` (error messages).
 - **Errors**: Emits `UpdateFailed`, `OrderUpdateIncomplete`, `OrderUpdatesComplete`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`.
 - **Parameters/Interactions**: `updateType`, `updateSort`, `updateData` allow flexible updates. `updateData` encodes struct fields (e.g., `(address, address, uint8)` for Core) via `abi.decode`. Balances use `tokenA`, `tokenB` via `IERC20.balanceOf`. Fees and global updates interact with external contracts.
 
@@ -410,6 +425,26 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **Internal Call Tree**: `_floorToMidnight`.
 - **Parameters/Interactions**: Uses `value` as `price`, `_balance`, and timestamp for `_historicalData`.
 
+#### _clearRouters()
+- **Purpose**: Clears `_routers` mapping by fetching current routers from `ICCAgent.getRouters`.
+- **Callers**: `resetRouters`.
+- **External Interactions**: `ICCAgent.getRouters`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Resets `_routers` and `_routersSet` for new router updates.
+
+#### _fetchAgentRouters() returns (address[] memory newRouters)
+- **Purpose**: Fetches routers from `ICCAgent.getRouters`.
+- **Callers**: `resetRouters`.
+- **External Interactions**: `ICCAgent.getRouters`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Returns router array or empty array on failure.
+
+#### _setNewRouters(address[] memory newRouters)
+- **Purpose**: Updates `_routers` mapping with new routers.
+- **Callers**: `resetRouters`.
+- **Internal Call Tree**: None.
+- **Parameters/Interactions**: Sets `_routers` entries to true, updates `_routersSet`.
+
 ## Parameters and Interactions
 - **Orders**: `ccUpdate` with `updateType=0` updates `_balance`. Buy (`updateType=1`): inputs `tokenB` (`amounts.filled`), outputs `tokenA` (`amounts.amountSent`). Sell (`updateType=2`): inputs `tokenA` (`amounts.filled`), outputs `tokenB` (`amounts.amountSent`). Buy adds to `yVolume`, sell to `xVolume`. Tracked via `orderStatus`, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
 - **Payouts**: Long (`tokenB`), short (`tokenA`) via `ssUpdate`, indexed by `orderId`. Active payouts (status=1) tracked in `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs`; historical in `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`.
@@ -418,6 +453,6 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **Globalizer**: Updated via `globalizeUpdate` in `ccUpdate` with `maker`, `tokenA` or `tokenB`.
 - **Liquidity**: `ICCLiquidityTemplate.liquidityDetail` for fees in `ccUpdate`, stored in `dayStartFee`.
 - **Historical Data**: Stored in `_historicalData` via `ccUpdate` (`updateType=3`) or auto-generated, using Uniswap V2 price.
-- **External Calls**: `IERC20.balanceOf` (`prices`, `volumeBalances`, `transactToken`), `IERC20.transfer` (`transactToken`), `IERC20.decimals` (`setTokens`), `IUniswapV2Pair.token0` (`ccUpdate`), `ICCLiquidityTemplate.liquidityDetail` (`ccUpdate`), `ITokenRegistry.initializeTokens` (`_updateRegistry`), `ICCGlobalizer.globalizeOrders` (`globalizeUpdate`), low-level `call` (`transactNative`).
+- **External Calls**: `IERC20.balanceOf` (`prices`, `volumeBalances`, `transactToken`), `IERC20.transfer` (`transactToken`), `IERC20.decimals` (`setTokens`), `IUniswapV2Pair.token0` (`ccUpdate`), `ICCLiquidityTemplate.liquidityDetail` (`ccUpdate`), `ITokenRegistry.initializeTokens` (`_updateRegistry`), `ICCGlobalizer.globalizeOrders` (`globalizeUpdate`), `ICCAgent.getLister` (`resetRouters`), `ICCAgent.getRouters` (`resetRouters`, `_clearRouters`, `_fetchAgentRouters`), low-level `call` (`transactNative`).
 - **Security**: Router checks, try-catch, explicit casting, relaxed validation, emits `UpdateFailed`, `TransactionFailed`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`.
-- **Optimization**: Normalized amounts, `maxIterations` in view functions, auto-generated historical data, helper functions in `ccUpdate`, active payout arrays for efficient querying.
+- **Optimization**: Normalized amounts, `maxIterations` in view functions, auto-generated historical data, helper functions in `ccUpdate` and `resetRouters`, active payout arrays for efficient querying.
