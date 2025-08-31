@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- * Version: 0.1.6
+ * Version: 0.1.7
  * Changes:
+ * - v0.1.7: Removed xPrepOut, xExecuteOut, yPrepOut, yExecuteOut, moving withdrawal logic to CCLiquidityPartial.sol. Renamed update to ccUpdate to avoid call forwarding and ensure router is msg.sender.
  * - v0.1.6: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's routers.
 // - v0.1.5: Removed routers[msg.sender] check from xPrepOut and yPrepOut to allow user-initiated calls via CCLiquidityRouter.sol. Kept restriction in xExecuteOut and yExecuteOut for state-changing operations.
  - v0.1.4: Removed fixed gas limit in globalizeUpdate for ICCAgent.globalizerAddress and ITokenRegistry.initializeBalances. Modified globalizeUpdate to emit event on failure without reverting, ensuring deposits succeed. Consolidated registry update into globalizeUpdate for atomicity. Maintained compatibility with CCGlobalizer.sol v0.2.1, CCSEntryPartial.sol v0.0.18.
@@ -205,100 +206,79 @@ function resetRouters() external {
     routersSet = true;
 }
 
-    function update(address depositor, UpdateType[] memory updates) external {
-        // Updates liquidity and slot details
-        require(routers[msg.sender], "Router only");
-        LiquidityDetails storage details = liquidityDetail;
-        for (uint256 i = 0; i < updates.length; i++) {
-            UpdateType memory u = updates[i];
-            if (u.updateType == 0) {
-                if (u.index == 0) {
-                    require(details.xLiquid >= u.value, "Insufficient xLiquid");
-                    details.xLiquid = u.value;
-                } else if (u.index == 1) {
-                    require(details.yLiquid >= u.value, "Insufficient yLiquid");
-                    details.yLiquid = u.value;
-                } else revert("Invalid balance index");
-            } else if (u.updateType == 1) {
-                if (u.index == 0) {
-                    details.xFees += u.value;
-                    emit FeesUpdated(listingId, details.xFees, details.yFees);
-                } else if (u.index == 1) {
-                    details.yFees += u.value;
-                    emit FeesUpdated(listingId, details.xFees, details.yFees);
-                } else revert("Invalid fee index");
-            } else if (u.updateType == 2) {
-                Slot storage slot = xLiquiditySlots[u.index];
-                if (slot.depositor == address(0) && u.addr != address(0)) {
-                    slot.depositor = u.addr;
-                    slot.timestamp = block.timestamp;
-                    slot.dFeesAcc = details.yFeesAcc;
-                    activeXLiquiditySlots.push(u.index);
-                    userXIndex[u.addr].push(u.index);
-                } else if (u.addr == address(0)) {
-                    slot.depositor = address(0);
-                    slot.allocation = 0;
-                    slot.dFeesAcc = 0;
-                    for (uint256 j = 0; j < userXIndex[slot.depositor].length; j++) {
-                        if (userXIndex[slot.depositor][j] == u.index) {
-                            userXIndex[slot.depositor][j] = userXIndex[slot.depositor][userXIndex[slot.depositor].length - 1];
-                            userXIndex[slot.depositor].pop();
-                            break;
-                        }
+// Renamed from "update"
+    function ccUpdate(address depositor, UpdateType[] memory updates) external {
+    // Updates liquidity and slot details
+    require(routers[msg.sender], "Router only");
+    LiquidityDetails storage details = liquidityDetail;
+    for (uint256 i = 0; i < updates.length; i++) {
+        UpdateType memory u = updates[i];
+        if (u.updateType == 0) {
+            if (u.index == 0) {
+                require(details.xLiquid >= u.value, "Insufficient xLiquid");
+                details.xLiquid = u.value;
+            } else if (u.index == 1) {
+                require(details.yLiquid >= u.value, "Insufficient yLiquid");
+                details.yLiquid = u.value;
+            } else revert("Invalid balance index");
+        } else if (u.updateType == 1) {
+            if (u.index == 0) {
+                details.xFees += u.value;
+                emit FeesUpdated(listingId, details.xFees, details.yFees);
+            } else if (u.index == 1) {
+                details.yFees += u.value;
+                emit FeesUpdated(listingId, details.xFees, details.yFees);
+            } else revert("Invalid fee index");
+        } else if (u.updateType == 2) {
+            Slot storage slot = xLiquiditySlots[u.index];
+            if (slot.depositor == address(0) && u.addr != address(0)) {
+                slot.depositor = u.addr;
+                slot.timestamp = block.timestamp;
+                slot.dFeesAcc = details.yFeesAcc;
+                activeXLiquiditySlots.push(u.index);
+                userXIndex[u.addr].push(u.index);
+            } else if (u.addr == address(0)) {
+                slot.depositor = address(0);
+                slot.allocation = 0;
+                slot.dFeesAcc = 0;
+                for (uint256 j = 0; j < userXIndex[slot.depositor].length; j++) {
+                    if (userXIndex[slot.depositor][j] == u.index) {
+                        userXIndex[slot.depositor][j] = userXIndex[slot.depositor][userXIndex[slot.depositor].length - 1];
+                        userXIndex[slot.depositor].pop();
+                        break;
                     }
                 }
-                slot.allocation = u.value;
-                details.xLiquid += u.value;
-                globalizeUpdate(depositor, tokenA, true, u.value);
-            } else if (u.updateType == 3) {
-                Slot storage slot = yLiquiditySlots[u.index];
-                if (slot.depositor == address(0) && u.addr != address(0)) {
-                    slot.depositor = u.addr;
-                    slot.timestamp = block.timestamp;
-                    slot.dFeesAcc = details.xFeesAcc;
-                    activeYLiquiditySlots.push(u.index);
-                    userYIndex[u.addr].push(u.index);
-                } else if (u.addr == address(0)) {
-                    slot.depositor = address(0);
-                    slot.allocation = 0;
-                    slot.dFeesAcc = 0;
-                    for (uint256 j = 0; j < userYIndex[slot.depositor].length; j++) {
-                        if (userYIndex[slot.depositor][j] == u.index) {
-                            userYIndex[slot.depositor][j] = userYIndex[slot.depositor][userYIndex[slot.depositor].length - 1];
-                            userYIndex[slot.depositor].pop();
-                            break;
-                        }
-                    }
-                }
-                slot.allocation = u.value;
-                details.yLiquid += u.value;
-                globalizeUpdate(depositor, tokenB, false, u.value);
-            } else revert("Invalid update type");
-        }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-    }
-
-    function changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor) external {
-        // Changes depositor for a liquidity slot
-        require(routers[msg.sender], "Router only");
-        require(newDepositor != address(0), "Invalid new depositor");
-        require(depositor != address(0), "Invalid depositor");
-        Slot storage slot = isX ? xLiquiditySlots[slotIndex] : yLiquiditySlots[slotIndex];
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        require(slot.allocation > 0, "Invalid slot");
-        address oldDepositor = slot.depositor;
-        slot.depositor = newDepositor;
-        mapping(address => uint256[]) storage index = isX ? userXIndex : userYIndex;
-        for (uint256 i = 0; i < index[oldDepositor].length; i++) {
-            if (index[oldDepositor][i] == slotIndex) {
-                index[oldDepositor][i] = index[oldDepositor][index[oldDepositor].length - 1];
-                index[oldDepositor].pop();
-                break;
             }
-        }
-        index[newDepositor].push(slotIndex);
-        emit SlotDepositorChanged(isX, slotIndex, oldDepositor, newDepositor);
+            slot.allocation = u.value;
+            details.xLiquid += u.value;
+            globalizeUpdate(depositor, tokenA, true, u.value);
+        } else if (u.updateType == 3) {
+            Slot storage slot = yLiquiditySlots[u.index];
+            if (slot.depositor == address(0) && u.addr != address(0)) {
+                slot.depositor = u.addr;
+                slot.timestamp = block.timestamp;
+                slot.dFeesAcc = details.xFeesAcc;
+                activeYLiquiditySlots.push(u.index);
+                userYIndex[u.addr].push(u.index);
+            } else if (u.addr == address(0)) {
+                slot.depositor = address(0);
+                slot.allocation = 0;
+                slot.dFeesAcc = 0;
+                for (uint256 j = 0; j < userYIndex[slot.depositor].length; j++) {
+                    if (userYIndex[slot.depositor][j] == u.index) {
+                        userYIndex[slot.depositor][j] = userYIndex[slot.depositor][userYIndex[slot.depositor].length - 1];
+                        userYIndex[slot.depositor].pop();
+                        break;
+                    }
+                }
+            }
+            slot.allocation = u.value;
+            details.yLiquid += u.value;
+            globalizeUpdate(depositor, tokenB, false, u.value);
+        } else revert("Invalid update type");
     }
+    emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
+}
 
     function transactToken(address depositor, address token, uint256 amount, address recipient) external {
         // Transfers ERC20 tokens to recipient for withdrawal
@@ -359,142 +339,6 @@ function resetRouters() external {
             details.yLiquid -= amount;
         }
         emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-    }
-
-    function xPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory withdrawal) {
-    // Prepares withdrawal for xLiquidity slot
-    require(depositor != address(0), "Invalid depositor");
-    LiquidityDetails storage details = liquidityDetail;
-    Slot storage slot = xLiquiditySlots[index];
-    require(slot.depositor == depositor, "Depositor not slot owner");
-    require(slot.allocation >= amount, "Amount exceeds allocation");
-    uint256 withdrawAmountA = amount > details.xLiquid ? details.xLiquid : amount;
-    uint256 deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0;
-    uint256 withdrawAmountB = 0;
-    if (deficit > 0) {
-        uint256 currentPrice;
-        try ICCListing(listingAddress).prices(0) returns (uint256 price) {
-            currentPrice = price;
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Price fetch failed: ", reason)));
-        }
-        if (currentPrice == 0) return PreparedWithdrawal(withdrawAmountA, 0);
-        uint256 compensation = (deficit * 1e18) / currentPrice;
-        withdrawAmountB = compensation > details.yLiquid ? details.yLiquid : compensation;
-    }
-    return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
-}
-
-    function xExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external {
-        // Executes withdrawal for xLiquidity slot
-        require(routers[msg.sender], "Router only");
-        require(depositor != address(0), "Invalid depositor");
-        Slot storage slot = xLiquiditySlots[index];
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        UpdateType[] memory updates = new UpdateType[](1);
-        updates[0] = UpdateType(2, index, slot.allocation - withdrawal.amountA, slot.depositor, address(0));
-        try this.update(depositor, updates) {
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Withdrawal update failed: ", reason)));
-        }
-        if (withdrawal.amountA > 0) {
-            uint8 decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
-            uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
-            if (tokenA == address(0) && amountA > 0) {
-                try this.transactNative(depositor, amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else if (amountA > 0) {
-                try this.transactToken(depositor, tokenA, amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-        if (withdrawal.amountB > 0) {
-            uint8 decimalsB = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
-            uint256 amountB = denormalize(withdrawal.amountB, decimalsB);
-            if (tokenB == address(0)) {
-                try this.transactNative(depositor, amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try this.transactToken(depositor, tokenB, amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-    }
-
-    function yPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory withdrawal) {
-    // Prepares withdrawal for yLiquidity slot
-    require(depositor != address(0), "Invalid depositor");
-    LiquidityDetails storage details = liquidityDetail;
-    Slot storage slot = yLiquiditySlots[index];
-    require(slot.depositor == depositor, "Depositor not slot owner");
-    require(slot.allocation >= amount, "Amount exceeds allocation");
-    uint256 withdrawAmountB = amount > details.yLiquid ? details.yLiquid : amount;
-    uint256 deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0;
-    uint256 withdrawAmountA = 0;
-    if (deficit > 0) {
-        uint256 currentPrice;
-        try ICCListing(listingAddress).prices(0) returns (uint256 price) {
-            currentPrice = price;
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Price fetch failed: ", reason)));
-        }
-        if (currentPrice == 0) return PreparedWithdrawal(0, withdrawAmountB);
-        uint256 compensation = (deficit * currentPrice) / 1e18;
-        withdrawAmountA = compensation > details.xLiquid ? details.xLiquid : compensation;
-    }
-    return PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
-}
-
-    function yExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external {
-        // Executes withdrawal for yLiquidity slot
-        require(routers[msg.sender], "Router only");
-        require(depositor != address(0), "Invalid depositor");
-        Slot storage slot = yLiquiditySlots[index];
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        UpdateType[] memory updates = new UpdateType[](1);
-        updates[0] = UpdateType(3, index, slot.allocation - withdrawal.amountB, slot.depositor, address(0));
-        try this.update(depositor, updates) {
-        } catch (bytes memory reason) {
-            revert(string(abi.encodePacked("Withdrawal update failed: ", reason)));
-        }
-        if (withdrawal.amountB > 0) {
-            uint8 decimalsB = tokenB == address(0) ? 18 : IERC20(tokenB).decimals();
-            uint256 amountB = denormalize(withdrawal.amountB, decimalsB);
-            if (tokenB == address(0)) {
-                try this.transactNative(depositor, amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try this.transactToken(depositor, tokenB, amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-        if (withdrawal.amountA > 0) {
-            uint8 decimalsA = tokenA == address(0) ? 18 : IERC20(tokenA).decimals();
-            uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
-            if (tokenA == address(0)) {
-                try this.transactNative(depositor, amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try this.transactToken(depositor, tokenA, amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
     }
 
     function getListingAddress(uint256) external view returns (address listingAddressReturn) {

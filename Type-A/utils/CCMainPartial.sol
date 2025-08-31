@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.2
+// Version: 0.1.3
 // Changes:
+// - v0.1.3: Updated ICCLiquidity interface to rename update to ccUpdate, reflecting changes in CCLiquidityTemplate.sol.
 // - v0.1.2: Updated ICCListing interface to include new PayoutUpdate struct with orderId and added activeLongPayoutsView, activeShortPayoutsView, activeUserPayoutIDsView functions per CCListingTemplatePatch.txt v0.3.2.
 // - v0.1.1: Updated `ICCListing.PayoutUpdate` struct to include `filled` and `amountSent` fields, aligning with CCListingTemplate.sol v0.3.0 to fix TypeError in CCOrderPartial.sol.
 // - v0.1.0: Bumped version
@@ -130,8 +131,7 @@ interface ICCLiquidity {
     function setListingAddress(address _listingAddress) external;
     function setTokens(address _tokenA, address _tokenB) external;
     function setAgent(address _agent) external;
-    function update(address depositor, UpdateType[] memory updates) external;
-    function changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor) external;
+    function ccUpdate(address depositor, UpdateType[] memory updates) external;
     function depositToken(address depositor, address token, uint256 amount) external;
     function depositNative(address depositor, uint256 amount) external payable;
     function xPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);

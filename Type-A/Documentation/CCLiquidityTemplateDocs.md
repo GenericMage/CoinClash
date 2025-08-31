@@ -5,26 +5,27 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.6 (Updated 2025-08-31)
+**Version**: 0.1.7 (Updated 2025-08-31)
 
 **Changes**:
-- v0.1.6: Added `resetRouters` function to fetch lister via `ICCAgent.getLister`, restrict to lister, and update `routers` and `routerAddresses` with `ICCAgent.getRouters`. Removed `routers[msg.sender]` check in `xPrepOut` and `yPrepOut` for user-initiated calls via `CCLiquidityRouter.sol`. Kept restrictions in `xExecuteOut` and `yExecuteOut`.
+- v0.1.7: Removed `xPrepOut`, `xExecuteOut`, `yPrepOut`, `yExecuteOut`, moved to `CCLiquidityPartial.sol` (v0.1.4). Renamed `update` to `ccUpdate` to align with `CCLiquidityPartial.sol` and avoid call forwarding.
+- v0.1.6: Added `resetRouters` function to fetch lister via `ICCAgent.getLister`, restrict to lister, and update `routers` and `routerAddresses` with `ICCAgent.getRouters`.
 - v0.1.4: Removed fixed gas limit in `globalizeUpdate` for `ICCAgent.globalizerAddress` and `ITokenRegistry.initializeBalances`. Modified `globalizeUpdate` to emit events (`GlobalizeUpdateFailed`, `UpdateRegistryFailed`) on failure without reverting, ensuring deposits succeed. Consolidated registry update into `globalizeUpdate` for atomicity.
-- v0.1.3: Removed duplicate subtraction in `transactToken` and `transactNative`, as `xExecuteOut`/`yExecuteOut` handle subtraction via `update`. Updated balance checks to use `xLiquid`/`yLiquid`, excluding fees.
+- v0.1.3: Removed duplicate subtraction in `transactToken` and `transactNative`, as liquidity updates are handled via `ccUpdate`. Updated balance checks to use `xLiquid`/`yLiquid`, excluding fees.
 - v0.1.2: Integrated `update` calls with `updateType == 0` for subtraction. Maintained fee segregation.
 
 **Compatibility**:
 - CCListingTemplate.sol (v0.0.10)
 - CCLiquidityRouter.sol (v0.0.25)
-- CCMainPartial.sol (v0.0.10)
+- CCMainPartial.sol (v0.1.3)
 - CCGlobalizer.sol (v0.2.1)
-- ICCLiquidity.sol (v0.0.4)
+- ICCLiquidity.sol (v0.0.5)
 - ICCListing.sol (v0.0.7)
 - CCSEntryPartial.sol (v0.0.18)
 
 ## Interfaces
 - **IERC20**: Provides `decimals()` for normalization, `transfer(address, uint256)` for token transfers.
-- **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`).
+- **ICCListing**: Provides `prices(uint256)` (returns `price`), `volumeBalances(uint256)` (returns `xBalance`, `yBalance`), `decimalsA()`, `decimalsB()`, `tokenA()`, `tokenB()`.
 - **ICCAgent**: Provides `registryAddress()`, `globalizerAddress()`, `getLister(address)` (returns lister address), `getRouters()` (returns router addresses).
 - **ITokenRegistry**: Provides `initializeBalances(address token, address[] memory users)` for balance updates.
 - **ICCGlobalizer**: Provides `globalizeLiquidity(address depositor, address token)` for liquidity tracking.
@@ -75,23 +76,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
    - `amountA`: Normalized token A withdrawal.
    - `amountB`: Normalized token B withdrawal.
 
-## Formulas
-1. **Deficit and Compensation**:
-   - **xPrepOut**:
-     ```
-     withdrawAmountA = min(amount, xLiquid)
-     deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0
-     withdrawAmountB = deficit > 0 ? min((deficit * 1e18) / prices(0), yLiquid) : 0
-     ```
-   - **yPrepOut**:
-     ```
-     withdrawAmountB = min(amount, yLiquid)
-     deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0
-     withdrawAmountA = deficit > 0 ? min((deficit * prices(0)) / 1e18, xLiquid) : 0
-     ```
-   - **Description**: Calculates withdrawal amounts, compensating shortfalls using `ICCListing.prices(0)` (price of token B in token A, 1e18 precision), capped by available liquidity.
-   - **Used in**: `xPrepOut`, `yPrepOut`.
-
 ## Internal Functions
 ### globalizeUpdate(address depositor, address token, bool isX, uint256 amount)
 - **Behavior**: Fetches globalizer via `ICCAgent.globalizerAddress`, calls `ICCGlobalizer.globalizeLiquidity`, fetches registry via `ICCAgent.registryAddress`, calls `ITokenRegistry.initializeBalances` with `depositor` as a single-user array. Emits `GlobalizeUpdateFailed` or `UpdateRegistryFailed` on failure but does not revert, ensuring deposits succeed. Handles globalization and registry updates atomically.
@@ -100,9 +84,24 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - `token`: Token address (tokenA or tokenB, or zero for ETH).
   - `isX`: True if updating xSlot (tokenA), false for ySlot (tokenB).
   - `amount`: Normalized liquidity amount (1e18 precision).
-- **Used in**: `update` (for x/y slot deposits), `transactToken`, `transactNative` (for withdrawals).
+- **Used in**: `ccUpdate` (for x/y slot deposits), `transactToken`, `transactNative` (for withdrawals).
 - **Gas**: Two external calls (`globalizerAddress`, `globalizeLiquidity`) and two registry calls (`registryAddress`, `initializeBalances`), all with try-catch.
 - **Call Tree**: Calls `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`.
+
+### ccUpdate(address depositor, UpdateType[] memory updates)
+- **Behavior**: Updates liquidity and slot details for `xLiquiditySlots` or `yLiquiditySlots`, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate` for registry updates, emits `LiquidityUpdated` or `FeesUpdated`.
+- **Parameters**:
+  - `depositor`: Address associated with the update.
+  - `updates`: Array of `UpdateType` structs specifying balance, fee, or slot updates.
+- **Internal Call Flow**:
+  - Iterates `updates`, handling:
+    - `updateType == 0`: Updates `xLiquid` (`index == 0`) or `yLiquid` (`index == 1`).
+    - `updateType == 1`: Updates `xFees` (`index == 0`) or `yFees` (`index == 1`), emits `FeesUpdated`.
+    - `updateType == 2`: Updates `xLiquiditySlots`, adds/removes from `activeXLiquiditySlots`, `userXIndex`, calls `globalizeUpdate` for tokenA.
+    - `updateType == 3`: Updates `yLiquiditySlots`, adds/removes from `activeYLiquiditySlots`, `userYIndex`, calls `globalizeUpdate` for tokenB.
+- **Restrictions**: Router-only (`routers[msg.sender]`).
+- **Gas**: Loop over `updates`, array operations, `globalizeUpdate` calls.
+- **Call Tree**: Calls `globalizeUpdate` (for `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
 
 ## External Functions
 ### setRouters(address[] memory _routers)
@@ -125,53 +124,32 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Parameters**:
   - `_listingId`: Listing identifier.
 - **Restrictions**: Reverts if `listingId` set.
-- **Gas**: Single write.
+- **Gas**: Single assignment.
 - **Call Tree**: None.
 
 ### setListingAddress(address _listingAddress)
 - **Behavior**: Sets `listingAddress`, callable once.
 - **Parameters**:
   - `_listingAddress`: Listing contract address.
-- **Restrictions**: Reverts if `listingAddress` set or invalid.
-- **Gas**: Single write.
+- **Restrictions**: Reverts if `listingAddress` set or `_listingAddress` invalid.
+- **Gas**: Single assignment.
 - **Call Tree**: None.
 
 ### setTokens(address _tokenA, address _tokenB)
-- **Behavior**: Sets `tokenA`, `tokenB`, callable once.
+- **Behavior**: Sets `tokenA` and `tokenB`, callable once.
 - **Parameters**:
   - `_tokenA`: Token A address (ETH if zero).
   - `_tokenB`: Token B address (ETH if zero).
-- **Restrictions**: Reverts if tokens set, same, or both zero.
-- **Gas**: State writes, `IERC20.decimals` calls.
-- **Call Tree**: Calls `IERC20.decimals` for normalization.
+- **Restrictions**: Reverts if tokens set, identical, or both zero.
+- **Gas**: Two assignments.
+- **Call Tree**: None.
 
 ### setAgent(address _agent)
 - **Behavior**: Sets `agent`, callable once.
 - **Parameters**:
   - `_agent`: Agent contract address.
-- **Restrictions**: Reverts if `agent` set or invalid.
-- **Gas**: Single write.
-- **Call Tree**: None.
-
-### update(address depositor, UpdateType[] memory updates)
-- **Behavior**: Updates `liquidityDetail`, `xLiquiditySlots`, `yLiquiditySlots`, `userXIndex`, `userYIndex`, `activeXLiquiditySlots`/`activeYLiquiditySlots`, calls `globalizeUpdate` for `tokenA` (updateType=2) or `tokenB` (updateType=3), emits `LiquidityUpdated`.
-- **Parameters**:
-  - `depositor`: Address initiating the update (via router).
-  - `updates`: Array of `UpdateType` structs specifying balance, fee, or slot updates.
-- **Internal**: Processes `updates` for balances (updateType=0), fees (updateType=1), or slots (updateType=2/3). Adds/removes slot indices. Calls `globalizeUpdate` for slot updates.
-- **Restrictions**: Router-only (`routers[msg.sender]`).
-- **Gas**: Loop over `updates`, array resizing, external calls via `globalizeUpdate`.
-- **Call Tree**: Calls `globalizeUpdate` (for `ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
-
-### changeSlotDepositor(address depositor, bool isX, uint256 slotIndex, address newDepositor)
-- **Behavior**: Transfers slot ownership, updates `userXIndex` or `userYIndex`, emits `SlotDepositorChanged`.
-- **Parameters**:
-  - `depositor`: Current slot owner.
-  - `isX`: True for xSlot, false for ySlot.
-  - `slotIndex`: Slot index to update.
-  - `newDepositor`: New slot owner.
-- **Restrictions**: Router-only, `depositor` must be slot owner, valid `newDepositor`.
-- **Gas**: Slot update, array adjustments.
+- **Restrictions**: Reverts if `agent` set or `_agent` invalid.
+- **Gas**: Single assignment.
 - **Call Tree**: None.
 
 ### transactToken(address depositor, address token, uint256 amount, address recipient)
@@ -204,48 +182,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Restrictions**: Router-only, sufficient liquidity.
 - **Gas**: Single update.
 - **Call Tree**: None.
-
-### xPrepOut(address depositor, uint256 amount, uint256 index) returns (PreparedWithdrawal memory withdrawal)
-- **Behavior**: Prepares token A withdrawal, compensates with token B if shortfall, uses formula above.
-- **Parameters**:
-  - `depositor`: Address requesting withdrawal.
-  - `amount`: Normalized withdrawal amount.
-  - `index`: xSlot index.
-- **Internal**: Checks `xLiquid`, `allocation`, uses `ICCListing.prices(0)` for compensation.
-- **Restrictions**: `depositor` must be slot owner.
-- **Gas**: Single `prices` call.
-- **Call Tree**: Calls `ICCListing.prices`.
-
-### xExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal)
-- **Behavior**: Executes token A withdrawal, updates slots via `update`, transfers tokens/ETH via `transactToken`/`transactNative`.
-- **Parameters**:
-  - `depositor`: Address requesting withdrawal.
-  - `index`: xSlot index.
-  - `withdrawal`: `PreparedWithdrawal` struct with `amountA`, `amountB`.
-- **Restrictions**: Router-only, `depositor` must be slot owner.
-- **Gas**: Two transfers, `update` call.
-- **Call Tree**: Calls `this.update` (for `globalizeUpdate`), `this.transactToken`/`this.transactNative` (for `IERC20.decimals`, `IERC20.transfer`, `globalizeUpdate`).
-
-### yPrepOut(address depositor, uint256 amount, uint256 index) returns (PreparedWithdrawal memory withdrawal)
-- **Behavior**: Prepares token B withdrawal, compensates with token A if shortfall, uses formula above.
-- **Parameters**:
-  - `depositor`: Address requesting withdrawal.
-  - `amount`: Normalized withdrawal amount.
-  - `index`: ySlot index.
-- **Internal**: Checks `yLiquid`, `allocation`, uses `ICCListing.prices(0)` for compensation.
-- **Restrictions**: `depositor` must be slot owner.
-- **Gas**: Single `prices` call.
-- **Call Tree**: Calls `ICCListing.prices`.
-
-### yExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal)
-- **Behavior**: Executes token B withdrawal, updates slots via `update`, transfers tokens/ETH via `transactToken`/`transactNative`.
-- **Parameters**:
-  - `depositor`: Address requesting withdrawal.
-  - `index`: ySlot index.
-  - `withdrawal`: `PreparedWithdrawal` struct with `amountA`, `amountB`.
-- **Restrictions**: Router-only, `depositor` must be slot owner.
-- **Gas**: Two transfers, `update` call.
-- **Call Tree**: Calls `this.update` (for `globalizeUpdate`), `this.transactToken`/`this.transactNative` (for `IERC20.decimals`, `IERC20.transfer`, `globalizeUpdate`).
 
 ## View Functions
 ### getListingAddress(uint256) view returns (address listingAddressReturn)
@@ -296,6 +232,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
   - Try-catch for external calls with detailed revert strings.
   - Public state variables accessed via auto-generated getters or unique view functions.
   - No reserved keywords, no `virtual`/`override`.
-- **Router Security**: Only `routers[msg.sender]` can call restricted functions, except `xPrepOut`/`yPrepOut` (user-initiated via `CCLiquidityRouter`).
+- **Router Security**: Only `routers[msg.sender]` can call restricted functions (`ccUpdate`, `transactToken`, `transactNative`, etc.).
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
-- **Globalization**: In `update`, `transactToken`, `transactNative`, calls `globalizeUpdate` for x/y slot updates or withdrawals, fetching globalizer via `ICCAgent.globalizerAddress`, calling `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)`, and registry via `ICCAgent.registryAddress`, calling `ITokenRegistry.initializeBalances`.
+- **Globalization**: In `ccUpdate`, `transactToken`, `transactNative`, calls `globalizeUpdate` for x/y slot updates or withdrawals, fetching globalizer via `ICCAgent.globalizerAddress`, calling `ICCGlobalizer.globalizeLiquidity(depositor, tokenA/tokenB)`, and registry via `ICCAgent.registryAddress`, calling `ITokenRegistry.initializeBalances`.
