@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.5
+// Version: 0.3.6
 // Changes:
+// -v0.3.6: Adjusted setRouters and resetRouters to use routerAddresses array for clarity and better resetting. 
 // - v0.3.5: Moved payout functionality to liquidity template .
 // - v0.3.4: Changed routers visibility. 
 // - v0.3.3: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's latest routers.
@@ -51,6 +52,7 @@ interface ICCAgent {
 
 contract CCListingTemplate {
     mapping(address router => bool isRouter) public routers;
+    address[] private routerAddresses;
     bool private _routersSet;
     address public tokenA; // Returns address token
     address public tokenB; // Returns address token
@@ -543,13 +545,14 @@ contract CCListingTemplate {
         uniswapV2PairViewSet = true;
     }
 
-    // Sets router addresses, callable once
     function setRouters(address[] memory routers_) external {
+        // Sets router addresses, callable once
         require(!_routersSet, "Routers already set");
         require(routers_.length > 0, "No routers provided");
         for (uint256 i = 0; i < routers_.length; i++) {
             require(routers_[i] != address(0), "Invalid router address");
             routers[routers_[i]] = true;
+            routerAddresses.push(routers_[i]);
         }
         _routersSet = true;
     }
@@ -607,64 +610,27 @@ contract CCListingTemplate {
         registryAddress = registryAddress_;
     }
     
-// New function to reset routers to agent's latest routers, restricted to lister
+    // Resets routers array to agent's latest routers, restricted to lister
 function resetRouters() external {
-    // Fetches lister address from agent
-    address lister;
-    try ICCAgent(agentView).getLister(address(this)) returns (address _lister) {
-        lister = _lister;
-    } catch (bytes memory reason) {
-        emit ExternalCallFailed(agentView, "getLister", string(reason));
-        return;
-    }
-    require(lister == msg.sender, "Caller not lister");
+    // Fetch lister from agent for the current listing
+    address lister = ICCAgent(agentView).getLister(address(this));
+    require(msg.sender == lister, "Only lister can reset routers");
+    
+    // Fetch latest routers from agent
+    address[] memory newRouters = ICCAgent(agentView).getRouters();
+    require(newRouters.length > 0, "No routers available in agent");
 
-    // Clears existing routers
-    _clearRouters();
-
-    // Fetches and sets new routers from agent
-    address[] memory newRouters = _fetchAgentRouters();
-    if (newRouters.length == 0) {
-        emit UpdateFailed(listingId, "No routers fetched from agent");
-        return;
+    // Clear existing routers mapping and array
+    for (uint256 i = 0; i < routerAddresses.length; i++) {
+        routers[routerAddresses[i]] = false;
     }
-    _setNewRouters(newRouters);
-}
+    delete routerAddresses;
 
-// Helper function to clear existing routers
-function _clearRouters() private {
-    // Fetches current routers from agent to clear mapping
-    address[] memory currentRouters;
-    try ICCAgent(agentView).getRouters() returns (address[] memory routerList) {
-        currentRouters = routerList;
-    } catch (bytes memory reason) {
-        emit ExternalCallFailed(agentView, "getRouters", string(reason));
-        return;
-    }
-    // Clears mapping entries
-    for (uint256 i = 0; i < currentRouters.length; i++) {
-        routers[currentRouters[i]] = false;
-    }
-    _routersSet = false;
-}
-
-// Helper function to fetch routers from agent
-function _fetchAgentRouters() private returns (address[] memory newRouters) {
-    // Attempts to fetch routers from agent
-    try ICCAgent(agentView).getRouters() returns (address[] memory routerList) {
-        return routerList;
-    } catch (bytes memory reason) {
-        emit ExternalCallFailed(agentView, "getRouters", string(reason));
-        return new address[](0);
-    }
-}
-
-// Helper function to set new routers
-function _setNewRouters(address[] memory newRouters) private {
-    // Sets new routers in mapping
+    // Update with new routers
     for (uint256 i = 0; i < newRouters.length; i++) {
         require(newRouters[i] != address(0), "Invalid router address");
         routers[newRouters[i]] = true;
+        routerAddresses.push(newRouters[i]);
     }
     _routersSet = true;
 }
@@ -678,6 +644,11 @@ function _setNewRouters(address[] memory newRouters) private {
     // Returns next order ID
     function getNextOrderId() external view returns (uint256 orderId_) {
         return nextOrderId;
+    }
+    
+    function routerAddressesView() external view returns (address[] memory addresses) {
+        // Returns router addresses
+        return routerAddresses;
     }
     
     // Computes current price from Uniswap V2 pair token balances

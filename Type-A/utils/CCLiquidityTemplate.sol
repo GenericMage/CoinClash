@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- * Version: 0.1.10
+ * Version: 0.1.11
  * Changes:
+ * - v0.1.11: Hid routerAddresses as routerAddresses view is better. 
  * - v0.1.10: Removed updateLiquidity as ccUpdate is sufficient.
  * - v0.1.7: Removed xPrepOut, xExecuteOut, yPrepOut, yExecuteOut, moving withdrawal logic to CCLiquidityPartial.sol. Renamed update to ccUpdate to avoid call forwarding and ensure router is msg.sender.
  * - v0.1.6: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's routers.
@@ -39,8 +40,8 @@ interface ICCGlobalizer {
 
 contract CCLiquidityTemplate {
     mapping(address router => bool isRouter) public routers;
-    address[] public routerAddresses;
-    bool public routersSet;
+    address[] private routerAddresses;
+    bool private routersSet;
     address public listingAddress;
     address public tokenA;
     address public tokenB;
