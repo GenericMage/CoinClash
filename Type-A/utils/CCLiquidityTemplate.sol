@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- * Version: 0.1.7
+ * Version: 0.1.10
  * Changes:
+ * - v0.1.10: Removed updateLiquidity as ccUpdate is sufficient.
  * - v0.1.7: Removed xPrepOut, xExecuteOut, yPrepOut, yExecuteOut, moving withdrawal logic to CCLiquidityPartial.sol. Renamed update to ccUpdate to avoid call forwarding and ensure router is msg.sender.
  * - v0.1.6: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's routers.
 // - v0.1.5: Removed routers[msg.sender] check from xPrepOut and yPrepOut to allow user-initiated calls via CCLiquidityRouter.sol. Kept restriction in xExecuteOut and yExecuteOut for state-changing operations.
@@ -474,21 +475,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
         }
         globalizeUpdate(depositor, address(0), isTokenA, normalizedAmount);
     }
-
-    function updateLiquidity(address depositor, bool isX, uint256 amount) external {
-        // Updates liquidity balance
-        require(routers[msg.sender], "Router only");
-        LiquidityDetails storage details = liquidityDetail;
-        if (isX) {
-            if (details.xLiquid < amount) revert("Insufficient xLiquid balance");
-            details.xLiquid -= amount;
-        } else {
-            if (details.yLiquid < amount) revert("Insufficient yLiquid balance");
-            details.yLiquid -= amount;
-        }
-        emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-    }
-
+    
     function getListingAddress(uint256) external view returns (address listingAddressReturn) {
         // Returns listing address
         return listingAddress;

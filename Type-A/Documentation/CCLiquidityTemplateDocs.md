@@ -5,9 +5,10 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.9 (Updated 2025-08-31)
+**Version**: 0.1.10 (Updated 2025-09-01)
 
 **Changes**:
+- v0.1.10: Removed `updateLiquidity` as `ccUpdate` is sufficient . 
 - v0.1.9: Removed redundant `globalizeUpdate` call from `ssUpdate`.
 - v0.1.8: Added payout functionality (`ssUpdate`, `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`, `longPayout`, `shortPayout`, `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs`, `PayoutOrderCreated`, `PayoutOrderUpdated`, `removePendingOrder`, `getNextPayoutID`, and view functions) from `CCListingTemplate.sol`.
 - v0.1.7: Removed `xPrepOut`, `xExecuteOut`, `yPrepOut`, `yExecuteOut`, moved to `CCLiquidityPartial.sol` (v0.1.4). Renamed `update` to `ccUpdate` to align with `CCLiquidityPartial.sol` and avoid call forwarding.
@@ -252,16 +253,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Restrictions**: Router-only, non-zero amount, sufficient `xLiquid`/`yLiquid`.
 - **Internal Call Tree**: `normalize`, `globalizeUpdate` (`ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
 - **Gas**: Single transfer, `globalizeUpdate` call.
-
-### updateLiquidity(address depositor, bool isX, uint256 amount)
-- **Purpose**: Reduces `xLiquid` (if `isX`) or `yLiquid`, emits `LiquidityUpdated`.
-- **Parameters**:
-  - `depositor`: Address initiating the update (via router).
-  - `isX`: True for `xLiquid`, false for `yLiquid`.
-  - `amount`: Normalized amount to subtract.
-- **Restrictions**: Router-only, sufficient liquidity.
-- **Internal Call Tree**: None.
-- **Gas**: Single update.
 
 ### getNextPayoutID() view returns (uint256 payoutId)
 - **Purpose**: Returns `nextPayoutId`.
