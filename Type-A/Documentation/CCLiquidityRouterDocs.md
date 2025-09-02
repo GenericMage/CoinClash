@@ -8,6 +8,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 **Version**: 0.1.7 (Updated 2025-09-02)
 
 **Changes**:
+- v0.1.8: Updated to reflect `CCLiquidityPartial.sol` (v0.1.9) with `_executeWithdrawal` refactored into helper functions (`_validateSlotOwnership`, `_checkLiquidity`, `_updateSlotAllocation`, `_transferPrimaryToken`, `_transferCompensationToken`) and `WithdrawalContext` struct.  Updated compatibility to `CCLiquidityTemplate.sol` (v0.1.16).
 - v0.1.7: Updated to reflect `CCLiquidityPartial.sol` (v0.1.8) with compensation logic fully in `_prepWithdrawal` and `_executeWithdrawal`. Removed `xPrepOut`, `yPrepOut`, `xExecuteOut`, `yExecuteOut`. Updated compatibility to `CCLiquidityTemplate.sol` (v0.1.16).
 - v0.1.6: Updated to reflect `CCLiquidityPartial.sol` (v0.0.19) with partial withdrawal support in `_executeWithdrawal`. Updated compatibility to `CCLiquidityTemplate.sol` (v0.1.16).
 - v0.1.5: Modified `_changeDepositor` to use `updateType` (4 for xSlot, 5 for ySlot) for depositor updates without affecting `xLiquid`/`yLiquid`.
@@ -71,6 +72,15 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `dFeesAcc`: Cumulative fees at deposit/claim.
   - `transferToken`: Token to transfer (tokenB for xSlots, tokenA for ySlots).
   - `feeShare`: Calculated fee share (normalized).
+  - **WithdrawalContext** (CCLiquidityPartial):
+  - `listingAddress`: `ICCListing` address.
+  - `depositor`: User address.
+  - `index`: Slot index.
+  - `isX`: True for token A, false for token B.
+  - `primaryAmount`: Normalized amount to withdraw (token A for xSlot, token B for ySlot).
+  - `compensationAmount`: Normalized compensation amount (token B for xSlot, token A for ySlot).
+  - `currentAllocation`: Slot allocation.
+  - `tokenA`, `tokenB`: Token addresses from `ICCListing`.
 - **ICCLiquidity.PreparedWithdrawal** (CCMainPartial):
   - `amountA`: Normalized token A amount to withdraw.
   - `amountB`: Normalized token B amount to withdraw.
@@ -216,6 +226,13 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Interactions**: Calls `ICCListing` for `liquidityAddressView`; `ICCLiquidity` for `getXSlotView`, `getYSlotView`, `ccUpdate`.
 - **Events**: `SlotDepositorChanged`, unnamed revert errors.
 
+## (Some) Internal Functions
+- **_validateSlotOwnership** (CCLiquidityPartial, private, view): Validates slot ownership and allocation, updates `WithdrawalContext.currentAllocation`.
+- **_checkLiquidity** (CCLiquidityPartial, internal): Checks `xLiquid` or `yLiquid` against `primaryAmount`, emits `WithdrawalFailed` on failure.
+- **_updateSlotAllocation** (CCLiquidityPartial, private): Updates slot allocation via `ICCLiquidity.ccUpdate`, reduces `currentAllocation` by `primaryAmount`.
+- **_transferPrimaryToken** (CCLiquidityPartial, private): Transfers `primaryAmount` of primary token (token A for xSlot, token B for ySlot) via `transactNative` or `transactToken`.
+- **_transferCompensationToken** (CCLiquidityPartial, private): Transfers `compensationAmount` of compensation token (token B for xSlot, token A for ySlot), emits `CompensationCalculated`.
+
 ## Clarifications and Nuances
 - **Token Flow**:
   - **Deposits**: `msg.sender` → `CCLiquidityRouter` → `CCLiquidityTemplate`. Slot assigned to `depositor`. Pre/post balance checks handle tax-on-transfer tokens.
@@ -227,9 +244,9 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - Try-catch ensures graceful degradation with `TransferFailed`, `DepositFailed`, `WithdrawalFailed`, `FeesClaimed`, `SlotDepositorChanged`.
   - No `virtual`/`override`, explicit casting, no inline assembly, no reserved keywords.
 - **Gas Optimization**:
-  - `DepositContext`, `FeeClaimContext` reduce stack usage.
+  - `DepositContext`, `FeeClaimContext` reduce stack usage. `WithdrawalContext` and helper functions reduce stack usage in `_executeWithdrawal`.
   - Early validation minimizes gas on failures.
-- **Error Handling**: Detailed errors (`InsufficientAllowance`, `WithdrawalFailed`) and events aid debugging.
+- **Error Handling**: Detailed errors (`InsufficientAllowance`, `WithdrawalFailed`) and events aid debugging. `WithdrawalFailed` emission in `_checkLiquidity` necessitated `internal` visibility.
 - **Router Validation**: `CCLiquidityTemplate` validates `routers[msg.sender]` for state-changing functions.
 - **Pool Validation**: Supports deposits in any pool state.
 - **Limitations**: Payouts handled in `CCOrderRouter`.
