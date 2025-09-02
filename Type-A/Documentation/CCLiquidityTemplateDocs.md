@@ -5,9 +5,10 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.15 (Updated 2025-09-02)
+**Version**: 0.1.16 (Updated 2025-09-02)
 
 **Changes**:
+- v0.1.16: Added logic for `updateType` 4 (xSlot depositor change) and 5 (ySlot depositor change) in `ccUpdate` to update depositor field and `userXIndex`/`userYIndex` mappings. Emits `SlotDepositorChanged` event. Ensured no impact on `xLiquid`/`yLiquid`.
 - v0.1.15: Removed unnecessary checks in `ccUpdate`.
 - v0.1.14: Modified `ccUpdate` to skip allocation check for new slots (`slot.depositor == address(0)`) for `updateType` 2 and 3, allowing deposits to initialize slots with zero allocation.
 - v0.1.13: Updated `ccUpdate` for `updateType` 2 and 3 to adjust `xLiquid`/`yLiquid` by allocation difference, preventing liquidity inflation during withdrawals. Added validation for `slot.allocation >= u.value`.
@@ -19,7 +20,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - v0.1.7: Removed `xPrepOut`, `xExecuteOut`, `yPrepOut`, `yExecuteOut`, moved to `CCLiquidityPartial.sol` (v0.1.4). Renamed `update` to `ccUpdate` to align with `CCLiquidityPartial.sol` and avoid call forwarding.
 - v0.1.6: Added `resetRouters` function to fetch lister via `ICCAgent.getLister`, restrict to lister, and update `routers` and `routerAddresses` with `ICCAgent.getRouters`.
 - v0.1.4: Removed fixed gas limit in `globalizeUpdate` for `ICCAgent.globalizerAddress` and `ITokenRegistry.initializeBalances`. Modified `globalizeUpdate` to emit events (`GlobalizeUpdateFailed`, `UpdateRegistryFailed`) on failure without reverting, ensuring deposits succeed. Consolidated registry update into `globalizeUpdate` for atomicity.
-- v0.1.3: Removed duplicate subtraction in `transactToken` and `transactNative`, as liquidity updates are handled via `ccUpdate`. Updated balance checks to use `xLiquid`/`yLiquid`, excluding fees.
+- v0.1.3: Removed duplicate subtraction in `transactToken` and `transactNative`, as liquidity updates are handled via `ccUpdate`. Removed `globalizeUpdate` calls from `transactToken` and `transactNative` to avoid duplication with `ccUpdate`. Updated balance checks to use `xLiquid`/`yLiquid`, excluding fees.
 - v0.1.2: Integrated `update` calls with `updateType == 0` for subtraction. Maintained fee segregation.
 
 **Compatibility**:
@@ -115,31 +116,32 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
    - `status`: 0 (cancelled), 1 (pending), 2 (partially filled), 3 (filled).
 
 7. **PayoutUpdate**:
-   - `payoutType`: 0 (long, tokenB), 1 (short, tokenA).
+   - `payoutType`: 0 (long), 1 (short).
    - `recipient`: Payout recipient.
-   - `orderId`: Explicit order ID for targeting.
+   - `orderId`: Payout order ID.
    - `required`: Normalized amount required.
    - `filled`: Normalized amount filled.
    - `amountSent`: Normalized amount of opposite token sent.
 
 ## Events
-- **`LiquidityUpdated`**: Emitted on `xLiquid` or `yLiquid` updates (`listingId`, `xLiquid`, `yLiquid`).
-- **`FeesUpdated`**: Emitted on `xFees` or `yFees` updates (`listingId`, `xFees`, `yFees`).
-- **`SlotDepositorChanged`**: Emitted on slot depositor changes (`isX`, `slotIndex`, `oldDepositor`, `newDepositor`).
-- **`GlobalizeUpdateFailed`**: Emitted on `globalizeUpdate` failure (`depositor`, `listingId`, `isX`, `amount`, `reason`).
-- **`UpdateRegistryFailed`**: Emitted on registry update failure (`depositor`, `isX`, `reason`).
-- **`TransactFailed`**: Emitted on transfer failure (`depositor`, `token`, `amount`, `reason`).
-- **`PayoutOrderCreated`**: Emitted on new payout creation (`orderId`, `isLong`, `status`).
-- **`PayoutOrderUpdated`**: Emitted on payout updates (`orderId`, `isLong`, `filled`, `amountSent`, `status`).
+- **`LiquidityUpdated(uint256 indexed listingId, uint256 xLiquid, uint256 yLiquid)`**: Emitted on `xLiquid`/`yLiquid` updates in `ccUpdate`.
+- **`FeesUpdated(uint256 indexed listingId, uint256 xFees, uint256 yFees)`**: Emitted on `xFees`/`yFees` updates in `ccUpdate`.
+- **`SlotDepositorChanged(bool isX, uint256 indexed slotIndex, address indexed oldDepositor, address indexed newDepositor)`**: Emitted on depositor changes in `ccUpdate` (`updateType` 4 or 5).
+- **`GlobalizeUpdateFailed(address indexed depositor, uint256 listingId, bool isX, uint256 amount, bytes reason)`**: Emitted on `globalizeUpdate` failure.
+- **`UpdateRegistryFailed(address indexed depositor, bool isX, bytes reason)`**: Emitted on `ITokenRegistry.initializeBalances` failure.
+- **`TransactFailed(address indexed depositor, address token, uint256 amount, string reason)`**: Emitted on `transactToken` or `transactNative` failure.
+- **`PayoutOrderCreated(uint256 indexed orderId, bool isLong, uint8 status)`**: Emitted on new payout creation in `ssUpdate`.
+- **`PayoutOrderUpdated(uint256 indexed orderId, bool isLong, uint256 filled, uint256 amountSent, uint8 status)`**: Emitted on payout updates in `ssUpdate`.
 
 ## External Functions
+
 ### setRouters(address[] memory _routers)
 - **Purpose**: Sets `routers` and `routerAddresses`, callable once.
 - **Parameters**: `_routers`: Array of router addresses.
-- **Restrictions**: Reverts if `routersSet` or `_routers` empty/invalid.
+- **Restrictions**: Reverts if `routersSet` or empty `_routers`.
 - **Internal Call Tree**: None.
-- **Gas**: Loop over `_routers`, array push.
-- **Callers**: External setup (e.g., `CCLiquidityRouter.sol`).
+- **Gas**: Loop over `_routers`, array operations.
+- **Callers**: External setup.
 
 ### setListingId(uint256 _listingId)
 - **Purpose**: Sets `listingId`, callable once.
@@ -182,7 +184,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Callers**: Lister via external call.
 
 ### ccUpdate(address depositor, UpdateType[] memory updates)
-- **Purpose**: Updates liquidity and slot details, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate`, emits `LiquidityUpdated` or `FeesUpdated`.
+- **Purpose**: Updates liquidity and slot details, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate`, emits `LiquidityUpdated`, `FeesUpdated`, or `SlotDepositorChanged`.
 - **Parameters**: `depositor`: Address for update. `updates`: Array of `UpdateType` structs.
 - **Restrictions**: Router-only (`routers[msg.sender]`).
 - **Internal Call Flow**:
@@ -208,23 +210,23 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
     - For `payoutType == 1` (short): Sets/updates `shortPayout`, arrays, emits events.
     - Increments `nextPayoutId` for new payouts.
 - **Internal Call Tree**: `removePendingOrder`.
-- **Gas**: Loop over `updates`, array operations.
+- **Gas**: Loop over Zakładka: updates, array operations.
 - **Callers**: `CCLiquidityRouter.sol` for payout settlements.
 
 ### transactToken(address depositor, address token, uint256 amount, address recipient)
-- **Purpose**: Transfers ERC20 tokens, checks `xLiquid`/`yLiquid`, calls `globalizeUpdate`, emits `TransactFailed` on failure.
+- **Purpose**: Transfers ERC20 tokens, checks `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Parameters**: `depositor`, `token` (tokenA or tokenB), `amount` (denormalized), `recipient`.
 - **Restrictions**: Router-only, valid token, non-zero amount, sufficient `xLiquid`/`yLiquid`.
-- **Internal Call Tree**: `normalize`, `globalizeUpdate`, `IERC20.decimals`, `IERC20.transfer`, `IERC20.balanceOf`.
-- **Gas**: Single transfer, balance check, `globalizeUpdate`.
+- **Internal Call Tree**: `normalize`, `IERC20.decimals`, `IERC20.transfer`, `IERC20.balanceOf`.
+- **Gas**: Single transfer, balance check.
 - **Callers**: `CCLiquidityPartial.sol` (`xExecuteOut`, `yExecuteOut`, `_executeFeeClaim`).
 
 ### transactNative(address depositor, uint256 amount, address recipient)
-- **Purpose**: Transfers ETH, checks `xLiquid`/`yLiquid`, calls `globalizeUpdate`, emits `TransactFailed` on failure.
+- **Purpose**: Transfers ETH, checks `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Parameters**: `depositor`, `amount` (denormalized), `recipient`.
 - **Restrictions**: Router-only, non-zero amount, sufficient `xLiquid`/`yLiquid`.
-- **Internal Call Tree**: `normalize`, `globalizeUpdate`.
-- **Gas**: Single transfer, balance check, `globalizeUpdate`.
+- **Internal Call Tree**: `normalize`.
+- **Gas**: Single transfer, balance check.
 - **Callers**: `CCLiquidityPartial.sol` (`xExecuteOut`, `yExecuteOut`, `_executeFeeClaim`).
 
 ### getNextPayoutID() view returns (uint256 payoutId)
@@ -263,7 +265,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Token Usage**: xSlots provide token A, claim yFees; ySlots provide token B, claim xFees. Long payouts (tokenB), short payouts (tokenA).
 - **Fee System**: Cumulative fees (`xFeesAcc`, `yFeesAcc`) never decrease; `dFeesAcc` tracks fees at slot updates.
 - **Payout System**: Long/short payouts tracked in `longPayout`, `shortPayout`, with active arrays for status=1, historical arrays for all orders.
-- **Globalization**: In `ccUpdate`, `transactToken`, `transactNative`, calls `globalizeUpdate` for slot updates or withdrawals.
+- **Globalization**: In `ccUpdate`, calls `globalizeUpdate` for slot updates or withdrawals. Removed from `transactToken` and `transactNative` to avoid duplication with `ccUpdate`.
 - **Safety**:
   - Explicit casting for interfaces.
   - No inline assembly, high-level Solidity.

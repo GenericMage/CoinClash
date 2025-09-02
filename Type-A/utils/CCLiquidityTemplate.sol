@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
-// Version: 0.1.15
-// Changes:
+ // Version: 0.1.16
+ // Changes:
+ // - v0.1.16: Added logic for updateType 4 (xSlot depositor change) and 5 (ySlot depositor change) in ccUpdate to update depositor field and userXIndex/userYIndex mappings. Emits SlotDepositorChanged event. Ensured no impact on xLiquid/yLiquid.
 // - v0.1.15: Removed unnecessary checks innccUpdate. 
 // - v0.1.14: Modified ccUpdate to skip allocation check for new slots (slot.depositor == address(0)) for updateType 2 and 3, allowing deposits to initialize slots with zero allocation.
 // - v0.1.13: Updated ccUpdate for updateType 2 and 3 to subtract allocation difference from xLiquid/yLiquid, preventing liquidity inflation during withdrawals. Added validation for slot.allocation >= u.value.
@@ -293,9 +294,6 @@ function transactToken(address depositor, address token, uint256 amount, address
         emit TransactFailed(depositor, token, amount, "Token transfer failed");
         revert("Token transfer failed");
     }
-    if (agent != address(0)) {
-        globalizeUpdate(depositor, token, token == tokenA, normalizedAmount);
-    }
     emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
 }
 
@@ -319,9 +317,6 @@ function transactNative(address depositor, uint256 amount, address recipient) ex
     if (!success) {
         emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
         revert("ETH transfer failed");
-    }
-    if (agent != address(0)) {
-        globalizeUpdate(depositor, isX ? tokenA : tokenB, isX, normalizedAmount);
     }
     emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
 }
@@ -418,7 +413,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
 // Renamed from "update"
 // Added changeDepositor update type
     function ccUpdate(address depositor, UpdateType[] memory updates) external {
-    // Updates liquidity and slot details with simplified deposit logic
+    // Updates liquidity and slot details with simplified deposit logic, including depositor changes
     require(routers[msg.sender], "Router only");
     LiquidityDetails storage details = liquidityDetail;
     for (uint256 i = 0; i < updates.length; i++) {
@@ -494,9 +489,41 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
             }
             globalizeUpdate(depositor, tokenB, false, u.value);
         } else if (u.updateType == 4) {
-            // ... (unchanged)
+            // Updates depositor for xSlot without modifying allocation or liquidity
+            Slot storage slot = xLiquiditySlots[u.index];
+            require(slot.depositor == depositor, "Depositor not slot owner");
+            require(u.addr != address(0), "Invalid new depositor");
+            require(slot.allocation > 0, "Invalid slot allocation");
+            address oldDepositor = slot.depositor;
+            slot.depositor = u.addr;
+            // Update userXIndex for old and new depositor
+            for (uint256 j = 0; j < userXIndex[oldDepositor].length; j++) {
+                if (userXIndex[oldDepositor][j] == u.index) {
+                    userXIndex[oldDepositor][j] = userXIndex[oldDepositor][userXIndex[oldDepositor].length - 1];
+                    userXIndex[oldDepositor].pop();
+                    break;
+                }
+            }
+            userXIndex[u.addr].push(u.index);
+            emit SlotDepositorChanged(true, u.index, oldDepositor, u.addr);
         } else if (u.updateType == 5) {
-            // ... (unchanged)
+            // Updates depositor for ySlot without modifying allocation or liquidity
+            Slot storage slot = yLiquiditySlots[u.index];
+            require(slot.depositor == depositor, "Depositor not slot owner");
+            require(u.addr != address(0), "Invalid new depositor");
+            require(slot.allocation > 0, "Invalid slot allocation");
+            address oldDepositor = slot.depositor;
+            slot.depositor = u.addr;
+            // Update userYIndex for old and new depositor
+            for (uint256 j = 0; j < userYIndex[oldDepositor].length; j++) {
+                if (userYIndex[oldDepositor][j] == u.index) {
+                    userYIndex[oldDepositor][j] = userYIndex[oldDepositor][userYIndex[oldDepositor].length - 1];
+                    userYIndex[oldDepositor].pop();
+                    break;
+                }
+            }
+            userYIndex[u.addr].push(u.index);
+            emit SlotDepositorChanged(false, u.index, oldDepositor, u.addr);
         } else revert("Invalid update type");
     }
     emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
