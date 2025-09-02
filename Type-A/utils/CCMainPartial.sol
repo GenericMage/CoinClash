@@ -130,6 +130,7 @@ interface ICCLiquidity {
     function transactToken(address depositor, address token, uint256 amount, address recipient) external;
     function transactNative(address depositor, uint256 amount, address recipient) external;
     function addFees(address depositor, bool isX, uint256 fee) external;
+    function liquidityDetail() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory);

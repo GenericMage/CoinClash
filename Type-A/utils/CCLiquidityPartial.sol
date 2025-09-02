@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.6
+// Version: 0.1.8
 // Changes:
+// - v0.1.8: Modified _executeWithdrawal to support partial withdrawals by allowing user-specified amount to reduce slot allocation instead of setting it to 0.
+// Added validation to ensure withdrawal amount does not exceed slot allocation.
+// Retained xLiquid/yLiquid checks and error logging from v0.1.7.
+// Updated WithdrawalFailed event to include slotIndex for better debugging.
+// - v0.1.7: Added xLiquid/yLiquid checks in _executeWithdrawal before calling transactToken/transactNative.
+// Modified _executeWithdrawal to revert with detailed error messages.
+// Added WithdrawalFailed event.
+// Ensured slot allocation updates via ccUpdate.
 // - v0.1.6: Removed ccUpdate calls in xExecuteOut and yExecuteOut to prevent double reduction of xLiquid/yLiquid, as transactToken/transactNative already reduce liquidity, avoiding potential underflow.
 // - v0.1.5: Modified _changeDepositor to use new updateType (4 for xSlot, 5 for ySlot) to update only depositor address without affecting xLiquid/yLiquid. Ensures correct slot depositor change and prevents unintended liquidity increase.
 // - v0.1.4: Updated _changeDepositor to use ccUpdate directly for depositor changes, removing dependency on CCLiquidityTemplate.sol's changeSlotDepositor. Validates slot ownership and allocation before update.
@@ -24,6 +32,8 @@ contract CCLiquidityPartial is CCMainPartial {
     event SlotDepositorChanged(bool isX, uint256 indexed slotIndex, address indexed oldDepositor, address indexed newDepositor);
     event DepositReceived(address indexed depositor, address token, uint256 amount, uint256 normalizedAmount);
     error InsufficientAllowance(address sender, address token, uint256 required, uint256 available);
+event WithdrawalFailed(address indexed depositor, address indexed listingAddress, bool isX, uint256 slotIndex, uint256 amount, string reason);
+event CompensationCalculated(address indexed depositor, address indexed listingAddress, bool isX, uint256 primaryAmount, uint256 compensationAmount);
 
     struct DepositContext {
         address listingAddress;
@@ -154,21 +164,126 @@ function _depositNative(address listingAddress, address depositor, uint256 input
     _updateDeposit(context);
 }
 
-    function _prepWithdrawal(address listingAddress, address depositor, uint256 outputAmount, uint256 index, bool isX) internal view returns (ICCLiquidity.PreparedWithdrawal memory) {
-    // Prepares withdrawal for liquidity slot using internal xPrepOut or yPrepOut
+    function _prepWithdrawal(address listingAddress, address depositor, uint256 amount, uint256 index, bool isX) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
+    // Prepares withdrawal, calculates compensation in opposite token if liquidity is insufficient
+    ICCLiquidity liquidityTemplate = ICCLiquidity(listingAddress);
+    (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) = liquidityTemplate.liquidityDetail();
+    uint256 price = ICCListing(listingAddress).prices(0); // Get current price (tokenB/tokenA, normalized to 1e18)
+    
+    // Validate slot ownership and allocation
+    uint256 currentAllocation;
     if (isX) {
-        return xPrepOut(listingAddress, depositor, outputAmount, index);
+        ICCLiquidity.Slot memory slot = liquidityTemplate.getXSlotView(index);
+        require(slot.depositor == depositor, "Not slot owner");
+        currentAllocation = slot.allocation;
     } else {
-        return yPrepOut(listingAddress, depositor, outputAmount, index);
+        ICCLiquidity.Slot memory slot = liquidityTemplate.getYSlotView(index);
+        require(slot.depositor == depositor, "Not slot owner");
+        currentAllocation = slot.allocation;
     }
+    require(currentAllocation >= amount, "Withdrawal exceeds slot allocation");
+
+    // Check liquidity and calculate compensation
+    if (isX) {
+        withdrawal.amountA = amount;
+        if (xLiquid < amount) {
+            // Compensate with tokenB
+            uint256 shortfall = amount - xLiquid;
+            withdrawal.amountB = (shortfall * price) / 1e18; // Convert shortfall to tokenB using price
+        }
+    } else {
+        withdrawal.amountB = amount;
+        if (yLiquid < amount) {
+            // Compensate with tokenA
+            uint256 shortfall = amount - yLiquid;
+            withdrawal.amountA = (shortfall * 1e18) / price; // Convert shortfall to tokenA using price
+        }
+    }
+    return withdrawal;
 }
 
 function _executeWithdrawal(address listingAddress, address depositor, uint256 index, bool isX, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
-    // Executes withdrawal for liquidity slot using internal xExecuteOut or yExecuteOut
+    // Executes withdrawal with compensation, updates liquidity, and transfers tokens
+    ICCLiquidity liquidityTemplate = ICCLiquidity(listingAddress);
+    (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) = liquidityTemplate.liquidityDetail();
+    address tokenA = ICCListing(listingAddress).tokenA();
+    address tokenB = ICCListing(listingAddress).tokenB();
+    uint256 primaryAmount = isX ? withdrawal.amountA : withdrawal.amountB;
+    uint256 compensationAmount = isX ? withdrawal.amountB : withdrawal.amountA;
+
+    // Check available liquidity
+    if (isX && xLiquid < withdrawal.amountA) {
+        emit WithdrawalFailed(depositor, listingAddress, isX, index, withdrawal.amountA, "Insufficient xLiquid");
+        revert("Insufficient xLiquid");
+    }
+    if (!isX && yLiquid < withdrawal.amountB) {
+        emit WithdrawalFailed(depositor, listingAddress, isX, index, withdrawal.amountB, "Insufficient yLiquid");
+        revert("Insufficient yLiquid");
+    }
+
+    // Validate slot allocation
+    uint256 currentAllocation;
     if (isX) {
-        xExecuteOut(listingAddress, depositor, index, withdrawal);
+        ICCLiquidity.Slot memory slot = liquidityTemplate.getXSlotView(index);
+        require(slot.depositor == depositor, "Not slot owner");
+        currentAllocation = slot.allocation;
     } else {
-        yExecuteOut(listingAddress, depositor, index, withdrawal);
+        ICCLiquidity.Slot memory slot = liquidityTemplate.getYSlotView(index);
+        require(slot.depositor == depositor, "Not slot owner");
+        currentAllocation = slot.allocation;
+    }
+    require(currentAllocation >= primaryAmount, "Withdrawal exceeds slot allocation");
+
+    // Prepare update for slot allocation (partial withdrawal)
+    ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
+    updates[0] = ICCLiquidity.UpdateType({
+        updateType: isX ? 2 : 3,
+        index: index,
+        value: currentAllocation - primaryAmount, // Reduce allocation
+        addr: depositor, // Retain depositor for active slot
+        recipient: address(0)
+    });
+
+    // Update liquidity and slot
+    try liquidityTemplate.ccUpdate(depositor, updates) {
+    } catch (bytes memory reason) {
+        emit WithdrawalFailed(depositor, listingAddress, isX, index, primaryAmount, string(abi.encodePacked("Update failed: ", reason)));
+        revert(string(abi.encodePacked("Update failed: ", reason)));
+    }
+
+    // Execute primary token transfer
+    if (primaryAmount > 0) {
+        if ((isX && tokenA == address(0)) || (!isX && tokenB == address(0))) {
+            try liquidityTemplate.transactNative(depositor, primaryAmount, depositor) {
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(depositor, listingAddress, isX, index, primaryAmount, string(abi.encodePacked("Native transfer failed: ", reason)));
+                revert(string(abi.encodePacked("Native transfer failed: ", reason)));
+            }
+        } else {
+            try liquidityTemplate.transactToken(depositor, isX ? tokenA : tokenB, primaryAmount, depositor) {
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(depositor, listingAddress, isX, index, primaryAmount, string(abi.encodePacked("Token transfer failed: ", reason)));
+                revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+            }
+        }
+    }
+
+    // Execute compensation token transfer
+    if (compensationAmount > 0) {
+        emit CompensationCalculated(depositor, listingAddress, isX, primaryAmount, compensationAmount);
+        if ((isX && tokenB == address(0)) || (!isX && tokenA == address(0))) {
+            try liquidityTemplate.transactNative(depositor, compensationAmount, depositor) {
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(depositor, listingAddress, !isX, index, compensationAmount, string(abi.encodePacked("Native compensation transfer failed: ", reason)));
+                revert(string(abi.encodePacked("Native compensation transfer failed: ", reason)));
+            }
+        } else {
+            try liquidityTemplate.transactToken(depositor, isX ? tokenB : tokenA, compensationAmount, depositor) {
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(depositor, listingAddress, !isX, index, compensationAmount, string(abi.encodePacked("Token compensation transfer failed: ", reason)));
+                revert(string(abi.encodePacked("Token compensation transfer failed: ", reason)));
+            }
+        }
     }
 }
 
@@ -262,128 +377,4 @@ function _executeWithdrawal(address listingAddress, address depositor, uint256 i
         }
         emit SlotDepositorChanged(isX, slotIndex, depositor, newDepositor);
     }
-    
-    function xPrepOut(address listingAddress, address depositor, uint256 amount, uint256 index) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
-        // Prepares withdrawal for xLiquidity slot
-        require(depositor != address(0), "Invalid depositor");
-        ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-        ICCLiquidity.Slot memory slot = liquidityContract.getXSlotView(index);
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        require(slot.allocation >= amount, "Amount exceeds allocation");
-        (uint256 xLiquid, uint256 yLiquid, , , , ) = liquidityContract.liquidityDetailsView();
-        uint256 withdrawAmountA = amount > xLiquid ? xLiquid : amount;
-        uint256 deficit = amount > withdrawAmountA ? amount - withdrawAmountA : 0;
-        uint256 withdrawAmountB = 0;
-        if (deficit > 0) {
-            uint256 currentPrice = listingContract.prices(0);
-            if (currentPrice == 0) return ICCLiquidity.PreparedWithdrawal(withdrawAmountA, 0);
-            uint256 compensation = (deficit * 1e18) / currentPrice;
-            withdrawAmountB = compensation > yLiquid ? yLiquid : compensation;
-        }
-        return ICCLiquidity.PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
-    }
-
-    function xExecuteOut(address listingAddress, address depositor, uint256 index, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
-        // Executes withdrawal for xLiquidity slot
-        require(depositor != address(0), "Invalid depositor");
-        ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-        ICCLiquidity.Slot memory slotData = liquidityContract.getXSlotView(index);
-        require(slotData.depositor == depositor, "Depositor not slot owner");
-        if (withdrawal.amountA > 0) {
-            uint8 decimalsA = listingContract.tokenA() == address(0) ? 18 : listingContract.decimalsA();
-            uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
-            if (listingContract.tokenA() == address(0)) {
-                try liquidityContract.transactNative(depositor, amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try liquidityContract.transactToken(depositor, listingContract.tokenA(), amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-        if (withdrawal.amountB > 0) {
-            uint8 decimalsB = listingContract.tokenB() == address(0) ? 18 : listingContract.decimalsB();
-            uint256 amountB = denormalize(withdrawal.amountB, decimalsB);
-            if (listingContract.tokenB() == address(0)) {
-                try liquidityContract.transactNative(depositor, amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try liquidityContract.transactToken(depositor, listingContract.tokenB(), amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-    }
-
-    function yPrepOut(address listingAddress, address depositor, uint256 amount, uint256 index) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
-        // Prepares withdrawal for yLiquidity slot
-        require(depositor != address(0), "Invalid depositor");
-        ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-        ICCLiquidity.Slot memory slot = liquidityContract.getYSlotView(index);
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        require(slot.allocation >= amount, "Amount exceeds allocation");
-        (uint256 xLiquid, uint256 yLiquid, , , , ) = liquidityContract.liquidityDetailsView();
-        uint256 withdrawAmountB = amount > yLiquid ? yLiquid : amount;
-        uint256 deficit = amount > withdrawAmountB ? amount - withdrawAmountB : 0;
-        uint256 withdrawAmountA = 0;
-        if (deficit > 0) {
-            uint256 currentPrice = listingContract.prices(0);
-            if (currentPrice == 0) return ICCLiquidity.PreparedWithdrawal(0, withdrawAmountB);
-            uint256 compensation = (deficit * currentPrice) / 1e18;
-            withdrawAmountA = compensation > xLiquid ? xLiquid : compensation;
-        }
-        return ICCLiquidity.PreparedWithdrawal(withdrawAmountA, withdrawAmountB);
-    }
-
-    function yExecuteOut(address listingAddress, address depositor, uint256 index, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
-        // Executes withdrawal for yLiquidity slot
-        require(depositor != address(0), "Invalid depositor");
-        ICCListing listingContract = ICCListing(listingAddress);
-        address liquidityAddr = listingContract.liquidityAddressView();
-        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-        ICCLiquidity.Slot memory slot = liquidityContract.getYSlotView(index);
-        require(slot.depositor == depositor, "Depositor not slot owner");
-        if (withdrawal.amountB > 0) {
-            uint8 decimalsB = listingContract.tokenB() == address(0) ? 18 : listingContract.decimalsB();
-            uint256 amountB = denormalize(withdrawal.amountB, decimalsB);
-            if (listingContract.tokenB() == address(0)) {
-                try liquidityContract.transactNative(depositor, amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try liquidityContract.transactToken(depositor, listingContract.tokenB(), amountB, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-        if (withdrawal.amountA > 0) {
-            uint8 decimalsA = listingContract.tokenA() == address(0) ? 18 : listingContract.decimalsA();
-            uint256 amountA = denormalize(withdrawal.amountA, decimalsA);
-            if (listingContract.tokenA() == address(0)) {
-                try liquidityContract.transactNative(depositor, amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Native withdrawal failed: ", reason)));
-                }
-            } else {
-                try liquidityContract.transactToken(depositor, listingContract.tokenA(), amountA, depositor) {
-                } catch (bytes memory reason) {
-                    revert(string(abi.encodePacked("Token withdrawal failed: ", reason)));
-                }
-            }
-        }
-    }
-}
+  }
