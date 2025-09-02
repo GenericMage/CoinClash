@@ -119,7 +119,6 @@ interface ICCLiquidity {
     }
 
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
-    function getPrice() external view returns (uint256);
     function getRegistryAddress() external view returns (address);
     function routerAddressesView() external view returns (address[] memory);
     function setRouters(address[] memory _routers) external;
@@ -128,17 +127,9 @@ interface ICCLiquidity {
     function setTokens(address _tokenA, address _tokenB) external;
     function setAgent(address _agent) external;
     function ccUpdate(address depositor, UpdateType[] memory updates) external;
-    function depositToken(address depositor, address token, uint256 amount) external;
-    function depositNative(address depositor, uint256 amount) external payable;
-    function xPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
-    function xExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external;
-    function yPrepOut(address depositor, uint256 amount, uint256 index) external returns (PreparedWithdrawal memory);
-    function yExecuteOut(address depositor, uint256 index, PreparedWithdrawal memory withdrawal) external;
-    function claimFees(address depositor, address listingAddress, uint256 liquidityIndex, bool isX, uint256 volume) external;
     function transactToken(address depositor, address token, uint256 amount, address recipient) external;
     function transactNative(address depositor, uint256 amount, address recipient) external;
     function addFees(address depositor, bool isX, uint256 fee) external;
-    function updateLiquidity(address depositor, bool isX, uint256 amount) external;
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory);
