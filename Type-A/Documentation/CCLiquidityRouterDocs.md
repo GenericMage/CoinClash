@@ -1,16 +1,17 @@
 # CCLiquidityRouter Contract Documentation
 
 ## Overview
-The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liquidity management on a decentralized trading platform, handling deposits, withdrawals, fee claims, and depositor changes. It inherits `CCLiquidityPartial` (v0.1.8) and `CCMainPartial` (v0.1.4), interacting with `ICCListing` (v0.0.7), `ICCLiquidity` (v0.0.5), and `CCLiquidityTemplate` (v0.1.16). It uses `ReentrancyGuard` for security and `Ownable` via inheritance. State variables are inherited, accessed via view functions, with amounts normalized to 1e18 decimals.
+The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liquidity management on a decentralized trading platform, handling deposits, withdrawals, fee claims, and depositor changes. It inherits `CCLiquidityPartial` (v0.1.12) and `CCMainPartial` (v0.1.4), interacting with `ICCListing` (v0.0.7), `ICCLiquidity` (v0.0.5), and `CCLiquidityTemplate` (v0.1.18). It uses `ReentrancyGuard` for security and `Ownable` via inheritance. State variables are inherited, accessed via view functions, with amounts normalized to 1e18 decimals.
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.7 (Updated 2025-09-02)
+**Version**: 0.1.9 (Updated 2025-09-02)
 
 **Changes**:
-- v0.1.8: Updated to reflect `CCLiquidityPartial.sol` (v0.1.9) with `_executeWithdrawal` refactored into helper functions (`_validateSlotOwnership`, `_checkLiquidity`, `_updateSlotAllocation`, `_transferPrimaryToken`, `_transferCompensationToken`) and `WithdrawalContext` struct.  Updated compatibility to `CCLiquidityTemplate.sol` (v0.1.16).
-- v0.1.7: Updated to reflect `CCLiquidityPartial.sol` (v0.1.8) with compensation logic fully in `_prepWithdrawal` and `_executeWithdrawal`. Removed `xPrepOut`, `yPrepOut`, `xExecuteOut`, `yExecuteOut`. Updated compatibility to `CCLiquidityTemplate.sol` (v0.1.16).
-- v0.1.6: Updated to reflect `CCLiquidityPartial.sol` (v0.0.19) with partial withdrawal support in `_executeWithdrawal`. Updated compatibility to `CCLiquidityTemplate.sol` (v0.1.16).
+- v0.1.9: Updated to reflect `CCLiquidityRouter.sol` (v0.1.2), `CCLiquidityPartial.sol` (v0.1.12) with `updateType` 6/7 for fee claims, `CCLiquidityTemplate.sol` (v0.1.18) with `updateType` 6/7 support. Clarified internal call trees and compatibility.
+- v0.1.8: Updated to reflect `CCLiquidityPartial.sol` (v0.1.9) with `_executeWithdrawal` refactored into helper functions (`_validateSlotOwnership`, `_checkLiquidity`, `_updateSlotAllocation`, `_transferPrimaryToken`, `_transferCompensationToken`) and `WithdrawalContext` struct.
+- v0.1.7: Updated to reflect `CCLiquidityPartial.sol` (v0.1.8) with compensation logic in `_prepWithdrawal` and `_executeWithdrawal`. Removed `xPrepOut`, `yPrepOut`, `xExecuteOut`, `yExecuteOut`.
+- v0.1.6: Updated to reflect `CCLiquidityPartial.sol` (v0.0.19) with partial withdrawal support in `_executeWithdrawal`.
 - v0.1.5: Modified `_changeDepositor` to use `updateType` (4 for xSlot, 5 for ySlot) for depositor updates without affecting `xLiquid`/`yLiquid`.
 - v0.1.4: Updated `_changeDepositor` to use `ccUpdate` directly, removing `changeSlotDepositor` dependency.
 - v0.1.3: Relocated `xPrepOut`, `yPrepOut`, `xExecuteOut`, `yExecuteOut` to `CCLiquidityPartial.sol`, fixed `ParserError` in `xExecuteOut` by renaming `slot reflux` to `slotData`.
@@ -23,7 +24,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 
 **Inheritance Tree**: `CCLiquidityRouter` → `CCLiquidityPartial` → `CCMainPartial`
 
-**Compatibility**: CCListingTemplate.sol (v0.3.6), CCMainPartial.sol (v0.1.4), CCLiquidityPartial.sol (v0.1.8), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.1.16).
+**Compatibility**: CCListingTemplate.sol (v0.3.6), CCMainPartial.sol (v0.1.4), CCLiquidityPartial.sol (v0.1.12), ICCLiquidity.sol (v0.0.5), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.1.18).
 
 ## Mappings
 - **depositStates** (private, `CCLiquidityPartial.sol`): Maps `msg.sender` to `DepositState` for temporary deposit state management (deprecated, retained for compatibility).
@@ -44,8 +45,8 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `receivedAmount`: Actual amount after transfers.
   - `normalizedAmount`: Normalized amount (1e18).
   - `index`: Slot index for `xLiquiditySlots` or `yLiquiditySlots`.
-  - `hasExistingSlot`: True if depositor has an existing slot (unused in v0.1.8).
-  - `existingAllocation`: Current slot allocation (unused in v0.1.8).
+  - `hasExistingSlot`: True if depositor has an existing slot (unused in v0.1.12).
+  - `existingAllocation`: Current slot allocation (unused in v0.1.12).
 - **DepositContext** (CCLiquidityPartial):
   - `listingAddress`: `ICCListing` address.
   - `depositor`: Address receiving slot credit.
@@ -63,7 +64,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `liquidityIndex`: Slot index.
   - `isX`: True for token A, false for token B.
   - `liquidityAddr`: `ICCLiquidity` address.
-  - `xBalance`: Listing volume balance.
+  - `xBalance`: Listing volume balance (unused, retained for compatibility).
   - `xLiquid`, `yLiquid`: Liquidity amounts from `liquidityDetailsView`.
   - `xFees`, `yFees`: Available fees from `liquidityDetailsView`.
   - `liquid`: Relevant liquidity (`xLiquid` or `yLiquid`).
@@ -72,7 +73,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `dFeesAcc`: Cumulative fees at deposit/claim.
   - `transferToken`: Token to transfer (tokenB for xSlots, tokenA for ySlots).
   - `feeShare`: Calculated fee share (normalized).
-  - **WithdrawalContext** (CCLiquidityPartial):
+- **WithdrawalContext** (CCLiquidityPartial):
   - `listingAddress`: `ICCListing` address.
   - `depositor`: User address.
   - `index`: Slot index.
@@ -91,7 +92,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `dFeesAcc`: Cumulative fees at deposit/claim.
   - `timestamp`: Slot creation timestamp.
 - **ICCLiquidity.UpdateType** (CCMainPartial):
-  - `updateType`: Update type (0=balance, 1=fees, 2=xSlot, 3=ySlot, 4=xSlot depositor, 5=ySlot depositor).
+  - `updateType`: Update type (0=balance, 1=fees, 2=xSlot, 3=ySlot, 4=xSlot depositor, 5=ySlot depositor, 6=xSlot dFeesAcc, 7=ySlot dFeesAcc).
   - `index`: Index (0=xFees/xLiquid, 1=yFees/yLiquid, or slot).
   - `value`: Normalized amount.
   - `addr`: Depositor address.
@@ -125,26 +126,26 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
        withdrawal.amountA = (shortfall * 1e18) / prices(0)
      }
      ```
-   - **Description**: Calculates withdrawal amounts, compensating shortfalls using `ICCListing.prices(0)` (price of token B in token A, 1e18 precision), capped by available liquidity (`xLiquid` or `yLiquid`).
+   - **Description**: Calculates primary token withdrawal (`amountA` for xSlot, `amountB` for ySlot). If liquidity (`xLiquid` or `yLiquid`) is insufficient, compensates with the opposite token using `ICCListing.prices(0)` for conversion.
    - **Used in**: `withdraw` via `_prepWithdrawal`.
 
-## External Functions
+## External Functions and Internal Call Trees
 ### depositNativeToken(address listingAddress, address depositor, uint256 amount, bool isTokenA)
 - **Parameters**:
-  - `listingAddress`: `ICCListing` contract address, validated by `onlyValidListing`.
-  - `depositor`: Address receiving liquidity slot credit.
-  - `amount`: ETH amount (denormalized, 18 decimals).
+  - `listingAddress`: `ICCListing` contract address.
+  - `depositor`: Address receiving slot credit.
+  - `amount`: ETH amount (denormalized).
   - `isTokenA`: True for token A, false for token B.
-- **Behavior**: Deposits ETH to `CCLiquidityTemplate` for `depositor`, supports zero-balance initialization.
+- **Behavior**: Deposits ETH to `CCLiquidityTemplate` for `depositor`, assigns a new slot in `xLiquiditySlots` or `yLiquiditySlots`.
 - **Internal Call Flow**:
   - `_depositNative` (CCLiquidityPartial):
-    - Calls `_validateDeposit`: Validates inputs, retrieves `tokenAddress()`, `liquidityAddr`, `xAmount`, `yAmount`, sets `index` via `activeXLiquiditySlotsView` or `activeYLiquiditySlotsView`.
-    - Calls `_executeNativeTransfer`: Transfers ETH from `msg.sender` to `CCLiquidityTemplate`, performs pre/post balance checks, normalizes amount.
-    - Calls `_updateDeposit`: Creates `UpdateType` (updateType=2 for xSlot, 3 for ySlot), calls `ICCLiquidity.ccUpdate` with `depositor`, emits `DepositReceived` or `DepositFailed`.
-- **Balance Checks**: Pre/post balance on `CCLiquidityTemplate`, `msg.value` check in `_executeNativeTransfer`.
+    - Calls `_validateDeposit`: Verifies `listingAddress`, fetches `tokenA`/`tokenB`, `liquidityAddressView`, and `liquidityAmounts` from `ICCListing` and `ICCLiquidity`. Creates `DepositContext`.
+    - Calls `_executeNativeTransfer`: Checks `msg.value == amount`, transfers ETH to `liquidityAddr`, performs pre/post balance checks, normalizes to 1e18.
+    - Calls `_updateDeposit`: Creates `UpdateType` (updateType=2 for xSlot, 3 for ySlot), calls `ICCLiquidity.ccUpdate` to update `xLiquid`/`yLiquid`, `xLiquiditySlots`/`yLiquiditySlots`, `userXIndex`/`userYIndex`. Emits `DepositReceived`.
+- **Balance Checks**: Pre/post balance checks in `_executeNativeTransfer` ensure correct ETH receipt.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
-- **Gas**: Single transfer, single `ccUpdate` call.
-- **Interactions**: Calls `ICCListing` for `tokenA`, `tokenB`, `liquidityAddressView`; `ICCLiquidity` for `liquidityAmounts`, `activeXLiquiditySlotsView`, `activeYLiquiditySlotsView`, `ccUpdate`.
+- **Gas**: Single `ccUpdate` call, one ETH transfer.
+- **Interactions**: Calls `ICCListing` for `tokenA`, `tokenB`, `liquidityAddressView`; `ICCLiquidity` for `liquidityAmounts`, `ccUpdate`, `transactNative`; `IERC20` for `balanceOf`.
 - **Events**: `DepositReceived`, `DepositFailed`, `TransferFailed`.
 
 ### depositToken(address listingAddress, address depositor, uint256 amount, bool isTokenA)
@@ -153,16 +154,16 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `depositor`: Address receiving slot credit.
   - `amount`: Token amount (denormalized).
   - `isTokenA`: True for token A, false for token B.
-- **Behavior**: Deposits ERC20 tokens to `CCLiquidityTemplate` for `depositor`, supports zero-balance initialization.
+- **Behavior**: Deposits ERC20 tokens to `CCLiquidityTemplate` for `depositor`, assigns a new slot.
 - **Internal Call Flow**:
   - `_depositToken` (CCLiquidityPartial):
-    - Calls `_validateDeposit`: Validates inputs, retrieves `tokenAddress`, `liquidityAddr`, `xAmount`, `yAmount`, sets `index`.
-    - Calls `_executeTokenTransfer`: Checks allowance for `msg.sender`, calls `IERC20.transferFrom(msg.sender, address(this), amount)`, then `IERC20.transfer` to `CCLiquidityTemplate`, performs pre/post balance checks.
-    - Calls `_updateDeposit`: Creates `UpdateType`, calls `ICCLiquidity.ccUpdate`, emits `DepositReceived` or `DepositFailed`.
-- **Balance Checks**: Pre/post balance on `CCLiquidityRouter` and `CCLiquidityTemplate`, allowance check via `IERC20.allowance`.
+    - Calls `_validateDeposit`: Same as above.
+    - Calls `_executeTokenTransfer`: Checks `IERC20.allowance`, transfers tokens from `msg.sender` to `this`, then to `liquidityAddr`. Performs pre/post balance checks, normalizes to 1e18.
+    - Calls `_updateDeposit`: Same as above.
+- **Balance Checks**: Pre/post balance checks in `_executeTokenTransfer` handle tax-on-transfer tokens.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
-- **Gas**: Two `IERC20` transfers, single `ccUpdate` call.
-- **Interactions**: Calls `IERC20` for `allowance`, `transferFrom`, `transfer`, `decimals`; `ICCListing` for `tokenA`, `tokenB`, `liquidityAddressView`; `ICCLiquidity` for `liquidityAmounts`, `activeXLiquiditySlotsView`, `activeYLiquiditySlotsView`, `ccUpdate`.
+- **Gas**: Single `ccUpdate` call, two ERC20 transfers.
+- **Interactions**: Calls `ICCListing` for `tokenA`, `tokenB`, `liquidityAddressView`; `ICCLiquidity` for `liquidityAmounts`, `ccUpdate`, `transactToken`; `IERC20` for `allowance`, `transferFrom`, `transfer`, `balanceOf`, `decimals`.
 - **Events**: `DepositReceived`, `DepositFailed`, `TransferFailed`, `InsufficientAllowance`.
 
 ### withdraw(address listingAddress, uint256 outputAmount, uint256 index, bool isX)
@@ -175,18 +176,19 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Internal Call Flow**:
   - `_prepWithdrawal` (CCLiquidityPartial):
     - Validates `msg.sender` as slot owner via `getXSlotView` or `getYSlotView`.
-    - Checks `xLiquid`/`yLiquid` and slot `allocation` via `liquidityDetail`, `getXSlotView`, `getYSlotView`.
+    - Checks `xLiquid`/`yLiquid` and slot `allocation` via `liquidityDetailsView`, `getXSlotView`, `getYSlotView`.
     - Uses `ICCListing.prices(0)` to calculate compensation (`amountB` for `isX=true`, `amountA` for `isX=false`) if liquidity insufficient.
     - Sets `PreparedWithdrawal` with `amountA` or `amountB`.
   - `_executeWithdrawal` (CCLiquidityPartial):
-    - Validates `xLiquid`/`yLiquid` and slot `allocation`.
-    - Creates `UpdateType` (updateType=2 for xSlot, 3 for ySlot) to reduce slot allocation.
-    - Calls `ICCLiquidity.ccUpdate` to update `xLiquid`/`yLiquid` and slot.
-    - Transfers primary and compensation tokens/ETH to `msg.sender` via `ICCLiquidity.transactToken` or `transactNative`.
+    - Calls `_validateSlotOwnership`: Verifies slot ownership, updates `WithdrawalContext.currentAllocation`.
+    - Calls `_checkLiquidity`: Validates `xLiquid` or `yLiquid` against `primaryAmount`, emits `WithdrawalFailed` on failure.
+    - Calls `_updateSlotAllocation`: Updates slot allocation via `ICCLiquidity.ccUpdate`, reduces `currentAllocation`.
+    - Calls `_transferPrimaryToken`: Transfers primary token (token A for xSlot, token B for ySlot) via `transactNative` or `transactToken`.
+    - Calls `_transferCompensationToken`: Transfers compensation token (token B for xSlot, token A for ySlot) if needed, emits `CompensationCalculated`.
 - **Balance Checks**: `xLiquid`/`yLiquid` and slot `allocation` in `_prepWithdrawal` and `_executeWithdrawal`, implicit checks in `transactToken`/`transactNative`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: Single `ccUpdate` call, up to two transfers for compensation.
-- **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`, `prices`; `ICCLiquidity` for `liquidityDetail`, `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`.
+- **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`, `prices`; `ICCLiquidity` for `liquidityDetailsView`, `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`.
 - **Events**: `WithdrawalFailed`, `CompensationCalculated`.
 
 ### claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount)
@@ -198,14 +200,14 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Behavior**: Claims fees from `CCLiquidityTemplate` for `msg.sender` based on slot contribution.
 - **Internal Call Flow**:
   - `_processFeeShare` (CCLiquidityPartial):
-    - Calls `_validateFeeClaim`: Checks `xBalance`, slot ownership, liquidity via `ICCListing.volumeBalances`, `ICCLiquidity.liquidityDetailsView`, `getXSlotView` or `getYSlotView`.
+    - Calls `_validateFeeClaim`: Checks slot ownership, liquidity, and fees via `ICCListing.liquidityAddressView`, `ICCLiquidity.liquidityDetailsView`, `getXSlotView` or `getYSlotView`. Creates `FeeClaimContext`.
     - Calls `_calculateFeeShare`: Computes `feeShare` using fee share formula.
-    - Calls `_executeFeeClaim`: Creates `UpdateType` array (updateType=1 for fees, 2/3 for slot), calls `ICCLiquidity.ccUpdate`, transfers fees via `transactToken` or `transactNative`, emits `FeesClaimed`.
-- **Balance Checks**: `xBalance`, `xLiquid`/`yLiquid`, `allocation` in `_validateFeeClaim`.
+    - Calls `_executeFeeClaim`: Creates `UpdateType` array (updateType=1 for fees, 6 for xSlot dFeesAcc, 7 for ySlot dFeesAcc), calls `ICCLiquidity.ccUpdate`, transfers fees via `transactToken` or `transactNative`, emits `FeesClaimed`.
+- **Balance Checks**: `xLiquid`/`yLiquid`, `allocation`, and `fees` in `_validateFeeClaim`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: Two `ccUpdate` calls, one transfer.
-- **Interactions**: Calls `ICCListing` for `volumeBalances`, `tokenA`, `tokenB`, `liquidityAddressView`; `ICCLiquidity` for `liquidityDetailsView`, `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`; `IERC20` for `decimals`.
-- **Events**: `FeesClaimed`, unnamed revert errors.
+- **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`; `ICCLiquidity` for `liquidityDetailsView`, `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`; `IERC20` for `decimals`.
+- **Events**: `FeesClaimed`, `NoFeesToClaim`, `FeeValidationFailed`.
 
 ### changeDepositor(address listingAddress, bool isX, uint256 slotIndex, address newDepositor)
 - **Parameters**:
@@ -224,14 +226,25 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: Single `ccUpdate` call.
 - **Interactions**: Calls `ICCListing` for `liquidityAddressView`; `ICCLiquidity` for `getXSlotView`, `getYSlotView`, `ccUpdate`.
-- **Events**: `SlotDepositorChanged`, unnamed revert errors.
+- **Events**: `SlotDepositorChanged`.
 
-## (Some) Internal Functions
-- **_validateSlotOwnership** (CCLiquidityPartial, private, view): Validates slot ownership and allocation, updates `WithdrawalContext.currentAllocation`.
-- **_checkLiquidity** (CCLiquidityPartial, internal): Checks `xLiquid` or `yLiquid` against `primaryAmount`, emits `WithdrawalFailed` on failure.
-- **_updateSlotAllocation** (CCLiquidityPartial, private): Updates slot allocation via `ICCLiquidity.ccUpdate`, reduces `currentAllocation` by `primaryAmount`.
-- **_transferPrimaryToken** (CCLiquidityPartial, private): Transfers `primaryAmount` of primary token (token A for xSlot, token B for ySlot) via `transactNative` or `transactToken`.
-- **_transferCompensationToken** (CCLiquidityPartial, private): Transfers `compensationAmount` of compensation token (token B for xSlot, token A for ySlot), emits `CompensationCalculated`.
+## Internal Functions (CCLiquidityPartial)
+- **_validateDeposit**: Initializes `DepositContext`, validates inputs, fetches liquidity details.
+- **_executeTokenTransfer**: Handles ERC20 transfers with pre/post balance checks.
+- **_executeNativeTransfer**: Handles ETH transfers with pre/post balance checks.
+- **_depositToken**: Orchestrates token deposit via `_validateDeposit`, `_executeTokenTransfer`, `_updateDeposit`.
+- **_depositNative**: Orchestrates ETH deposit via `_validateDeposit`, `_executeNativeTransfer`, `_updateDeposit`.
+- **_updateDeposit**: Updates liquidity and slot via `ccUpdate`.
+- **_prepWithdrawal**: Prepares withdrawal with compensation calculation.
+- **_validateSlotOwnership**: Verifies slot ownership, updates `WithdrawalContext`.
+- **_checkLiquidity**: Ensures sufficient liquidity, emits `WithdrawalFailed` on failure.
+- **_updateSlotAllocation**: Updates slot allocation via `ccUpdate`.
+- **_transferPrimaryToken**: Transfers primary token.
+- **_transferCompensationToken**: Transfers compensation token, emits `CompensationCalculated`.
+- **_validateFeeClaim**: Validates fee claim parameters, creates `FeeClaimContext`.
+- **_calculateFeeShare**: Computes fee share using formula.
+- **_executeFeeClaim**: Updates fees and `dFeesAcc`, transfers fees.
+- **_processFeeShare**: Orchestrates fee claim via `_validateFeeClaim`, `_calculateFeeShare`, `_executeFeeClaim`.
 
 ## Clarifications and Nuances
 - **Token Flow**:
@@ -241,17 +254,12 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Decimal Handling**: Normalizes to 1e18 using `normalize`, denormalizes for transfers using `IERC20.decimals` or 18 for ETH.
 - **Security**:
   - `nonReentrant` prevents reentrancy.
-  - Try-catch ensures graceful degradation with `TransferFailed`, `DepositFailed`, `WithdrawalFailed`, `FeesClaimed`, `SlotDepositorChanged`.
-  - No `virtual`/`override`, explicit casting, no inline assembly, no reserved keywords.
+  - Try-catch ensures graceful degradation with detailed events.
+  - No `virtual`/`override`, explicit casting, no inline assembly.
 - **Gas Optimization**:
-  - `DepositContext`, `FeeClaimContext` reduce stack usage. `WithdrawalContext` and helper functions reduce stack usage in `_executeWithdrawal`.
+  - Structs (`DepositContext`, `FeeClaimContext`, `WithdrawalContext`) reduce stack usage.
   - Early validation minimizes gas on failures.
-- **Error Handling**: Detailed errors (`InsufficientAllowance`, `WithdrawalFailed`) and events aid debugging. `WithdrawalFailed` emission in `_checkLiquidity` necessitated `internal` visibility.
-- **Router Validation**: `CCLiquidityTemplate` validates `routers[msg.sender]` for state-changing functions.
+- **Error Handling**: Detailed errors (`InsufficientAllowance`, `WithdrawalFailed`) and events aid debugging.
+- **Router Validation**: `CCLiquidityTemplate` validates `routers[msg.sender]`.
 - **Pool Validation**: Supports deposits in any pool state.
 - **Limitations**: Payouts handled in `CCOrderRouter`.
-- **Call Tree**:
-  - `_depositToken`/`_depositNative`: `_validateDeposit` → `_executeTokenTransfer`/`_executeNativeTransfer` → `_updateDeposit`.
-  - `withdraw`: `_prepWithdrawal` → `_executeWithdrawal`.
-  - `claimFees`: `_validateFeeClaim` → `_calculateFeeShare` → `_executeFeeClaim`.
-  - `changeDepositor`: Single `_changeDepositor` call.

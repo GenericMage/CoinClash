@@ -1,8 +1,10 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- // Version: 0.1.16
+ // Version: 0.1.18
  // Changes:
+ // - v0.1.18: Added updateType 6 (xSlot dFeesAcc update) and 7 (ySlot dFeesAcc update) in ccUpdate to update dFeesAcc without modifying allocation or liquidity, for fee claim corrections.
+ // - v0.1.17: Removed xLiquid/yLiquid reduction in transactToken and transactNative to prevent double reduction, as ccUpdate handles liquidity adjustments for slot allocation changes. Removed redundant LiquidityUpdated emission, as ccUpdate emits it.
  // - v0.1.16: Added logic for updateType 4 (xSlot depositor change) and 5 (ySlot depositor change) in ccUpdate to update depositor field and userXIndex/userYIndex mappings. Emits SlotDepositorChanged event. Ensured no impact on xLiquid/yLiquid.
 // - v0.1.15: Removed unnecessary checks innccUpdate. 
 // - v0.1.14: Modified ccUpdate to skip allocation check for new slots (slot.depositor == address(0)) for updateType 2 and 3, allowing deposits to initialize slots with zero allocation.
@@ -83,13 +85,13 @@ contract CCLiquidityTemplate {
         uint256 amountB;
     }
 
-    LiquidityDetails public liquidityDetail;
-    mapping(uint256 slotID => Slot) public xLiquiditySlots;
-    mapping(uint256 slotID => Slot) public yLiquiditySlots;
-    uint256[] public activeXLiquiditySlots;
-    uint256[] public activeYLiquiditySlots;
-    mapping(address => uint256[]) public userXIndex;
-    mapping(address => uint256[]) public userYIndex;
+    LiquidityDetails private liquidityDetail;
+    mapping(uint256 slotID => Slot) private xLiquiditySlots;
+    mapping(uint256 slotID => Slot) private yLiquiditySlots;
+    uint256[] private activeXLiquiditySlots;
+    uint256[] private activeYLiquiditySlots;
+    mapping(address => uint256[]) private userXIndex;
+    mapping(address => uint256[]) private userYIndex;
 
     event LiquidityUpdated(uint256 indexed listingId, uint256 xLiquid, uint256 yLiquid);
     event FeesUpdated(uint256 indexed listingId, uint256 xFees, uint256 yFees);
@@ -128,8 +130,8 @@ struct PayoutUpdate {
     uint256 filled; // Amount filled during settlement
     uint256 amountSent; // Amount of opposite token sent
 }
-mapping(uint256 orderId => LongPayoutStruct) public longPayout; // Stores long payout details
-mapping(uint256 orderId => ShortPayoutStruct) public shortPayout; // Stores short payout details
+mapping(uint256 orderId => LongPayoutStruct) private longPayout; // Stores long payout details
+mapping(uint256 orderId => ShortPayoutStruct) private shortPayout; // Stores short payout details
 uint256[] private longPayoutByIndex; // Tracks long payout orderIds
 uint256[] private shortPayoutByIndex; // Tracks short payout orderIds
 mapping(address user => uint256[] orderIds) private userPayoutIDs; // Tracks payout orderIds per user
@@ -272,54 +274,33 @@ function resetRouters() external {
 }
 
 function transactToken(address depositor, address token, uint256 amount, address recipient) external {
-    // Transfers ERC20 tokens and updates liquidity, restricted to routers
-    require(routers[msg.sender], "Router only");
-    require(token == tokenA || token == tokenB, "Invalid token");
-    require(token != address(0), "Use transactNative for ETH");
-    require(amount > 0, "Zero amount");
-    require(recipient != address(0), "Invalid recipient");
-    LiquidityDetails storage details = liquidityDetail;
-    uint8 decimals = IERC20(token).decimals();
-    if (decimals == 0) revert("Invalid token decimals");
-    uint256 normalizedAmount = normalize(amount, decimals);
-    if (token == tokenA) {
-        if (details.xLiquid < normalizedAmount) revert("Insufficient xLiquid balance");
-        details.xLiquid -= normalizedAmount;
-    } else {
-        if (details.yLiquid < normalizedAmount) revert("Insufficient yLiquid balance");
-        details.yLiquid -= normalizedAmount;
+        // Transfers ERC20 tokens without modifying liquidity, restricted to routers
+        require(routers[msg.sender], "Router only");
+        require(token == tokenA || token == tokenB, "Invalid token");
+        require(token != address(0), "Use transactNative for ETH");
+        require(amount > 0, "Zero amount");
+        require(recipient != address(0), "Invalid recipient");
+        uint8 decimals = IERC20(token).decimals();
+        if (decimals == 0) revert("Invalid token decimals");
+        try IERC20(token).transfer(recipient, amount) returns (bool) {
+        } catch (bytes memory reason) {
+            emit TransactFailed(depositor, token, amount, "Token transfer failed");
+            revert("Token transfer failed");
+        }
     }
-    try IERC20(token).transfer(recipient, amount) returns (bool) {
-    } catch (bytes memory reason) {
-        emit TransactFailed(depositor, token, amount, "Token transfer failed");
-        revert("Token transfer failed");
-    }
-    emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-}
 
-function transactNative(address depositor, uint256 amount, address recipient) external {
-    // Transfers native tokens (ETH) and updates liquidity, restricted to routers
-    require(routers[msg.sender], "Router only");
-    require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
-    require(amount > 0, "Zero amount");
-    require(recipient != address(0), "Invalid recipient");
-    LiquidityDetails storage details = liquidityDetail;
-    uint256 normalizedAmount = normalize(amount, 18);
-    bool isX = tokenA == address(0);
-    if (isX) {
-        if (details.xLiquid < normalizedAmount) revert("Insufficient xLiquid balance");
-        details.xLiquid -= normalizedAmount;
-    } else {
-        if (details.yLiquid < normalizedAmount) revert("Insufficient yLiquid balance");
-        details.yLiquid -= normalizedAmount;
+    function transactNative(address depositor, uint256 amount, address recipient) external {
+        // Transfers native tokens (ETH) without modifying liquidity, restricted to routers
+        require(routers[msg.sender], "Router only");
+        require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
+        require(amount > 0, "Zero amount");
+        require(recipient != address(0), "Invalid recipient");
+        (bool success, bytes memory reason) = recipient.call{value: amount}("");
+        if (!success) {
+            emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
+            revert("ETH transfer failed");
+        }
     }
-    (bool success, bytes memory reason) = recipient.call{value: amount}("");
-    if (!success) {
-        emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
-        revert("ETH transfer failed");
-    }
-    emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
-}
 
 // Added payout creation/management from listing template
 function ssUpdate(PayoutUpdate[] calldata updates) external {
@@ -413,18 +394,20 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
 // Renamed from "update"
 // Added changeDepositor update type
     function ccUpdate(address depositor, UpdateType[] memory updates) external {
-    // Updates liquidity and slot details with simplified deposit logic, including depositor changes
+    // Updates liquidity and slot details, including dFeesAcc updates for fee claims
     require(routers[msg.sender], "Router only");
     LiquidityDetails storage details = liquidityDetail;
     for (uint256 i = 0; i < updates.length; i++) {
         UpdateType memory u = updates[i];
         if (u.updateType == 0) {
+            // Updates xLiquid or yLiquid directly
             if (u.index == 0) {
                 details.xLiquid = u.value;
             } else if (u.index == 1) {
                 details.yLiquid = u.value;
             } else revert("Invalid balance index");
         } else if (u.updateType == 1) {
+            // Updates xFees or yFees
             if (u.index == 0) {
                 details.xFees += u.value;
                 emit FeesUpdated(listingId, details.xFees, details.yFees);
@@ -433,6 +416,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
                 emit FeesUpdated(listingId, details.xFees, details.yFees);
             } else revert("Invalid fee index");
         } else if (u.updateType == 2) {
+            // Updates xSlot allocation and liquidity
             Slot storage slot = xLiquiditySlots[u.index];
             if (slot.depositor == address(0) && u.addr != address(0)) {
                 slot.depositor = u.addr;
@@ -461,6 +445,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
             }
             globalizeUpdate(depositor, tokenA, true, u.value);
         } else if (u.updateType == 3) {
+            // Updates ySlot allocation and liquidity
             Slot storage slot = yLiquiditySlots[u.index];
             if (slot.depositor == address(0) && u.addr != address(0)) {
                 slot.depositor = u.addr;
@@ -489,14 +474,13 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
             }
             globalizeUpdate(depositor, tokenB, false, u.value);
         } else if (u.updateType == 4) {
-            // Updates depositor for xSlot without modifying allocation or liquidity
+            // Updates xSlot depositor without modifying allocation or liquidity
             Slot storage slot = xLiquiditySlots[u.index];
             require(slot.depositor == depositor, "Depositor not slot owner");
             require(u.addr != address(0), "Invalid new depositor");
             require(slot.allocation > 0, "Invalid slot allocation");
             address oldDepositor = slot.depositor;
             slot.depositor = u.addr;
-            // Update userXIndex for old and new depositor
             for (uint256 j = 0; j < userXIndex[oldDepositor].length; j++) {
                 if (userXIndex[oldDepositor][j] == u.index) {
                     userXIndex[oldDepositor][j] = userXIndex[oldDepositor][userXIndex[oldDepositor].length - 1];
@@ -507,14 +491,13 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
             userXIndex[u.addr].push(u.index);
             emit SlotDepositorChanged(true, u.index, oldDepositor, u.addr);
         } else if (u.updateType == 5) {
-            // Updates depositor for ySlot without modifying allocation or liquidity
+            // Updates ySlot depositor without modifying allocation or liquidity
             Slot storage slot = yLiquiditySlots[u.index];
             require(slot.depositor == depositor, "Depositor not slot owner");
             require(u.addr != address(0), "Invalid new depositor");
             require(slot.allocation > 0, "Invalid slot allocation");
             address oldDepositor = slot.depositor;
             slot.depositor = u.addr;
-            // Update userYIndex for old and new depositor
             for (uint256 j = 0; j < userYIndex[oldDepositor].length; j++) {
                 if (userYIndex[oldDepositor][j] == u.index) {
                     userYIndex[oldDepositor][j] = userYIndex[oldDepositor][userYIndex[oldDepositor].length - 1];
@@ -524,6 +507,16 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
             }
             userYIndex[u.addr].push(u.index);
             emit SlotDepositorChanged(false, u.index, oldDepositor, u.addr);
+        } else if (u.updateType == 6) {
+            // Updates xSlot dFeesAcc for fee claims
+            Slot storage slot = xLiquiditySlots[u.index];
+            require(slot.depositor == depositor, "Depositor not slot owner");
+            slot.dFeesAcc = u.value;
+        } else if (u.updateType == 7) {
+            // Updates ySlot dFeesAcc for fee claims
+            Slot storage slot = yLiquiditySlots[u.index];
+            require(slot.depositor == depositor, "Depositor not slot owner");
+            slot.dFeesAcc = u.value;
         } else revert("Invalid update type");
     }
     emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);
@@ -540,20 +533,10 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
         return (details.xLiquid, details.yLiquid);
     }
 
-    function liquidityDetailsView(address) external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees) {
+    function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees) {
         // Returns liquidity details for CCSEntryPartial compatibility
         LiquidityDetails memory details = liquidityDetail;
         return (details.xLiquid, details.yLiquid, details.xFees, details.yFees);
-    }
-
-    function activeXLiquiditySlotsView() external view returns (uint256[] memory slots) {
-        // Returns active xLiquidity slots
-        return activeXLiquiditySlots;
-    }
-
-    function activeYLiquiditySlotsView() external view returns (uint256[] memory slots) {
-        // Returns active yLiquidity slots
-        return activeYLiquiditySlots;
     }
 
     function userXIndexView(address user) external view returns (uint256[] memory indices) {
@@ -592,16 +575,6 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
     }
     
     // Added Payout view functions 
-    
-    function longPayoutByIndexView() external view returns (uint256[] memory orderIds) {
-    // Returns long payout order IDs
-    return longPayoutByIndex;
-}
-
-function shortPayoutByIndexView() external view returns (uint256[] memory orderIds) {
-    // Returns short payout order IDs
-    return shortPayoutByIndex;
-}
 
 function userPayoutIDsView(address user) external view returns (uint256[] memory orderIds) {
     // Returns payout order IDs for a user

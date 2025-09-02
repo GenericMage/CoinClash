@@ -30,8 +30,8 @@ interface ICCListing {
         uint256 amountSent; // for Amounts struct
     }
     
+    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function prices(uint256 _listingId) external view returns (uint256);
-    function volumeBalances(uint256 _listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function liquidityAddressView() external view returns (address);
     function tokenA() external view returns (address);
     function tokenB() external view returns (address);
@@ -39,7 +39,6 @@ interface ICCListing {
     function decimalsB() external view returns (uint8);
     function getListingId() external view returns (uint256);
     function getNextOrderId() external view returns (uint256);
-    function listingVolumeBalancesView() external view returns (uint256 xBalance, uint256 yBalance, uint256 xVolume, uint256 yVolume);
     function pendingBuyOrdersView() external view returns (uint256[] memory);
     function pendingSellOrdersView() external view returns (uint256[] memory);
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
@@ -118,8 +117,6 @@ interface ICCLiquidity {
         uint256 amountSent; // Amount of opposite token sent
     }
 
-    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
-    function getRegistryAddress() external view returns (address);
     function routerAddressesView() external view returns (address[] memory);
     function setRouters(address[] memory _routers) external;
     function setListingId(uint256 _listingId) external;
@@ -130,7 +127,6 @@ interface ICCLiquidity {
     function transactToken(address depositor, address token, uint256 amount, address recipient) external;
     function transactNative(address depositor, uint256 amount, address recipient) external;
     function addFees(address depositor, bool isX, uint256 fee) external;
-    function liquidityDetail() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
     function activeXLiquiditySlotsView() external view returns (uint256[] memory);
@@ -139,8 +135,6 @@ interface ICCLiquidity {
     function userYIndexView(address user) external view returns (uint256[] memory);
     function getXSlotView(uint256 index) external view returns (Slot memory);
     function getYSlotView(uint256 index) external view returns (Slot memory);
-    function nextXSlotIDView() external view returns (uint256);
-    function nextYSlotIDView() external view returns (uint256);
     function ssUpdate(PayoutUpdate[] calldata updates) external;
     function longPayoutByIndexView() external view returns (uint256[] memory);
     function shortPayoutByIndexView() external view returns (uint256[] memory);
