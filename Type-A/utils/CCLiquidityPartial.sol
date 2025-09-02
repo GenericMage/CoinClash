@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.4
+// Version: 0.1.5
 // Changes:
+// - v0.1.5: Modified _changeDepositor to use new updateType (4 for xSlot, 5 for ySlot) to update only depositor address without affecting xLiquid/yLiquid. Ensures correct slot depositor change and prevents unintended liquidity increase.
 // - v0.1.4: Updated _changeDepositor to use ccUpdate directly for depositor changes, removing dependency on CCLiquidityTemplate.sol's changeSlotDepositor. Validates slot ownership and allocation before update.
 // - v0.1.3: Updated _prepWithdrawal and _executeWithdrawal to use new internal xPrepOut, yPrepOut, xExecuteOut, and yExecuteOut functions, replacing calls to CCLiquidityTemplate.sol versions.
 // - v0.1.2: Added xPrepOut, xExecuteOut, yPrepOut, yExecuteOut from CCLiquidityTemplate.sol, modified to use ccUpdate and transactNative/Token directly, ensuring msg.sender is router and updating slot/liquidity details.
@@ -243,23 +244,23 @@ function _executeWithdrawal(address listingAddress, address depositor, uint256 i
     }
 
     function _changeDepositor(address listingAddress, address depositor, bool isX, uint256 slotIndex, address newDepositor) internal {
-    // Changes depositor for a liquidity slot using ccUpdate
-    ICCListing listingContract = ICCListing(listingAddress);
-    address liquidityAddr = listingContract.liquidityAddressView();
-    ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-    require(depositor != address(0), "Invalid depositor");
-    require(newDepositor != address(0), "Invalid new depositor");
-    ICCLiquidity.Slot memory slot = isX ? liquidityContract.getXSlotView(slotIndex) : liquidityContract.getYSlotView(slotIndex);
-    require(slot.depositor == depositor, "Depositor not slot owner");
-    require(slot.allocation > 0, "Invalid slot");
-    ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
-    updates[0] = ICCLiquidity.UpdateType(isX ? 2 : 3, slotIndex, slot.allocation, newDepositor, address(0));
-    try liquidityContract.ccUpdate(depositor, updates) {
-    } catch (bytes memory reason) {
-        revert(string(abi.encodePacked("Depositor change failed: ", reason)));
+        // Changes depositor for a liquidity slot using ccUpdate with new updateType
+        ICCListing listingContract = ICCListing(listingAddress);
+        address liquidityAddr = listingContract.liquidityAddressView();
+        ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+        require(depositor != address(0), "Invalid depositor");
+        require(newDepositor != address(0), "Invalid new depositor");
+        ICCLiquidity.Slot memory slot = isX ? liquidityContract.getXSlotView(slotIndex) : liquidityContract.getYSlotView(slotIndex);
+        require(slot.depositor == depositor, "Depositor not slot owner");
+        require(slot.allocation > 0, "Invalid slot");
+        ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](1);
+        updates[0] = ICCLiquidity.UpdateType(isX ? 4 : 5, slotIndex, 0, newDepositor, address(0)); // Use updateType 4 for xSlot, 5 for ySlot
+        try liquidityContract.ccUpdate(depositor, updates) {
+        } catch (bytes memory reason) {
+            revert(string(abi.encodePacked("Depositor change failed: ", reason)));
+        }
+        emit SlotDepositorChanged(isX, slotIndex, depositor, newDepositor);
     }
-    emit SlotDepositorChanged(isX, slotIndex, depositor, newDepositor);
-}
     
     function xPrepOut(address listingAddress, address depositor, uint256 amount, uint256 index) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
     // Prepares withdrawal for xLiquidity slot

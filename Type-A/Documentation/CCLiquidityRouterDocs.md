@@ -5,9 +5,10 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.4 (Updated 2025-08-31)
+**Version**: 0.1.5 (Updated 2025-09-01)
 
 **Changes**:
+- v0.1.5: Modified `_changeDepositor` to use new `updateType` (4 for xSlot, 5 for ySlot) to update only depositor address without affecting xLiquid/yLiquid. Ensures correct slot depositor change and prevents unintended liquidity increase.
 - v0.1.4: Updated to reflect `CCLiquidityTemplate.sol` (v0.1.8) removal of `changeSlotDepositor`, with `_changeDepositor` in `CCLiquidityPartial.sol` (v0.1.4) now using `ccUpdate` directly for depositor changes, avoiding call forwarding.
 - v0.1.3: Updated to reflect `CCLiquidityPartial.sol` (v0.1.4) changes, including relocation of `xPrepOut`, `xExecuteOut`, `yPrepOut`, `yExecuteOut` to `CCLiquidityPartial.sol` and renaming of `update` to `ccUpdate`. Fixed `ParserError` in `xExecuteOut` by renaming `slot reflux` to `slotData`.
 - v0.1.2: Added `depositor` parameter to `depositToken` and `depositNativeToken`, renamed `inputAmount` to `outputAmount` in `withdraw`.
