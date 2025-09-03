@@ -5,9 +5,10 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.18 (Updated 2025-09-02)
+**Version**: 0.1.19 (Updated 2025-09-03)
 
 **Changes**:
+- v0.1.19: Updated documentation to include all functions, clarified internal call trees, and addressed view functions comprehensively.
 - v0.1.18: Added `updateType` 6 (xSlot dFeesAcc update) and 7 (ySlot dFeesAcc update) in `ccUpdate` to update `dFeesAcc` without modifying allocation or liquidity. Updated payout documentation.
 - v0.1.17: Removed `xLiquid`/`yLiquid` reduction in `transactToken` and `transactNative` to prevent double reduction, as `ccUpdate` handles liquidity adjustments.
 - v0.1.16: Added `updateType` 4 (xSlot depositor change) and 5 (ySlot depositor change) in `ccUpdate` to update depositor and `userXIndex`/`userYIndex`. Emits `SlotDepositorChanged`.
@@ -43,12 +44,12 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 ## Mappings
 - `routers`: `mapping(address => bool) public` - Authorized routers.
-- `xLiquiditySlots`: `mapping(uint256 => Slot) public` - Token A slot data.
-- `yLiquiditySlots`: `mapping(uint256 => Slot) public` - Token B slot data.
-- `userXIndex`: `mapping(address => uint256[]) public` - User xSlot indices.
-- `userYIndex`: `mapping(address => uint256[]) public` - User ySlot indices.
-- `longPayout`: `mapping(uint256 => LongPayoutStruct) public` - Long payout details.
-- `shortPayout`: `mapping(uint256 => ShortPayoutStruct) public` - Short payout details.
+- `xLiquiditySlots`: `mapping(uint256 => Slot) private` - Token A slot data.
+- `yLiquiditySlots`: `mapping(uint256 => Slot) private` - Token B slot data.
+- `userXIndex`: `mapping(address => uint256[]) private` - User xSlot indices.
+- `userYIndex`: `mapping(address => uint256[]) private` - User ySlot indices.
+- `longPayout`: `mapping(uint256 => LongPayoutStruct) private` - Long payout details.
+- `shortPayout`: `mapping(uint256 => ShortPayoutStruct) private` - Short payout details.
 - `userPayoutIDs`: `mapping(address => uint256[]) private` - Payout order IDs per user.
 - `activeUserPayoutIDs`: `mapping(address => uint256[]) private` - Active payout order IDs per user.
 
@@ -122,6 +123,30 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Gas**: Single assignment.
 - **Callers**: External setup.
 
+### setListingId(uint256 _listingId)
+- **Purpose**: Sets `listingId`, callable once.
+- **Parameters**: `_listingId`: Listing identifier.
+- **Restrictions**: Reverts if `listingId` set.
+- **Internal Call Tree**: None.
+- **Gas**: Single assignment.
+- **Callers**: External setup.
+
+### setListingAddress(address _listingAddress)
+- **Purpose**: Sets `listingAddress`, callable once.
+- **Parameters**: `_listingAddress`: Listing contract address.
+- **Restrictions**: Reverts if `listingAddress` set or `_listingAddress` invalid.
+- **Internal Call Tree**: None.
+- **Gas**: Single assignment.
+- **Callers**: External setup.
+
+### setRouters(address[] memory _routers)
+- **Purpose**: Sets router addresses, callable once.
+- **Parameters**: `_routers`: Array of router addresses.
+- **Restrictions**: Reverts if routers set or no valid routers provided.
+- **Internal Call Tree**: None.
+- **Gas**: Loop over `_routers`, array push.
+- **Callers**: External setup.
+
 ### resetRouters()
 - **Purpose**: Resets `routers` and `routerAddresses` to `ICCAgent.getRouters()`, restricted to lister.
 - **Parameters**: None.
@@ -131,7 +156,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Callers**: Lister via external call.
 
 ### ccUpdate(address depositor, UpdateType[] memory updates)
-- **Purpose**: Updates liquidity, slots, or fees, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate`, emits `LiquidityUpdated`, `FeesUpdated`, or `SlotDepositorChanged`.
+- **Purpose**: Updates liquidity, slots, fees, or depositors, adjusts `xLiquid`, `yLiquid`, `xFees`, `yFees`, updates `userXIndex` or `userYIndex`, calls `globalizeUpdate`, emits `LiquidityUpdated`, `FeesUpdated`, or `SlotDepositorChanged`.
 - **Parameters**: `depositor`: Address for update. `updates`: Array of `UpdateType` structs.
 - **Restrictions**: Router-only (`routers[msg.sender]`).
 - **Internal Call Flow**:
@@ -186,6 +211,13 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Internal Call Tree**: None.
 - **Gas**: Single read.
 - **Callers**: External contracts or frontends.
+
+### removePendingOrder(uint256[] storage orders, uint256 orderId) internal
+- **Purpose**: Removes order ID from specified array.
+- **Parameters**: `orders`: Storage array. `orderId`: ID to remove.
+- **Internal Call Tree**: None.
+- **Gas**: Linear search, array pop.
+- **Callers**: `ssUpdate` for payout cancellations or completions.
 
 ## View Functions
 - `getListingAddress(uint256)`: Returns `listingAddress`.
