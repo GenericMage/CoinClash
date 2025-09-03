@@ -60,12 +60,12 @@ contract CCAgent is Ownable {
     address public wethAddress; // WETH contract address
     address public globalizerAddress; // Address for globalizer contract
 
-    mapping(address => mapping(address => address)) public getListing; // tokenA => tokenB => listing address
-    address[] public allListings; // Array of all listing addresses
-    address[] public allListedTokens; // Array of all unique listed tokens
-    mapping(address => uint256[]) public queryByAddress; // token => listing IDs
-    mapping(address => address) public getLister; // listingAddress => lister address
-    mapping(address => uint256[]) public listingsByLister; // lister => listing IDs
+    mapping(address tokenA => mapping(address tokenB => address listingAddress)) public getListing; // tokenA => tokenB => listing address
+    address[] private allListings; // Array of all listing addresses
+    address[] private allListedTokens; // Array of all unique listed tokens
+    mapping(address => uint256[]) private queryByAddress; // token => listing IDs
+    mapping(address listingAddress  => address lister) public getLister; // listingAddress => lister address
+    mapping(address => uint256[]) private listingsByLister; // lister => listing IDs
 
     struct ListingDetails {
         address listingAddress; // Listing contract address
