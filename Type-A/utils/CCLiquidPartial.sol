@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.0.29
+ Version: 0.0.30
  Changes:
+ // - v0.0.30: Updated _updateLiquidityBalances to align with CCLiquidityTemplate.sol v0.1.18, ensuring compatibility with new ccUpdate, maintaining existing updateType=0 behavior for xLiquid/yLiquid updates. No new update types added as they are not required for liquidity balance updates.
  - v0.0.29: Refactored _createBuyOrderUpdates and _createSellOrderUpdates to resolve "Stack too deep" error by splitting into helper functions (_prepareCoreUpdate, _prepareAmountsUpdate, _prepareBalanceUpdate). Each helper handles <=4 variables, segregated by struct group (Core, Amounts, Balance). Maintains ccUpdate with three arrays, using preTransferWithdrawn for pending/filled and pre/post balance checks for amountSent. Compatible with CCListingTemplate.sol v0.3.0, CCMainPartial.sol v0.1.1, CCLiquidityTemplate.sol v0.1.3, CCLiquidRouter.sol v0.0.20.
  - v0.0.28: Updated _createBuyOrderUpdates and _createSellOrderUpdates to use ccUpdate with three arrays, fetching maker/recipient, updating pending/filled with preTransferWithdrawn, and amountSent via pre/post balance checks.
  - v0.0.27: Clarified amountSent for current settlement.
@@ -466,20 +467,20 @@ contract CCLiquidPartial is CCMainPartial {
     uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
     uint256 normalizedSettle = normalize(settleAmount, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
     liquidityUpdates[0] = ICCLiquidity.UpdateType({
-        updateType: 0,
+        updateType: 0, // Balance update
         index: isBuyOrder ? 1 : 0, // Buy: decrease yLiquid (tokenB), Sell: decrease xLiquid (tokenA)
         value: isBuyOrder ? yAmount - normalizedPending : xAmount - normalizedPending, // Subtract outgoing
         addr: address(this),
         recipient: address(0)
     });
     liquidityUpdates[1] = ICCLiquidity.UpdateType({
-        updateType: 0,
+        updateType: 0, // Balance update
         index: isBuyOrder ? 0 : 1, // Buy: increase xLiquid (tokenA), Sell: increase yLiquid (tokenB)
         value: isBuyOrder ? xAmount + normalizedSettle : yAmount + normalizedSettle, // Add incoming
         addr: address(this),
         recipient: address(0)
     });
-    try liquidityContract.update(address(this), liquidityUpdates) {
+    try liquidityContract.ccUpdate(address(this), liquidityUpdates) {
     } catch (bytes memory reason) {
         emit SwapFailed(listingAddress, orderIdentifier, pendingAmount, string(abi.encodePacked("Liquidity update failed: ", reason)));
     }

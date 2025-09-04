@@ -5,7 +5,7 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.20 (updated 2025-08-30)
+**Version:** 0.0.21 (updated 2025-09-04)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` (v0.0.30) → `CCMainPartial` (v0.1.1)
 
@@ -15,6 +15,7 @@ The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates t
 - None defined in `CCLiquidRouter`. Uses `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
 
 ## Structs
+- **HistoricalUpdateContext** (`CCLiquidRouter`): holds (uint256) `xBalance`, (uint256) `yBalance`, (uint256) `xVolume`, (uint256) `yVolume`. 
 - **OrderContext** (`CCLiquidPartial`): Holds `listingContract` (ICCListing), `tokenIn` (address), `tokenOut` (address), `liquidityAddr` (address).
 - **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized tokenA for buy, tokenB for sell), `preTransferWithdrawn` (uint256, denormalized amount withdrawn).
 - **BuyOrderUpdateContext** (`CCLiquidPartial`): Holds `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized tokenA for buy), `preTransferWithdrawn` (uint256).
@@ -63,7 +64,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
   - `listingAddress` (address): `ICCListing` contract address for order book.
   - `maxIterations` (uint256): Limits orders processed to control gas.
   - `step` (uint256): Starting index in `pendingBuyOrdersView` for gas-efficient iteration.
-- **Behavior**: Settles up to `maxIterations` pending buy orders starting from `step` by transferring principal (tokenB) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenA) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (yBalance). Decreases `yLiquid` (tokenB) by `pendingAmount` and increases `xLiquid` (tokenA) by `amountOut` via `ICCLiquidity.update` in `_updateLiquidityBalances`. Emits `NoPendingOrders`, `InsufficientBalance`, or `UpdateFailed` and returns if no orders, `step` exceeds orders, insufficient yBalance, or update failure. Ensures price impact (`_computeSwapImpact`) and current price (`_computeCurrentPrice`) are within `minPrice` and `maxPrice`. Uses `ccUpdate` to update order state, with `amountSent` (tokenA) tracking tokens sent to recipients for the current settlement.
+- **Behavior**: Settles up to `maxIterations` pending buy orders starting from `step` by transferring principal (tokenB) to the liquidity contract via `ICCListing.transactToken` or `transactNative`, and settlement (tokenA) to recipients via `ICCLiquidity.transactToken` or `transactNative`. Checks liquidity via `listingVolumeBalancesView` (yBalance). Decreases `yLiquid` (tokenB) by `pendingAmount` and increases `xLiquid` (tokenA) by `amountOut` via `ICCLiquidity.update` in `_updateLiquidityBalances`. Emits `NoPendingOrders`, `InsufficientBalance`, or `UpdateFailed` and returns if no orders, `step` exceeds orders, insufficient yBalance, or update failure. Ensures price impact (`_computeSwapImpact`) and current price (`_computeCurrentPrice`) are within `minPrice` and `maxPrice`. Uses `ccUpdate` to update order state, with `amountSent` (tokenA) tracking tokens sent to recipients for the current settlement. Creates a new historical data entry at the start if pending orders exist, copying the latest live data for; `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp` and applies them using `ccUpdate`.
 - **Internal Call Flow**:
   1. Validates `listingAddress` via `onlyValidListing` (from `CCMainPartial`):
      - Requires `agent != address(0)`; reverts if unset.
@@ -236,6 +237,9 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 - **_finalizeUpdates**: Resizes update array.
 - **_uint2str**: Converts uint to string for revert messages.
 
+## Internal Functions (CCLiquidRouter)
+**_createHistoricalUpdate** fetches live data for; `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp`, and applies them in a new historical data entry using `ccUpdate`.
+
 ## Security Measures
 - **Reentrancy Protection**: `nonReentrant` on `settleBuyLiquid`, `settleSellLiquid`.
 - **Listing Validation**: `onlyValidListing` uses `ICCAgent.isValidListing` with try-catch and detailed validation (non-zero addresses, valid token pair).
@@ -263,6 +267,7 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 - `depositor` set to `address(this)` in `ICCLiquidity` calls.
 - `step` must be <= length of pending orders to avoid `NoPendingOrders` emission.
 - `amountSent` accumulation in `CCListingTemplate.ccUpdate` correctly tracks total tokens sent to recipients across all settlements (partial or full).
+- **Historical Data**: Creates a new `HistoricalData` entry at the start of `settleOrders` if pending orders exist, applying the latest data for respective; `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume` with a new `timestamp` via `ccUpdate`.
 
 ## Differences from CCSettlementRouter
 - Focuses on `ICCLiquidity`-based settlements, excludes Uniswap V2 swaps.
