@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.2
+// Version: 0.1.3
 // Changes:
+// - v0.1.3: Modified settleOrders to fetch live balances, price, and current historical volumes instead of using latest historical data entry for new historical data creation. Uses volumeBalances and prices functions from listingContract for live data.
 // - v0.1.2: Adjusted settleOrders to create new historical data entry as listing only increases volumes of latest entry on order updates. 
 // - v0.1.1: Fixed TypeError by replacing `listingContract.update` with `listingContract.ccUpdate` in `_updateOrder` to align with CCSettlementPartial.sol v0.1.3 and CCUniPartial.sol v0.1.5. Ensured `context.updates` is converted to `updateType`, `updateSort`, `updateData` arrays for `ccUpdate`. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.1.1, CCUniPartial.sol v0.1.5, CCSettlementPartial.sol v0.1.3.
 // - v0.1.0: Bumped version
@@ -93,64 +94,71 @@ contract CCSettlementRouter is CCSettlementPartial {
 
         // Iterates over pending orders, validates, processes, and updates via Uniswap swap
         function settleOrders(
-            address listingAddress,
-            uint256 step,
-            uint256 maxIterations,
-            bool isBuyOrder
-        ) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
-            ICCListing listingContract = ICCListing(listingAddress);
-            if (uniswapV2Router == address(0)) {
-                return "Missing Uniswap V2 router address";
-            }
-            uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
-            if (orderIds.length == 0 || step >= orderIds.length) {
-                return "No pending orders or invalid step";
-            }
-            // Create new historical data entry if orders exist
-            if (orderIds.length > 0) {
-                uint256 historicalLength = listingContract.historicalDataLengthView();
-                if (historicalLength > 0) {
-                    // Fetch latest historical data
-                    ICCListing.HistoricalData memory historicalData = listingContract.getHistoricalDataView(historicalLength - 1);
-                    // Prepare ccUpdate for new historical data entry
-                    uint8[] memory updateType = new uint8[](1);
-                    uint8[] memory updateSort = new uint8[](1);
-                    uint256[] memory updateData = new uint256[](1);
-                    updateType[0] = 3; // Historical update
-                    updateSort[0] = 0; // Historical struct
-                    updateData[0] = uint256(bytes32(abi.encode(
-                        historicalData.price,
-                        historicalData.xBalance,
-                        historicalData.yBalance,
-                        historicalData.xVolume,
-                        historicalData.yVolume,
-                        block.timestamp
-                    )));
-                    try listingContract.ccUpdate(updateType, updateSort, updateData) {
-                        // Historical data entry created successfully
-                    } catch Error(string memory updateReason) {
-                        return string(abi.encodePacked("Failed to create historical data entry: ", updateReason));
-                    }
-                }
-            }
-            uint256 count = 0;
-            for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
-                OrderContext memory context = _validateOrder(listingAddress, orderIds[i], isBuyOrder, listingContract);
-                if (context.pending == 0 || context.status != 1) {
-                    continue;
-                }
-                context = _processOrder(listingAddress, isBuyOrder, listingContract, context);
-                (bool success, string memory updateReason) = _updateOrder(listingContract, context);
-                if (!success && bytes(updateReason).length > 0) {
-                    return updateReason;
-                }
-                if (success) {
-                    count++;
-                }
-            }
-            if (count == 0) {
-                return "No orders settled: price out of range, insufficient tokens, or swap failure";
-            }
-            return "";
+        address listingAddress,
+        uint256 step,
+        uint256 maxIterations,
+        bool isBuyOrder
+    ) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
+        ICCListing listingContract = ICCListing(listingAddress);
+        if (uniswapV2Router == address(0)) {
+            return "Missing Uniswap V2 router address";
         }
+        uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
+        if (orderIds.length == 0 || step >= orderIds.length) {
+            return "No pending orders or invalid step";
+        }
+        // Modified: Create new historical data entry using live data
+        if (orderIds.length > 0) {
+            // Fetch live balances and price
+            (uint256 xBalance, uint256 yBalance) =  listingContract.volumeBalances(0);
+            uint256 price = listingContract.prices(0);
+             // Fetch current historical volumes
+             uint256 historicalLength = listingContract.historicalDataLengthView();
+             uint256 xVolume = 0;
+            uint256 yVolume = 0;
+            if (historicalLength > 0) {
+                ICCListing.HistoricalData memory historicalData = listingContract.getHistoricalDataView(historicalLength - 1);
+                xVolume = historicalData.xVolume;
+                yVolume = historicalData.yVolume;
+            }
+            // Prepare ccUpdate for new historical data entry with live data
+            uint8[] memory updateType = new uint8[](1);
+            uint8[] memory updateSort = new uint8[](1);
+            uint256[] memory updateData = new uint256[](1);
+            updateType[0] = 3; // Historical update
+            updateSort[0] = 0; // Historical struct
+            updateData[0] = uint256(bytes32(abi.encode(
+                price,
+                xBalance,
+                yBalance,
+                xVolume,
+                yVolume,
+                block.timestamp
+            )));
+            try listingContract.ccUpdate(updateType, updateSort, updateData) {
+                // Historical data entry created successfully with live data
+            } catch Error(string memory updateReason) {
+                return string(abi.encodePacked("Failed to create historical data entry: ", updateReason));
+            }
+        }
+        uint256 count = 0;
+        for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
+            OrderContext memory context = _validateOrder(listingAddress, orderIds[i], isBuyOrder, listingContract);
+            if (context.pending == 0 || context.status != 1) {
+                continue;
+            }
+            context = _processOrder(listingAddress, isBuyOrder, listingContract, context);
+            (bool success, string memory updateReason) = _updateOrder(listingContract, context);
+            if (!success && bytes(updateReason).length > 0) {
+                return updateReason;
+            }
+            if (success) {
+                count++;
+            }
+        }
+        if (count == 0) {
+            return "No orders settled: price out of range, insufficient tokens, or swap failure";
+        }
+        return "";
+    }
     }
