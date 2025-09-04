@@ -3,9 +3,10 @@
 ## Overview
 The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized trading for a token pair, using Uniswap V2 for price discovery via `IERC20.balanceOf`. It manages buy and sell orders and normalized (1e18 precision) balances. Volumes are tracked in `_historicalData` during order settlement or cancellation, with auto-generated historical data if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
 
-**Version**: 0.3.5 (Updated 2025-08-31)
+**Version**: 0.3.8 (Updated 2025-09-04)
 
 **Changes**:
+- v0.3.8: Corrected `_processBuyOrderUpdate` and `_processSellOrderUpdate` to properly update historical volumes: `xVolume` (tokenA) updated with amountSent for buy orders and filled for sell orders; `yVolume` (tokenB) updated with `filled` for buy orders and `amountSent` for sell orders. Volume changes computed as difference between new and old values.
 - v0.3.5: Removed payout functionality (`ssUpdate`, `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`, `longPayout`, `shortPayout`, `longPayoutByIndex`, `shortPayoutByIndex`, `userPayoutIDs`, `activeLongPayouts`, `activeShortPayouts`, `activeUserPayoutIDs`, and related view functions) to `CCLiquidityTemplate.sol`.
 - v0.3.3: Added `resetRouters` function to fetch lister from `ICCAgent`, restrict to lister, and update `_routers` mapping with agent's latest routers. Added helper functions `_clearRouters`, `_fetchAgentRouters`, `_setNewRouters`.
 - v0.3.2: Added view functions `activeLongPayoutsView`, `activeShortPayoutsView`, `activeUserPayoutIDsView` for active payout arrays/mappings.
@@ -155,9 +156,9 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
      - **Buy Order (`updateType=1`)**: Calls `_processBuyOrderUpdate`:
        - `structId=0` (Core): Decodes `updateData[i]` as `(address makerAddress, address recipientAddress, uint8 status)`. Updates `buyOrderCore[orderId]`, manages `_pendingBuyOrders`, `makerPendingOrders` via `removePendingOrder` if `status=0` or `3`. Sets `orderStatus.hasCore`. Emits `OrderUpdated`.
        - `structId=1` (Pricing): Decodes `updateData[i]` as `(uint256 maxPrice, uint256 minPrice)`. Updates `buyOrderPricing[orderId]`. Sets `orderStatus.hasPricing`.
-       - `structId=2` (Amounts): Decodes `updateData[i]` as `(uint256 pending, uint256 filled, uint256 amountSent)`. Updates `buyOrderAmounts[orderId]`, adds `filled` to `_historicalData.yVolume`. Sets `orderStatus.hasAmounts`.
+       - `structId=2` (Amounts): Decodes `updateData[i]` as `(uint256 pending, uint256 filled, uint256 amountSent)`. Updates `buyOrderAmounts[orderId]`, adds difference of old and new `filled` to `_historicalData.yVolume`, same for `amountSent` to `_historicalData.xVolume`. Sets `orderStatus.hasAmounts`.
        - Invalid `structId` emits `UpdateFailed`.
-     - **Sell Order (`updateType=2`)**: Similar, updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingSellOrders`, adds `filled` to `_historicalData.xVolume`.
+     - **Sell Order (`updateType=2`)**: Similar, updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingSellOrders`, adds differenc of old and new `filled` to `_historicalData.xVolume`, same for `amountSent` to `_historicalData.yVolume`. 
      - **Historical (`updateType=3`)**: Calls `_processHistoricalUpdate` to create `HistoricalData` with `price=updateData[i]`, current balances, timestamp, updates `_dayStartIndices`.
   5. Updates `dayStartFee` if not same day, fetching fees via `ICCLiquidityTemplate.liquidityDetail`.
   6. Checks `orderStatus` for completeness, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
@@ -222,13 +223,13 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) supports decentralized tradin
 - **Purpose**: Updates buy order structs, manages `_pendingBuyOrders`, `makerPendingOrders`.
 - **Callers**: `ccUpdate`.
 - **Internal Call Tree**: `removePendingOrder`, `uint2str`, `_updateRegistry`.
-- **Parameters/Interactions**: Updates `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `_historicalData.yVolume`.
+- **Parameters/Interactions**: Updates `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `_historicalData.yVolume`, `_historicalData.xVolume`. 
 
 #### _processSellOrderUpdate(uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount) returns (uint256)
 - **Purpose**: Updates sell order structs, manages `_pendingSellOrders`, `makerPendingOrders`.
 - **Callers**: `ccUpdate`.
 - **Internal Call Tree**: `removePendingOrder`, `uint2str`, `_updateRegistry`.
-- **Parameters/Interactions**: Updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_historicalData.xVolume`.
+- **Parameters/Interactions**: Updates `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_historicalData.xVolume`, `_historicalData.yVolume`.
 
 #### _processHistoricalUpdate(uint8 structId, uint256 value) returns (bool historicalUpdated)
 - **Purpose**: Creates `HistoricalData` entry.

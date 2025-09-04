@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.3.6
-// Changes:
+    // Version: 0.3.8
+    // Changes:
+    // - v0.3.8: Corrected _processBuyOrderUpdate and _processSellOrderUpdate to properly update historical volumes: xVolume (tokenA) updated with amountSent for buy orders and filled for sell orders; yVolume (tokenB) updated with filled for buy orders and amountSent for sell orders. Volume changes computed as difference between new and old values.
+    // - v0.3.7: Modified _processBuyOrderUpdate and _processSellOrderUpdate to update historical volumes only when 'filled' or 'amountSent' are provided. Computes volume change as difference between new and old values (e.g., new filled - old filled). Updates xVolume for principal token (buy: tokenB, sell: tokenA) when 'filled' is updated, and yVolume for settlement token (buy: tokenA, sell: tokenB) when 'amountSent' is updated.
 // -v0.3.6: Adjusted setRouters and resetRouters to use routerAddresses array for clarity and better resetting. 
 // - v0.3.5: Moved payout functionality to liquidity template .
 // - v0.3.4: Changed routers visibility. 
@@ -335,10 +337,9 @@ contract CCListingTemplate {
     }
 
     // Processes buy order updates
-    function _processBuyOrderUpdate(
+function _processBuyOrderUpdate(
         uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount
     ) internal returns (uint256) {
-        // Handles buy order updates with direct assignments from router
         uint256 orderId = value; // value is used as orderId
         if (structId == 0) {
             BuyOrderCore memory core;
@@ -367,10 +368,18 @@ contract CCListingTemplate {
             (amounts.pending, amounts.filled, amounts.amountSent) = abi.decode(
                 bytes(uint2str(value)), (uint256, uint256, uint256)
             );
-            buyOrderAmounts[orderId] = amounts;
-            if (amounts.pending > 0 || amounts.filled > 0) {
-                _historicalData[_historicalData.length - 1].yVolume += amounts.filled;
+            // Modified: Update historical volumes correctly: xVolume (tokenA) for amountSent, yVolume (tokenB) for filled
+            if (_historicalData.length > 0) {
+                uint256 oldFilled = buyOrderAmounts[orderId].filled;
+                uint256 oldAmountSent = buyOrderAmounts[orderId].amountSent;
+                if (amounts.filled > oldFilled) {
+                    _historicalData[_historicalData.length - 1].yVolume += amounts.filled - oldFilled; // tokenB volume
+                }
+                if (amounts.amountSent > oldAmountSent) {
+                    _historicalData[_historicalData.length - 1].xVolume += amounts.amountSent - oldAmountSent; // tokenA volume
+                }
             }
+            buyOrderAmounts[orderId] = amounts;
             orderStatus[orderId].hasAmounts = true;
         } else {
             emit UpdateFailed(listingId, "Invalid buy order structId");
@@ -383,11 +392,9 @@ contract CCListingTemplate {
         return updatedCount;
     }
 
-    // Processes sell order updates
     function _processSellOrderUpdate(
         uint8 structId, uint256 value, uint256[] memory updatedOrders, uint256 updatedCount
     ) internal returns (uint256) {
-        // Handles sell order updates with direct assignments from router
         uint256 orderId = value; // value is used as orderId
         if (structId == 0) {
             SellOrderCore memory core;
@@ -416,10 +423,18 @@ contract CCListingTemplate {
             (amounts.pending, amounts.filled, amounts.amountSent) = abi.decode(
                 bytes(uint2str(value)), (uint256, uint256, uint256)
             );
-            sellOrderAmounts[orderId] = amounts;
-            if (amounts.pending > 0 || amounts.filled > 0) {
-                _historicalData[_historicalData.length - 1].xVolume += amounts.filled;
+            // Modified: Update historical volumes correctly: xVolume (tokenA) for filled, yVolume (tokenB) for amountSent
+            if (_historicalData.length > 0) {
+                uint256 oldFilled = sellOrderAmounts[orderId].filled;
+                uint256 oldAmountSent = sellOrderAmounts[orderId].amountSent;
+                if (amounts.filled > oldFilled) {
+                    _historicalData[_historicalData.length - 1].xVolume += amounts.filled - oldFilled; // tokenA volume
+                }
+                if (amounts.amountSent > oldAmountSent) {
+                    _historicalData[_historicalData.length - 1].yVolume += amounts.amountSent - oldAmountSent; // tokenB volume
+                }
             }
+            sellOrderAmounts[orderId] = amounts;
             orderStatus[orderId].hasAmounts = true;
         } else {
             emit UpdateFailed(listingId, "Invalid sell order structId");
