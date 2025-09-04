@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.4
+// Version: 0.1.5
 // Changes:
+// - v0.1.5: Added historical data interfaces.
 // - v0.1.4: Updated ICCListing interface to move payout-related structs and functions aligning with CCListingTemplate.sol v0.3.5 where payout functionality was moved to CCLiquidityTemplate.sol v0.1.9. 
 // - v0.1.3: Updated ICCLiquidity interface to rename update to ccUpdate, reflecting changes in CCLiquidityTemplate.sol.
 // - v0.1.2: Updated ICCListing interface to include new PayoutUpdate struct with orderId and added activeLongPayoutsView, activeShortPayoutsView, activeUserPayoutIDsView functions per CCListingTemplatePatch.txt v0.3.2.
@@ -30,6 +31,15 @@ interface ICCListing {
         uint256 amountSent; // for Amounts struct
     }
     
+    struct HistoricalData {
+        uint256 price;
+        uint256 xBalance;
+        uint256 yBalance;
+        uint256 xVolume;
+        uint256 yVolume;
+        uint256 timestamp;
+    }
+    
     function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
     function prices(uint256 _listingId) external view returns (uint256);
     function liquidityAddressView() external view returns (address);
@@ -39,6 +49,8 @@ interface ICCListing {
     function decimalsB() external view returns (uint8);
     function getListingId() external view returns (uint256);
     function getNextOrderId() external view returns (uint256);
+    function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data);
+    function historicalDataLengthView() external view returns (uint256 length);
     function pendingBuyOrdersView() external view returns (uint256[] memory);
     function pendingSellOrdersView() external view returns (uint256[] memory);
     function makerPendingOrdersView(address maker) external view returns (uint256[] memory);

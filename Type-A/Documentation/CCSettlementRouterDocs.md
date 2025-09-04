@@ -16,6 +16,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - `CCSettlementPartial.sol` (v0.1.4)
 
 ### Changes
+- **v0.1.5**: Updated to reflect `CCSettlementRouter.sol` v0.1.2, where`settleOrders` is adjusted to handle `HistoricalData` struct from `getHistoricalDataView`. Assigned struct to a variable and accessed fields explicitly for `ccUpdate`. Ensured compatibility with `CCListingTemplate.sol` v0.3.6, `CCMainPartial.sol` v0.1.5, `CCUniPartial.sol` v0.1.5, `CCSettlementPartial.sol` v0.1.3.
 - **v0.1.4**: Updated to reflect `CCSettlementPartial.sol` v0.1.4, where `_processBuyOrder` and `_processSellOrder` were refactored to resolve stack-too-deep errors. Split into helper functions (`_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`) using `OrderProcessContext` struct, each handling at most 4 variables. Corrected `_computeSwapAmount` to `internal` (not `view`) due to event emissions (`NonCriticalNoPendingOrder`, `NonCriticalPriceOutOfBounds`, `NonCriticalZeroSwapAmount`). Compatible with `CCListingTemplate.sol` v0.2.26, `CCMainPartial.sol` v0.1.1, `CCUniPartial.sol` v0.1.5.
 - **v0.1.3**: Added events `NonCriticalPriceOutOfBounds`, `NonCriticalNoPendingOrder`, `NonCriticalZeroSwapAmount` to log non-critical issues. Emitted in `_processBuyOrder` and `_processSellOrder` for price out of bounds, no pending orders, and zero swap amount cases to ensure non-reverting behavior with logging.
 - **v0.1.2**: Updated to reflect `CCSettlementRouter.sol` v0.1.0 (refactored `settleOrders` with `OrderContext`), `CCSettlementPartial.sol` v0.1.2 (added `_computeMaxAmountIn`, uses `ccUpdate`), and `CCUniPartial.sol` v0.1.5 (fixed `TypeError` for `BuyOrderUpdateContext`/`SellOrderUpdateContext` with `amountIn`). Corrected `listingContract.update` to `ccUpdate`.
@@ -42,7 +43,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ## External Functions and Call Trees
 ### `settleOrders(address listingAddress, uint256 step, uint256 maxIterations, bool isBuyOrder)`
-- **Purpose**: Iterates over pending buy or sell orders, validates price impact, processes swaps via Uniswap V2, updates the listing state via `ccUpdate`, and returns a reason if no orders are settled.
+- **Purpose**: Iterates over pending buy or sell orders, validates price impact, processes swaps via Uniswap V2, updates the listing state via `ccUpdate`, and returns a reason if no orders are settled. Creates a new historical data entry at the start if pending orders exist, copying the latest `HistoricalData` struct fields (`price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp`) and applies them using `ccUpdate`.
 - **Modifiers**: `nonReentrant`, `onlyValidListing(listingAddress)` (from `CCMainPartial`).
 - **Parameters**:
   - `listingAddress`: Address of the `ICCListing` contract.
@@ -139,6 +140,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
   - Sell: Decreases price (via `listingContract.prices(0)`).
 - **Pending/Filled**: Uses `amountIn` (pre-transfer: tokenB for buys, tokenA for sells) for `pending` and `filled`, accumulating `filled`.
 - **AmountSent**: Uses `amountInReceived` (post-transfer: tokenA for buys, tokenB for sells) with pre/post balance checks.
+- **Historical Data**: Creates a new `HistoricalData` entry at the start of `settleOrders` if pending orders exist, copying the latest entry’s fields (`price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`) with a new `timestamp` via `ccUpdate`.
 
 ## Additional Details
 - **Reentrancy Protection**: `nonReentrant` on `settleOrders`.

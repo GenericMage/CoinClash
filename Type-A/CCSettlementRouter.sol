@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.1
+// Version: 0.1.2
 // Changes:
+// - v0.1.2: Adjusted settleOrders to create new historical data entry as listing only increases volumes of latest entry on order updates. 
 // - v0.1.1: Fixed TypeError by replacing `listingContract.update` with `listingContract.ccUpdate` in `_updateOrder` to align with CCSettlementPartial.sol v0.1.3 and CCUniPartial.sol v0.1.5. Ensured `context.updates` is converted to `updateType`, `updateSort`, `updateData` arrays for `ccUpdate`. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.1.1, CCUniPartial.sol v0.1.5, CCSettlementPartial.sol v0.1.3.
 // - v0.1.0: Bumped version
 // - v0.0.13: Refactored settleOrders to resolve stack-too-deep error per "do x64" instruction. Split into helper functions (_validateOrder, _processOrder, _updateOrder) with OrderContext struct (orderId, pending, status, updates) to manage at most 4 variables per function. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
@@ -90,39 +91,66 @@ contract CCSettlementRouter is CCSettlementPartial {
         }
     }
 
-    function settleOrders(
-        address listingAddress,
-        uint256 step,
-        uint256 maxIterations,
-        bool isBuyOrder
-    ) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
         // Iterates over pending orders, validates, processes, and updates via Uniswap swap
-        ICCListing listingContract = ICCListing(listingAddress);
-        if (uniswapV2Router == address(0)) {
-            return "Missing Uniswap V2 router address";
-        }
-        uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
-        if (orderIds.length == 0 || step >= orderIds.length) {
-            return "No pending orders or invalid step";
-        }
-        uint256 count = 0;
-        for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
-            OrderContext memory context = _validateOrder(listingAddress, orderIds[i], isBuyOrder, listingContract);
-            if (context.pending == 0 || context.status != 1) {
-                continue;
+        function settleOrders(
+            address listingAddress,
+            uint256 step,
+            uint256 maxIterations,
+            bool isBuyOrder
+        ) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
+            ICCListing listingContract = ICCListing(listingAddress);
+            if (uniswapV2Router == address(0)) {
+                return "Missing Uniswap V2 router address";
             }
-            context = _processOrder(listingAddress, isBuyOrder, listingContract, context);
-            (bool success, string memory updateReason) = _updateOrder(listingContract, context);
-            if (!success && bytes(updateReason).length > 0) {
-                return updateReason;
+            uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
+            if (orderIds.length == 0 || step >= orderIds.length) {
+                return "No pending orders or invalid step";
             }
-            if (success) {
-                count++;
+            // Create new historical data entry if orders exist
+            if (orderIds.length > 0) {
+                uint256 historicalLength = listingContract.historicalDataLengthView();
+                if (historicalLength > 0) {
+                    // Fetch latest historical data
+                    ICCListing.HistoricalData memory historicalData = listingContract.getHistoricalDataView(historicalLength - 1);
+                    // Prepare ccUpdate for new historical data entry
+                    uint8[] memory updateType = new uint8[](1);
+                    uint8[] memory updateSort = new uint8[](1);
+                    uint256[] memory updateData = new uint256[](1);
+                    updateType[0] = 3; // Historical update
+                    updateSort[0] = 0; // Historical struct
+                    updateData[0] = uint256(bytes32(abi.encode(
+                        historicalData.price,
+                        historicalData.xBalance,
+                        historicalData.yBalance,
+                        historicalData.xVolume,
+                        historicalData.yVolume,
+                        block.timestamp
+                    )));
+                    try listingContract.ccUpdate(updateType, updateSort, updateData) {
+                        // Historical data entry created successfully
+                    } catch Error(string memory updateReason) {
+                        return string(abi.encodePacked("Failed to create historical data entry: ", updateReason));
+                    }
+                }
             }
+            uint256 count = 0;
+            for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
+                OrderContext memory context = _validateOrder(listingAddress, orderIds[i], isBuyOrder, listingContract);
+                if (context.pending == 0 || context.status != 1) {
+                    continue;
+                }
+                context = _processOrder(listingAddress, isBuyOrder, listingContract, context);
+                (bool success, string memory updateReason) = _updateOrder(listingContract, context);
+                if (!success && bytes(updateReason).length > 0) {
+                    return updateReason;
+                }
+                if (success) {
+                    count++;
+                }
+            }
+            if (count == 0) {
+                return "No orders settled: price out of range, insufficient tokens, or swap failure";
+            }
+            return "";
         }
-        if (count == 0) {
-            return "No orders settled: price out of range, insufficient tokens, or swap failure";
-        }
-        return "";
     }
-}
