@@ -1,27 +1,29 @@
 # CCLiquidRouter Contract Documentation
 
 ## Overview
-The `CCLiquidRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using `ICCLiquidity` for liquid settlement. It inherits from `CCLiquidPartial`, which extends `CCMainPartial`, and integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair` for token operations and reserve data. It uses `ReentrancyGuard` (including `Ownable`) for security. The contract handles liquid settlement via `settleBuyLiquid` and `settleSellLiquid`, supporting a `step` parameter for gas-efficient iteration, ensuring robust error logging, and avoiding re-fetching settled orders.
+The `CCLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `CCLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair`. Features include a fee system (max 1% based on liquidity usage), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step`. Uses `ReentrancyGuard` for security. Fees are transferred with `pendingAmount` and recorded in `xFees`/`yFees`. Liquidity updates: `pendingAmount` increases `xLiquid`/`yLiquid`, `amountOut` decreases `yLiquid`/`xLiquid`.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.0.21 (updated 2025-09-04)
+**Version:** 0.0.23 (updated 2025-09-05)
 
 **Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` (v0.0.30) → `CCMainPartial` (v0.1.1)
 
-**Compatibility:** `CCListingTemplate.sol` (v0.3.0), `ICCLiquidity.sol` (v0.0.5), `CCMainPartial.sol` (v0.1.1), `CCLiquidPartial.sol` (v0.0.30), `CCLiquidityTemplate.sol` (v0.1.3)
+**Compatibility:** `CCListingTemplate.sol` (v0.3.2), `ICCLiquidity.sol` (v0.0.5), `CCMainPartial.sol` (v0.1.5), `CCLiquidPartial.sol` (v0.0.35), `CCLiquidityTemplate.sol` (v0.1.18)
 
 ## Mappings
 - None defined in `CCLiquidRouter`. Uses `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
 
 ## Structs
-- **HistoricalUpdateContext** (`CCLiquidRouter`): holds (uint256) `xBalance`, (uint256) `yBalance`, (uint256) `xVolume`, (uint256) `yVolume`. 
-- **OrderContext** (`CCLiquidPartial`): Holds `listingContract` (ICCListing), `tokenIn` (address), `tokenOut` (address), `liquidityAddr` (address).
-- **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized tokenA for buy, tokenB for sell), `preTransferWithdrawn` (uint256, denormalized amount withdrawn).
-- **BuyOrderUpdateContext** (`CCLiquidPartial`): Holds `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, denormalized), `normalizedReceived` (uint256), `amountSent` (uint256, denormalized tokenA for buy), `preTransferWithdrawn` (uint256).
-- **SellOrderUpdateContext** (`CCLiquidPartial`): Same as `BuyOrderUpdateContext`, with `amountSent` (denormalized tokenB for sell).
+- **HistoricalUpdateContext** (`CCLiquidRouter`): Holds `xBalance`, `yBalance`, `xVolume`, `yVolume` (uint256).
+- **OrderContext** (`CCLiquidPartial`): Holds `listingContract` (ICCListing), `tokenIn`, `tokenOut`, `liquidityAddr` (address).
+- **PrepOrderUpdateResult** (`CCLiquidPartial`): Holds `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress`, `recipientAddress` (address), `orderStatus` (uint8), `amountReceived`, `normalizedReceived`, `amountSent`, `preTransferWithdrawn` (uint256).
+- **OrderUpdateContext** (`CCLiquidPartial`): Holds `makerAddress`, `recipient` (address), `status` (uint8), `amountSent` (uint256, tokenA for buy, tokenB for sell).
 - **OrderBatchContext** (`CCLiquidPartial`): Holds `listingAddress` (address), `maxIterations` (uint256), `isBuyOrder` (bool).
-- **SwapImpactContext** (`CCLiquidPartial`): Holds `reserveIn` (uint256), `reserveOut` (uint256), `decimalsIn` (uint8), `decimalsOut` (uint8), `normalizedReserveIn` (uint256), `normalizedReserveOut` (uint256), `amountInAfterFee` (uint256), `price` (uint256), `amountOut` (uint256).
+- **SwapImpactContext** (`CCLiquidPartial`): Holds `reserveIn`, `reserveOut`, `normalizedReserveIn`, `normalizedReserveOut`, `amountInAfterFee`, `price`, `amountOut` (uint256), `decimalsIn`, `decimalsOut` (uint8).
+- **FeeContext** (`CCLiquidPartial`): Holds `feeAmount`, `netAmount`, `liquidityAmount` (uint256), `decimals` (uint8).
+- **OrderProcessingContext** (`CCLiquidPartial`): Holds `maxPrice`, `minPrice`, `currentPrice`, `impactPrice` (uint256).
+- **LiquidityUpdateContext** (`CCLiquidPartial`): Holds `pendingAmount`, `amountOut` (uint256), `tokenDecimals` (uint8), `isBuyOrder` (bool).
 
 ## Formulas
 Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculations.
@@ -56,6 +58,17 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
    - **Denormalize**: `denormalize(amount, decimals) = decimals < 18 ? amount / 10^(18-decimals) : amount * 10^(decimals-18)`.
    - **Used in**: `_getSwapReserves`, `_computeSwapImpact`, `_prepBuy/SellOrderUpdate`, `_processSingleOrder`, `_updateLiquidityBalances`.
    - **Description**: Ensures 18-decimal precision for calculations, reverting to native decimals for transfers.
+   
+1. **Fee Calculation**:
+   - **Formula**: `feePercent = (normalizedPending / normalizedLiquidity) * 1e18`, capped at 1%; `feeAmount = (pendingAmount * feePercent) / 1e20`; `netAmount = pendingAmount - feeAmount`.
+   - **Used in**: `_computeFee`, `_prepareLiquidityUpdates`.
+   - **Description**: Calculates fee based on liquidity usage (`xLiquid` for sell, `yLiquid` for buy).
+
+2. **Liquidity Updates**:
+   - **Formula**:
+     - Buy: `xLiquid += normalize(pendingAmount)`, `yLiquid -= normalize(amountOut)`, `yFees += normalize(feeAmount)`.
+     - Sell: `yLiquid += normalize(pendingAmount)`, `xLiquid -= normalize(amountOut)`, `xFees += normalize(feeAmount)`.
+   - **Used in**: `_prepareLiquidityUpdates`, `ICCLiquidity.ccUpdate`.
 
 ## External Functions
 
@@ -239,6 +252,9 @@ Formulas in `CCLiquidPartial.sol` govern settlement and price impact calculation
 
 ## Internal Functions (CCLiquidRouter)
 **_createHistoricalUpdate** fetches live data for; `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`, `timestamp`, and applies them in a new historical data entry using `ccUpdate`.
+- **_computeFee**: Calculates fee based on liquidity usage; external calls: `liquidityContract.liquidityAmounts()`, `_getTokenAndDecimals`.
+- **_computeSwapAmount**: Computes `amountOut`; external calls: `_computeSwapImpact`, `_getTokenAndDecimals`.
+- **_prepareLiquidityUpdates**: Transfers `pendingAmount`, prepares `ICCLiquidity.UpdateType[]`; external calls: `liquidityContract.liquidityAmounts()`, `listingContract.transactToken`, `_computeFee`, `_getTokenAndDecimals`, `listingContract.decimalsA()`/`decimalsB()`.
 
 ## Security Measures
 - **Reentrancy Protection**: `nonReentrant` on `settleBuyLiquid`, `settleSellLiquid`.

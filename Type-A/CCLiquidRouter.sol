@@ -3,8 +3,9 @@
 
  Version: 0.0.22
  Changes:
-- v0.0.22: Refactored settleBuy/SellLiquid to resolve "Stack too deep" error. Moved historical data update logic to _createHistoricalUpdate helper function using HistoricalUpdateContext struct with ≤4 variables. 
-- v0.0.21: Updated settleBuyLiquid and settleSellLiquid to create a new historical data entry using live data from listingContract.volumeBalances(0) and listingContract.prices(0) before processing orders.
+ - v0.0.23: Modified settleBuyLiquid and settleSellLiquid to use makerPendingOrdersView for msg.sender's orders. I
+ - v0.0.22: Refactored settleBuy/SellLiquid to resolve "Stack too deep" error. Moved historical data update logic to _createHistoricalUpdate helper function using HistoricalUpdateContext struct with ≤4 variables. 
+ - v0.0.21: Updated settleBuyLiquid and settleSellLiquid to create a new historical data entry using live data from listingContract.volumeBalances(0) and listingContract.prices(0) before processing orders.
  - v0.0.20: Replaced listingContract.update(updates) with listingContract.ccUpdate(updateType, updateSort, updateData) in settleBuyLiquid and settleSellLiquid to align with CCListingTemplate.sol v0.3.0 and CCLiquidPartial.sol v0.0.28. Converted updates to three arrays for ccUpdate.
  - v0.0.19: Updated compatibility with CCLiquidPartial.sol v0.0.25, which removes listingContract.update() from _prepBuyOrderUpdate and _prepSellOrderUpdate, ensuring single update in _processOrderBatch. Aligned with fixed liquidity balance updates in _processSingleOrder using differences. Compatible with CCListingTemplate.sol v0.2.0, CCMainPartial.sol v0.0.14, CCLiquidityTemplate.sol v0.1.3, CCLiquidPartial.sol v0.0.25.
  - v0.0.18: Removed duplicate _processOrderBatch function to resolve TypeError, relying on CCLiquidPartial.sol implementation. Removed redundant UpdateFailed event.
@@ -72,9 +73,9 @@ function _createHistoricalUpdate(address listingAddress, ICCListing listingContr
 }
 
 function settleBuyLiquid(address listingAddress, uint256 maxIterations, uint256 step) external onlyValidListing(listingAddress) nonReentrant {
-    // Settles multiple buy order liquidations starting from step up to maxIterations
+    // Settles buy orders for msg.sender starting from step up to maxIterations
     ICCListing listingContract = ICCListing(listingAddress);
-    uint256[] memory pendingOrders = listingContract.pendingBuyOrdersView();
+    uint256[] memory pendingOrders = listingContract.makerPendingOrdersView(msg.sender);
     if (pendingOrders.length == 0 || step >= pendingOrders.length) {
         emit NoPendingOrders(listingAddress, true);
         return;
@@ -107,9 +108,9 @@ function settleBuyLiquid(address listingAddress, uint256 maxIterations, uint256 
 }
 
 function settleSellLiquid(address listingAddress, uint256 maxIterations, uint256 step) external onlyValidListing(listingAddress) nonReentrant {
-    // Settles multiple sell order liquidations starting from step up to maxIterations
+    // Settles sell orders for msg.sender starting from step up to maxIterations
     ICCListing listingContract = ICCListing(listingAddress);
-    uint256[] memory pendingOrders = listingContract.pendingSellOrdersView();
+    uint256[] memory pendingOrders = listingContract.makerPendingOrdersView(msg.sender);
     if (pendingOrders.length == 0 || step >= pendingOrders.length) {
         emit NoPendingOrders(listingAddress, false);
         return;
