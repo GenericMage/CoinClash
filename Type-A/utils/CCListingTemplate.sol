@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-    // Version: 0.3.8
-    // Changes:
-    // - v0.3.8: Corrected _processBuyOrderUpdate and _processSellOrderUpdate to properly update historical volumes: xVolume (tokenA) updated with amountSent for buy orders and filled for sell orders; yVolume (tokenB) updated with filled for buy orders and amountSent for sell orders. Volume changes computed as difference between new and old values.
-    // - v0.3.7: Modified _processBuyOrderUpdate and _processSellOrderUpdate to update historical volumes only when 'filled' or 'amountSent' are provided. Computes volume change as difference between new and old values (e.g., new filled - old filled). Updates xVolume for principal token (buy: tokenB, sell: tokenA) when 'filled' is updated, and yVolume for settlement token (buy: tokenA, sell: tokenB) when 'amountSent' is updated.
+// Version: 0.3.8
+// Changes:
+// - v0.3.8: Corrected _processBuyOrderUpdate and _processSellOrderUpdate to properly update historical volumes: xVolume (tokenA) updated with amountSent for buy orders and filled for sell orders; yVolume (tokenB) updated with filled for buy orders and amountSent for sell orders. Volume changes computed as difference between new and old values.
+// - v0.3.7: Modified _processBuyOrderUpdate and _processSellOrderUpdate to update historical volumes only when 'filled' or 'amountSent' are provided. Computes volume change as difference between new and old values (e.g., new filled - old filled). Updates xVolume for principal token (buy: tokenB, sell: tokenA) when 'filled' is updated, and yVolume for settlement token (buy: tokenA, sell: tokenB) when 'amountSent' is updated.
 // -v0.3.6: Adjusted setRouters and resetRouters to use routerAddresses array for clarity and better resetting. 
 // - v0.3.5: Moved payout functionality to liquidity template .
 // - v0.3.4: Changed routers visibility. 
@@ -70,22 +70,37 @@ contract CCListingTemplate {
     bool private _globalizerSet;
     uint256 private nextOrderId; // Returns uint256 nextOrderId
 
+    DayStartFee public dayStartFee; // Returns DayStartFee memory fee
+
+    Balance private _balance;
+    uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
+    uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
+    mapping(address maker => uint256[] orderIds) private makerPendingOrders; // Returns uint256[] memory orderIds
+    
+    HistoricalData[] private _historicalData;
+
+    // Maps midnight timestamps to historical data indices
+    mapping(uint256 timestamp => uint256 index) private _dayStartIndices;
+
+    mapping(uint256 orderId => BuyOrderCore) private buyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => BuyOrderPricing) private buyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => BuyOrderAmounts) private buyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => SellOrderCore) private sellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
+    mapping(uint256 orderId => SellOrderPricing) private sellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
+    mapping(uint256 orderId => SellOrderAmounts) private sellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
+    mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
+
     struct DayStartFee {
         uint256 dayStartXFeesAcc; // Tracks xFeesAcc at midnight
         uint256 dayStartYFeesAcc; // Tracks yFeesAcc at midnight
         uint256 timestamp; // Midnight timestamp
     }
-    DayStartFee public dayStartFee; // Returns DayStartFee memory fee
-
+    
     struct Balance {
         uint256 xBalance;
         uint256 yBalance;
     }
-    Balance private _balance;
-    uint256[] private _pendingBuyOrders; // Returns uint256[] memory orderIds
-    uint256[] private _pendingSellOrders; // Returns uint256[] memory orderIds
-    mapping(address maker => uint256[] orderIds) public makerPendingOrders; // Returns uint256[] memory orderIds
-
+    
     struct HistoricalData {
         uint256 price;
         uint256 xBalance;
@@ -94,10 +109,6 @@ contract CCListingTemplate {
         uint256 yVolume;
         uint256 timestamp;
     }
-    HistoricalData[] private _historicalData;
-
-    // Maps midnight timestamps to historical data indices
-    mapping(uint256 timestamp => uint256 index) private _dayStartIndices;
 
     struct BuyOrderCore {
         address makerAddress;
@@ -144,15 +155,7 @@ contract CCListingTemplate {
         bool hasPricing; // Tracks if Pricing struct is set
         bool hasAmounts; // Tracks if Amounts struct is set
     }
-
-    mapping(uint256 orderId => BuyOrderCore) public buyOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 orderId => BuyOrderPricing) public buyOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 orderId => BuyOrderAmounts) public buyOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => SellOrderCore) public sellOrderCore; // Returns (address makerAddress, address recipientAddress, uint8 status)
-    mapping(uint256 orderId => SellOrderPricing) public sellOrderPricing; // Returns (uint256 maxPrice, uint256 minPrice)
-    mapping(uint256 orderId => SellOrderAmounts) public sellOrderAmounts; // Returns (uint256 pending, uint256 filled, uint256 amountSent)
-    mapping(uint256 orderId => OrderStatus) private orderStatus; // Tracks completeness of order structs
-
+    
     event OrderUpdated(uint256 indexed listingId, uint256 orderId, bool isBuy, uint8 status);
     event BalancesUpdated(uint256 indexed listingId, uint256 xBalance, uint256 yBalance);
     event GlobalizerAddressSet(address indexed globalizer);
