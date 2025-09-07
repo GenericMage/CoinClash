@@ -1,10 +1,10 @@
 ### CCAgent - Liquidity/ListingLogic Contracts Documentation
 
-The System comprises `CCAgent`, `CCListingLogic`, `SSLiquidityLogic`, `CCListingTemplate`, `SSLiquidityTemplate`, `CCOrderRouter`, `CCSettlementRouter`, `CCLiquidityRouter`, `CSStorage`, `CCSPositionDriver`, `CCSExecutionDriver`, `SIStorage`, `CISPositionDriver`, and `CISExecutionDriver`. Together they form an AMM Orderbook Hybrid for leverage trading on the EVM.
+The System comprises `CCAgent`, `CCListingLogic` and `SSLiquidityLogic`, together they form the factory suite of an AMM Orderbook Hybrid for leverage trading on the EVM.
 
 ## CCLiquidityLogic Contract
 
-The liquidity logic inherits `SSLiquidityTemplate` and is used by the `CCAgent` to deploy new liquidity contracts tied to listing contracts for a unique `tokenA` and `tokenB` pair.
+The liquidity logic inherits `CCLiquidityTemplate` and is used by the `CCAgent` to deploy new liquidity contracts tied to listing contracts for a unique `tokenA` and `tokenB` pair.
 
 ### Mappings and Arrays
 
@@ -21,10 +21,10 @@ The liquidity logic inherits `SSLiquidityTemplate` and is used by the `CCAgent` 
 - **Parameters**:
   - `salt` (bytes32): Unique salt for deterministic address generation.
 - **Actions**:
-  - Deploys a new `SSLiquidityTemplate` contract using the provided salt.
+  - Deploys a new `CCLiquidityTemplate` contract using the provided salt.
   - Uses create2 opcode via explicit casting to address for deployment.
 - **Returns**:
-  - `address`: Address of the newly deployed `SSLiquidityTemplate` contract.
+  - `address`: Address of the newly deployed `CCLiquidityTemplate` contract.
 
 ## CCListingLogic Contract
 
@@ -309,4 +309,5 @@ The agent manages token listings, enables the creation of unique listings and li
 - **Lister Tracking**:
   - `msg.sender` is stored as the lister in `listToken` and `listNative` via `getLister` and `listingsByLister`.
   - `transferLister` allows the current lister to transfer control to a new address, updating `getLister` and `listingsByLister`.
+
   - `getListingsByLister` provides paginated access to a lister’s listing IDs.
