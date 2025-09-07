@@ -47,7 +47,6 @@ interface ICCListing {
     function tokenB() external view returns (address);
     function decimalsA() external view returns (uint8);
     function decimalsB() external view returns (uint8);
-    function getListingId() external view returns (uint256);
     function getNextOrderId() external view returns (uint256);
     function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data);
     function historicalDataLengthView() external view returns (uint256 length);
@@ -138,15 +137,14 @@ interface ICCLiquidity {
     function ccUpdate(address depositor, UpdateType[] memory updates) external;
     function transactToken(address depositor, address token, uint256 amount, address recipient) external;
     function transactNative(address depositor, uint256 amount, address recipient) external;
-    function addFees(address depositor, bool isX, uint256 fee) external;
     function liquidityAmounts() external view returns (uint256 xAmount, uint256 yAmount);
     function liquidityDetailsView() external view returns (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc);
-    function activeXLiquiditySlotsView() external view returns (uint256[] memory);
-    function activeYLiquiditySlotsView() external view returns (uint256[] memory);
     function userXIndexView(address user) external view returns (uint256[] memory);
     function userYIndexView(address user) external view returns (uint256[] memory);
     function getXSlotView(uint256 index) external view returns (Slot memory);
     function getYSlotView(uint256 index) external view returns (Slot memory);
+    function getActiveXLiquiditySlots() external view returns (uint256[] memory slots);
+    function getActiveYLiquiditySlots() external view returns (uint256[] memory slots);
     function ssUpdate(PayoutUpdate[] calldata updates) external;
     function longPayoutByIndexView() external view returns (uint256[] memory);
     function shortPayoutByIndexView() external view returns (uint256[] memory);

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
- // Version: 0.1.12
- // Changes:
- // - v0.1.12: Modified _executeFeeClaim to use updateType 6/7 for dFeesAcc, setting it to xFeesAcc/yFeesAcc from liquidityDetailsView, ensuring accurate fee accumulation tracking.
- // - v0.1.11: Modified _executeFeeClaim to use updateType 6/7 instead of 2/3, updating dFeesAcc without altering slot allocation or liquidity.
+ // Version:  (v0.1.13)
+// Changes:
+// - v0.1.14: Replaced activeXLiquiditySlotsView and activeYLiquiditySlotsView with getActiveXLiquiditySlots and getActiveYLiquiditySlots in _validateDeposit to fix transaction failure due to removed view functions.
+// - v0.1.12: Modified _executeFeeClaim to use updateType 6/7 for dFeesAcc, setting it to xFeesAcc/yFeesAcc from liquidityDetailsView, ensuring accurate fee accumulation tracking.
+// - v0.1.11: Modified _executeFeeClaim to use updateType 6/7 instead of 2/3, updating dFeesAcc without altering slot allocation or liquidity.
 // - v0.1.10: Replaced liquidityDetail() with liquidityDetailsView() in _executeWithdrawal to fix silent failure. Added error emission for liquidityDetailsView failure to improve debugging.
 // - v0.1.9: Refactored _executeWithdrawal to address stack too deep error by splitting into helper functions. Introduced struct to manage data.
 // - v0.1.8: Modified _executeWithdrawal to support partial withdrawals by allowing user-specified amount to reduce slot allocation instead of setting it to 0.
@@ -103,7 +104,7 @@ struct WithdrawalContext {
         yAmount: yAmount,
         receivedAmount: 0,
         normalizedAmount: 0,
-        index: isTokenA ? liquidityContract.activeXLiquiditySlotsView().length : liquidityContract.activeYLiquiditySlotsView().length
+        index: isTokenA ? liquidityContract.getActiveXLiquiditySlots().length : liquidityContract.getActiveYLiquiditySlots().length
     });
 }
 
