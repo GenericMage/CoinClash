@@ -5,9 +5,10 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.9 (Updated 2025-09-02)
+**Version**: 0.1.10 (Updated 2025-09-08)
 
 **Changes**:
+- v0.1.10: Updated to reflect `CCLiquidityPartial.sol` (v0.1.16) with refactored `_prepWithdrawal` using helper functions (`_getLiquidityDetails`, `_validateSlot`, `_calculateCompensation`) and `WithdrawalPrepData` struct to address stack too deep error. Updated internal call tree for `withdraw`.
 - v0.1.9: Updated to reflect `CCLiquidityRouter.sol` (v0.1.2), `CCLiquidityPartial.sol` (v0.1.12) with `updateType` 6/7 for fee claims, `CCLiquidityTemplate.sol` (v0.1.18) with `updateType` 6/7 support. Clarified internal call trees and compatibility.
 - v0.1.8: Updated to reflect `CCLiquidityPartial.sol` (v0.1.9) with `_executeWithdrawal` refactored into helper functions (`_validateSlotOwnership`, `_checkLiquidity`, `_updateSlotAllocation`, `_transferPrimaryToken`, `_transferCompensationToken`) and `WithdrawalContext` struct.
 - v0.1.7: Updated to reflect `CCLiquidityPartial.sol` (v0.1.8) with compensation logic in `_prepWithdrawal` and `_executeWithdrawal`. Removed `xPrepOut`, `yPrepOut`, `xExecuteOut`, `yExecuteOut`.
@@ -97,6 +98,13 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `value`: Normalized amount.
   - `addr`: Depositor address.
   - `recipient`: Unused (reserved).
+  - **WithdrawalPrepData** (CCLiquidityPartial, private):
+  - `liquidityAddr`: `ICCLiquidity` contract address.
+  - `xLiquid`: Token A liquidity from `liquidityDetailsView`.
+  - `yLiquid`: Token B liquidity from `liquidityDetailsView`.
+  - `price`: Current price (tokenB/tokenA, normalized to 1e18) from `ICCListing.prices(0)`.
+  - **Description**: Used to pass data between helper functions in `_prepWithdrawal` to reduce stack usage.
+
 
 ## Formulas
 1. **Fee Share** (in `_calculateFeeShare`):
@@ -175,17 +183,17 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Behavior**: Withdraws liquidity from `CCLiquidityTemplate` for `msg.sender`, supports partial withdrawals and compensation if liquidity is insufficient.
 - **Internal Call Flow**:
   - `_prepWithdrawal` (CCLiquidityPartial):
-    - Validates `msg.sender` as slot owner via `getXSlotView` or `getYSlotView`.
-    - Checks `xLiquid`/`yLiquid` and slot `allocation` via `liquidityDetailsView`, `getXSlotView`, `getYSlotView`.
-    - Uses `ICCListing.prices(0)` to calculate compensation (`amountB` for `isX=true`, `amountA` for `isX=false`) if liquidity insufficient.
-    - Sets `PreparedWithdrawal` with `amountA` or `amountB`.
+    - Calls `_getLiquidityDetails`: Fetches `liquidityAddressView` from `ICCListing`, retrieves `xLiquid`, `yLiquid` from `ICCLiquidity.liquidityDetailsView`, and `prices(0)` from `ICCListing`. Returns `WithdrawalPrepData`.
+    - Calls `_validateSlot`: Verifies `msg.sender` as slot owner via `ICCLiquidity.getXSlotView` or `getYSlotView`, retrieves `currentAllocation`.
+    - Checks `currentAllocation >= outputAmount`.
+    - Calls `_calculateCompensation`: Sets `PreparedWithdrawal.amountA` or `amountB` based on `isX`. If `xLiquid` or `yLiquid` is insufficient, calculates compensation (`amountB` for `isX=true`, `amountA` for `isX=false`) using `prices(0)`.
   - `_executeWithdrawal` (CCLiquidityPartial):
     - Calls `_validateSlotOwnership`: Verifies slot ownership, updates `WithdrawalContext.currentAllocation`.
     - Calls `_checkLiquidity`: Validates `xLiquid` or `yLiquid` against `primaryAmount`, emits `WithdrawalFailed` on failure.
     - Calls `_updateSlotAllocation`: Updates slot allocation via `ICCLiquidity.ccUpdate`, reduces `currentAllocation`.
     - Calls `_transferPrimaryToken`: Transfers primary token (token A for xSlot, token B for ySlot) via `transactNative` or `transactToken`.
     - Calls `_transferCompensationToken`: Transfers compensation token (token B for xSlot, token A for ySlot) if needed, emits `CompensationCalculated`.
-- **Balance Checks**: `xLiquid`/`yLiquid` and slot `allocation` in `_prepWithdrawal` and `_executeWithdrawal`, implicit checks in `transactToken`/`transactNative`.
+- **Balance Checks**: `xLiquid`/`yLiquid` and slot `allocation` in `_prepWithdrawal` (via `_getLiquidityDetails` and `_validateSlot`) and `_executeWithdrawal`, implicit checks in `transactToken`/`transactNative`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: Single `ccUpdate` call, up to two transfers for compensation.
 - **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`, `prices`; `ICCLiquidity` for `liquidityDetailsView`, `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`.
@@ -245,6 +253,10 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **_calculateFeeShare**: Computes fee share using formula.
 - **_executeFeeClaim**: Updates fees and `dFeesAcc`, transfers fees.
 - **_processFeeShare**: Orchestrates fee claim via `_validateFeeClaim`, `_calculateFeeShare`, `_executeFeeClaim`.
+- **_getLiquidityDetails**: Fetches `liquidityAddressView`, `xLiquid`, `yLiquid`, and `prices(0)`, returns `WithdrawalPrepData`.
+- **_validateSlot**: Verifies slot ownership, returns `currentAllocation`.
+- **_calculateCompensation**: Computes `PreparedWithdrawal` with compensation amounts based on liquidity shortfall.
+- **_prepWithdrawal**: Orchestrates withdrawal preparation using `_getLiquidityDetails`, `_validateSlot`, and `_calculateCompensation`.
 
 ## Clarifications and Nuances
 - **Token Flow**:

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
- // Version:  (v0.1.13)
+// Version: 0.1.16
 // Changes:
+// - v0.1.16: Refactored _prepWithdrawal to address stack too deep error by splitting into helper functions (_getLiquidityDetails, _validateSlot, _calculateCompensation). Used private struct WithdrawalPrepData to pass data across stages, reducing stack usage.
+// - v0.1.15: Fixed _prepWithdrawal to call liquidityDetailsView() on liquidity contract (via listingContract.liquidityAddressView()) instead of listingAddress, correcting incorrect contract assumption.
 // - v0.1.14: Replaced activeXLiquiditySlotsView and activeYLiquiditySlotsView with getActiveXLiquiditySlots and getActiveYLiquiditySlots in _validateDeposit to fix transaction failure due to removed view functions.
 // - v0.1.12: Modified _executeFeeClaim to use updateType 6/7 for dFeesAcc, setting it to xFeesAcc/yFeesAcc from liquidityDetailsView, ensuring accurate fee accumulation tracking.
 // - v0.1.11: Modified _executeFeeClaim to use updateType 6/7 instead of 2/3, updating dFeesAcc without altering slot allocation or liquidity.
@@ -85,6 +87,14 @@ struct WithdrawalContext {
         address transferToken;
         uint256 feeShare;
     }
+    
+    struct WithdrawalPrepData {
+    address liquidityAddr;
+    uint256 xLiquid;
+    uint256 yLiquid;
+    uint256 price;
+    uint256 currentAllocation;
+}
 
     function _validateDeposit(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal view returns (DepositContext memory) {
     // Validates deposit parameters, using depositor for slot assignment and msg.sender as depositInitiator
@@ -182,14 +192,21 @@ function _depositNative(address listingAddress, address depositor, uint256 input
     _updateDeposit(context);
 }
 
-    function _prepWithdrawal(address listingAddress, address depositor, uint256 amount, uint256 index, bool isX) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
-    // Prepares withdrawal, calculates compensation in opposite token if liquidity is insufficient
-    ICCLiquidity liquidityTemplate = ICCLiquidity(listingAddress);
-    (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) = liquidityTemplate.liquidityDetailsView();
-    uint256 price = ICCListing(listingAddress).prices(0); // Get current price (tokenB/tokenA, normalized to 1e18)
-    
-    // Validate slot ownership and allocation
-    uint256 currentAllocation;
+// Helper function to fetch liquidity details
+function _getLiquidityDetails(address listingAddress) private view returns (WithdrawalPrepData memory data) {
+    ICCListing listingContract = ICCListing(listingAddress);
+    data.liquidityAddr = listingContract.liquidityAddressView();
+    ICCLiquidity liquidityTemplate = ICCLiquidity(data.liquidityAddr);
+    (uint256 xLiquid, uint256 yLiquid, , , , ) = liquidityTemplate.liquidityDetailsView();
+    data.xLiquid = xLiquid;
+    data.yLiquid = yLiquid;
+    data.price = listingContract.prices(0); // tokenB/tokenA, normalized to 1e18
+    return data;
+}
+
+// Helper function to validate slot ownership and allocation
+function _validateSlot(address depositor, uint256 index, bool isX, address liquidityAddr) private view returns (uint256 currentAllocation) {
+    ICCLiquidity liquidityTemplate = ICCLiquidity(liquidityAddr);
     if (isX) {
         ICCLiquidity.Slot memory slot = liquidityTemplate.getXSlotView(index);
         require(slot.depositor == depositor, "Not slot owner");
@@ -199,24 +216,34 @@ function _depositNative(address listingAddress, address depositor, uint256 input
         require(slot.depositor == depositor, "Not slot owner");
         currentAllocation = slot.allocation;
     }
-    require(currentAllocation >= amount, "Withdrawal exceeds slot allocation");
+    return currentAllocation;
+}
 
-    // Check liquidity and calculate compensation
+// Helper function to calculate compensation
+function _calculateCompensation(uint256 amount, bool isX, WithdrawalPrepData memory data) private pure returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
     if (isX) {
         withdrawal.amountA = amount;
-        if (xLiquid < amount) {
-            // Compensate with tokenB
-            uint256 shortfall = amount - xLiquid;
-            withdrawal.amountB = (shortfall * price) / 1e18; // Convert shortfall to tokenB using price
+        if (data.xLiquid < amount) {
+            uint256 shortfall = amount - data.xLiquid;
+            withdrawal.amountB = (shortfall * data.price) / 1e18; // Compensate with tokenB
         }
     } else {
         withdrawal.amountB = amount;
-        if (yLiquid < amount) {
-            // Compensate with tokenA
-            uint256 shortfall = amount - yLiquid;
-            withdrawal.amountA = (shortfall * 1e18) / price; // Convert shortfall to tokenA using price
+        if (data.yLiquid < amount) {
+            uint256 shortfall = amount - data.yLiquid;
+            withdrawal.amountA = (shortfall * 1e18) / data.price; // Compensate with tokenA
         }
     }
+    return withdrawal;
+}
+
+// Refactored _prepWithdrawal function
+function _prepWithdrawal(address listingAddress, address depositor, uint256 amount, uint256 index, bool isX) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
+    // Prepares withdrawal, calculates compensation in opposite token if liquidity is insufficient
+    WithdrawalPrepData memory data = _getLiquidityDetails(listingAddress);
+    data.currentAllocation = _validateSlot(depositor, index, isX, data.liquidityAddr);
+    require(data.currentAllocation >= amount, "Withdrawal exceeds slot allocation");
+    withdrawal = _calculateCompensation(amount, isX, data);
     return withdrawal;
 }
 
