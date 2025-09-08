@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.16
 // Changes:
+// - v0.1.18: Updated _executeWithdrawal to use currentAllocation from _prepWithdrawal via PreparedWithdrawal to fix incorrect slot allocation updates. Added denormalization of primaryAmount and compensationAmount in _transferPrimaryToken and _transferCompensationToken to handle non-18-decimal tokens correctly.
+// - v0.1.17: Fixed _executeWithdrawal to use liquidityAddress from ICCListing.liquidityAddressView() instead of casting listingAddress to ICCLiquidity. Removed redundant _validateSlotOwnership and _checkLiquidity calls, as _prepWithdrawal already validates listing and slot details.
 // - v0.1.16: Refactored _prepWithdrawal to address stack too deep error by splitting into helper functions (_getLiquidityDetails, _validateSlot, _calculateCompensation). Used private struct WithdrawalPrepData to pass data across stages, reducing stack usage.
 // - v0.1.15: Fixed _prepWithdrawal to call liquidityDetailsView() on liquidity contract (via listingContract.liquidityAddressView()) instead of listingAddress, correcting incorrect contract assumption.
 // - v0.1.14: Replaced activeXLiquiditySlotsView and activeYLiquiditySlotsView with getActiveXLiquiditySlots and getActiveYLiquiditySlots in _validateDeposit to fix transaction failure due to removed view functions.
@@ -292,17 +293,19 @@ function _updateSlotAllocation(WithdrawalContext memory context, ICCLiquidity li
 }
 
 function _transferPrimaryToken(WithdrawalContext memory context, ICCLiquidity liquidityTemplate) private {
-    // Transfers primary token
+    // Transfers primary token, denormalizing amount based on token decimals
     if (context.primaryAmount > 0) {
         address token = context.isX ? context.tokenA : context.tokenB;
+        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        uint256 denormalizedAmount = denormalize(context.primaryAmount, decimals);
         if (token == address(0)) {
-            try liquidityTemplate.transactNative(context.depositor, context.primaryAmount, context.depositor) {
+            try liquidityTemplate.transactNative(context.depositor, denormalizedAmount, context.depositor) {
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("Native transfer failed: ", reason)));
                 revert(string(abi.encodePacked("Native transfer failed: ", reason)));
             }
         } else {
-            try liquidityTemplate.transactToken(context.depositor, token, context.primaryAmount, context.depositor) {
+            try liquidityTemplate.transactToken(context.depositor, token, denormalizedAmount, context.depositor) {
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("Token transfer failed: ", reason)));
                 revert(string(abi.encodePacked("Token transfer failed: ", reason)));
@@ -312,18 +315,20 @@ function _transferPrimaryToken(WithdrawalContext memory context, ICCLiquidity li
 }
 
 function _transferCompensationToken(WithdrawalContext memory context, ICCLiquidity liquidityTemplate) private {
-    // Transfers compensation token
+    // Transfers compensation token, denormalizing amount based on token decimals
     if (context.compensationAmount > 0) {
         emit CompensationCalculated(context.depositor, context.listingAddress, context.isX, context.primaryAmount, context.compensationAmount);
         address token = context.isX ? context.tokenB : context.tokenA;
+        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        uint256 denormalizedAmount = denormalize(context.compensationAmount, decimals);
         if (token == address(0)) {
-            try liquidityTemplate.transactNative(context.depositor, context.compensationAmount, context.depositor) {
+            try liquidityTemplate.transactNative(context.depositor, denormalizedAmount, context.depositor) {
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, !context.isX, context.index, context.compensationAmount, string(abi.encodePacked("Native compensation transfer failed: ", reason)));
                 revert(string(abi.encodePacked("Native compensation transfer failed: ", reason)));
             }
         } else {
-            try liquidityTemplate.transactToken(context.depositor, token, context.compensationAmount, context.depositor) {
+            try liquidityTemplate.transactToken(context.depositor, token, denormalizedAmount, context.depositor) {
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, !context.isX, context.index, context.compensationAmount, string(abi.encodePacked("Token compensation transfer failed: ", reason)));
                 revert(string(abi.encodePacked("Token compensation transfer failed: ", reason)));
@@ -335,16 +340,10 @@ function _transferCompensationToken(WithdrawalContext memory context, ICCLiquidi
 // Updated function to replace the existing _executeWithdrawal
 function _executeWithdrawal(address listingAddress, address depositor, uint256 index, bool isX, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
     // Executes withdrawal with compensation, updates liquidity, and transfers tokens
-    ICCLiquidity liquidityTemplate = ICCLiquidity(listingAddress);
-    uint256 xLiquid;
-    uint256 yLiquid;
-    try liquidityTemplate.liquidityDetailsView() returns (uint256 _xLiquid, uint256 _yLiquid, uint256, uint256, uint256, uint256) {
-        xLiquid = _xLiquid;
-        yLiquid = _yLiquid;
-    } catch (bytes memory reason) {
-        emit WithdrawalFailed(depositor, listingAddress, isX, index, isX ? withdrawal.amountA : withdrawal.amountB, string(abi.encodePacked("Liquidity details fetch failed: ", reason)));
-        revert(string(abi.encodePacked("Liquidity details fetch failed: ", reason)));
-    }
+    ICCListing listingContract = ICCListing(listingAddress);
+    address liquidityAddress = listingContract.liquidityAddressView();
+    ICCLiquidity liquidityTemplate = ICCLiquidity(liquidityAddress);
+    uint256 currentAllocation = _validateSlot(depositor, index, isX, liquidityAddress); // Fetch allocation from _prepWithdrawal's validation
     WithdrawalContext memory context = WithdrawalContext({
         listingAddress: listingAddress,
         depositor: depositor,
@@ -352,13 +351,11 @@ function _executeWithdrawal(address listingAddress, address depositor, uint256 i
         isX: isX,
         primaryAmount: isX ? withdrawal.amountA : withdrawal.amountB,
         compensationAmount: isX ? withdrawal.amountB : withdrawal.amountA,
-        currentAllocation: 0,
-        tokenA: ICCListing(listingAddress).tokenA(),
-        tokenB: ICCListing(listingAddress).tokenB()
+        currentAllocation: currentAllocation,
+        tokenA: listingContract.tokenA(),
+        tokenB: listingContract.tokenB()
     });
 
-    context = _validateSlotOwnership(context, liquidityTemplate);
-    _checkLiquidity(context, xLiquid, yLiquid);
     _updateSlotAllocation(context, liquidityTemplate);
     _transferPrimaryToken(context, liquidityTemplate);
     _transferCompensationToken(context, liquidityTemplate);

@@ -5,9 +5,10 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.10 (Updated 2025-09-08)
+**Version**: 0.1.11 (Updated 2025-09-08)
 
 **Changes**:
+- v0.1.11: Updated to reflect `CCLiquidityPartial.sol` (v0.1.18) with `_executeWithdrawal` changes: removed `_validateSlotOwnership` and `_checkLiquidity`, added `currentAllocation` fetch via `_validateSlot`, added denormalization in `_transferPrimaryToken` and `_transferCompensationToken`. Updated `_validateSlot` to internal. Updated compatibility.
 - v0.1.10: Updated to reflect `CCLiquidityPartial.sol` (v0.1.16) with refactored `_prepWithdrawal` using helper functions (`_getLiquidityDetails`, `_validateSlot`, `_calculateCompensation`) and `WithdrawalPrepData` struct to address stack too deep error. Updated internal call tree for `withdraw`.
 - v0.1.9: Updated to reflect `CCLiquidityRouter.sol` (v0.1.2), `CCLiquidityPartial.sol` (v0.1.12) with `updateType` 6/7 for fee claims, `CCLiquidityTemplate.sol` (v0.1.18) with `updateType` 6/7 support. Clarified internal call trees and compatibility.
 - v0.1.8: Updated to reflect `CCLiquidityPartial.sol` (v0.1.9) with `_executeWithdrawal` refactored into helper functions (`_validateSlotOwnership`, `_checkLiquidity`, `_updateSlotAllocation`, `_transferPrimaryToken`, `_transferCompensationToken`) and `WithdrawalContext` struct.
@@ -188,15 +189,14 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
     - Checks `currentAllocation >= outputAmount`.
     - Calls `_calculateCompensation`: Sets `PreparedWithdrawal.amountA` or `amountB` based on `isX`. If `xLiquid` or `yLiquid` is insufficient, calculates compensation (`amountB` for `isX=true`, `amountA` for `isX=false`) using `prices(0)`.
   - `_executeWithdrawal` (CCLiquidityPartial):
-    - Calls `_validateSlotOwnership`: Verifies slot ownership, updates `WithdrawalContext.currentAllocation`.
-    - Calls `_checkLiquidity`: Validates `xLiquid` or `yLiquid` against `primaryAmount`, emits `WithdrawalFailed` on failure.
+    - Calls `_validateSlot`: Verifies slot ownership and retrieves `currentAllocation` (updated in v0.1.18).
     - Calls `_updateSlotAllocation`: Updates slot allocation via `ICCLiquidity.ccUpdate`, reduces `currentAllocation`.
-    - Calls `_transferPrimaryToken`: Transfers primary token (token A for xSlot, token B for ySlot) via `transactNative` or `transactToken`.
-    - Calls `_transferCompensationToken`: Transfers compensation token (token B for xSlot, token A for ySlot) if needed, emits `CompensationCalculated`.
-- **Balance Checks**: `xLiquid`/`yLiquid` and slot `allocation` in `_prepWithdrawal` (via `_getLiquidityDetails` and `_validateSlot`) and `_executeWithdrawal`, implicit checks in `transactToken`/`transactNative`.
+    - Calls `_transferPrimaryToken`: Transfers primary token (token A for xSlot, token B for ySlot) via `transactNative` or `transactToken`, denormalizes amount to token decimals (updated in v0.1.18).
+    - Calls `_transferCompensationToken`: Transfers compensation token (token B for xSlot, token A for ySlot) if needed, denormalizes amount to token decimals, emits `CompensationCalculated` (updated in v0.1.18).
+- **Balance Checks**: `xLiquid`/`yLiquid` and slot `allocation` in `_prepWithdrawal` (via `_getLiquidityDetails` and `_validateSlot`). Implicit checks in `transactToken`/`transactNative` for `_executeWithdrawal`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: Single `ccUpdate` call, up to two transfers for compensation.
-- **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`, `prices`; `ICCLiquidity` for `liquidityDetailsView`, `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`.
+- **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`, `prices`; `ICCLiquidity` for `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactToken`, `transactNative`; `IERC20` for `decimals`.
 - **Events**: `WithdrawalFailed`, `CompensationCalculated`.
 
 ### claimFees(address listingAddress, uint256 liquidityIndex, bool isX, uint256 volumeAmount)
@@ -247,8 +247,8 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **_validateSlotOwnership**: Verifies slot ownership, updates `WithdrawalContext`.
 - **_checkLiquidity**: Ensures sufficient liquidity, emits `WithdrawalFailed` on failure.
 - **_updateSlotAllocation**: Updates slot allocation via `ccUpdate`.
-- **_transferPrimaryToken**: Transfers primary token.
-- **_transferCompensationToken**: Transfers compensation token, emits `CompensationCalculated`.
+- **_transferPrimaryToken**: Transfers primary token (denormalized to token decimals in v0.1.18).
+- **_transferCompensationToken**: Transfers compensation token (denormalized to token decimals in v0.1.18), emits `CompensationCalculated`.
 - **_validateFeeClaim**: Validates fee claim parameters, creates `FeeClaimContext`.
 - **_calculateFeeShare**: Computes fee share using formula.
 - **_executeFeeClaim**: Updates fees and `dFeesAcc`, transfers fees.
@@ -261,9 +261,9 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 ## Clarifications and Nuances
 - **Token Flow**:
   - **Deposits**: `msg.sender` → `CCLiquidityRouter` → `CCLiquidityTemplate`. Slot assigned to `depositor`. Pre/post balance checks handle tax-on-transfer tokens.
-  - **Withdrawals**: `CCLiquidityTemplate` → `msg.sender`. Partial withdrawals supported; compensation uses `prices(0)` for dual-token withdrawals if liquidity insufficient.
+  - **Withdrawals**: `CCLiquidityTemplate` → `msg.sender`. Partial withdrawals supported; compensation uses `prices(0)` for dual-token withdrawals if liquidity insufficient. Amounts denormalized to token decimals during transfers.
   - **Fees**: `CCLiquidityTemplate` → `msg.sender`, `feeShare` based on `allocation` and `liquid`.
-- **Decimal Handling**: Normalizes to 1e18 using `normalize`, denormalizes for transfers using `IERC20.decimals` or 18 for ETH.
+- **Decimal Handling**: Normalizes to 1e18 using `normalize`, denormalizes for transfers using `IERC20.decimals` or 18 for ETH in `_transferPrimaryToken` and `_transferCompensationToken` (updated in v0.1.18).
 - **Security**:
   - `nonReentrant` prevents reentrancy.
   - Try-catch ensures graceful degradation with detailed events.
