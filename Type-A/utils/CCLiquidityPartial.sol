@@ -2,9 +2,10 @@
 pragma solidity ^0.8.2;
 
 /*
-// Version: 0.1.25
+// Version: 0.1.26
 // Changes:
-// - v0.1.24?5: Refactored _executeWithdrawal to address stack too deep error by splitting into helper functions (_fetchWithdrawalData, _updateWithdrawalAllocation, _transferWithdrawalAmount). Extended WithdrawalContext to include totalAllocationDeduct and price. Removed redundant local variables, ensured non-reverting behavior, and maintained v0.1.23 functionality (minimal checks, event emission, optional compensationAmount).
+// - v0.1.26: Reordered _executeWithdrawal to call _transferWithdrawalAmount before _updateWithdrawalAllocation to prevent slot allocation reduction if transactNative or transactToken fails.
+// - v0.1.25: Refactored _executeWithdrawal to address stack too deep error by splitting into helper functions (_fetchWithdrawalData, _updateWithdrawalAllocation, _transferWithdrawalAmount). Extended WithdrawalContext to include totalAllocationDeduct and price. Removed redundant local variables, ensured non-reverting behavior, and maintained v0.1.23 functionality (minimal checks, event emission, optional compensationAmount).
 // - v0.1.24: Removed _checkLiquidity, WithdrawalPrepData struct, _getLiquidityDetails, _validateSlot, and _calculateCompensation, as they are no longer used after v0.1.23 simplified withdrawal logic to skip liquidity checks and helper functions.
 // - v0.1.23: Refactored _prepWithdrawal to accept compensationAmount, validate only ownership and total allocation (output + converted compensation). Refactored _executeWithdrawal to remove liquidity checks, ensure non-reverting behavior, emit events for all failures, and update slot allocation based on converted compensation amount.
 // Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.0.20).
@@ -292,7 +293,7 @@ function _transferCompensationToken(WithdrawalContext memory context, ICCLiquidi
     }
 }
 
-// Updated function into helper functions to reduce stack usage 
+// Updated function to reorder transfer and allocation updates 
 function _executeWithdrawal(address listingAddress, address depositor, uint256 index, bool isX, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
     // Executes withdrawal, emits events for failures, updates slot allocation based on output + converted compensation
     WithdrawalContext memory context = WithdrawalContext({
@@ -312,11 +313,11 @@ function _executeWithdrawal(address listingAddress, address depositor, uint256 i
     // Fetch liquidity address, tokens, slot data, and price
     if (!_fetchWithdrawalData(context)) return;
 
-    // Calculate and update slot allocation
-    if (!_updateWithdrawalAllocation(context)) return;
-
-    // Transfer primary and compensation amounts
+    // Transfer primary and compensation amounts first to ensure transfers succeed before updating allocation
     _transferWithdrawalAmount(context);
+
+    // Calculate and update slot allocation after successful transfers
+    if (!_updateWithdrawalAllocation(context)) return;
 }
 
 function _fetchWithdrawalData(WithdrawalContext memory context) internal returns (bool) {

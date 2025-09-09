@@ -8,7 +8,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 **Version**: 0.1.12 (Updated 2025-09-09)
 
 **Changes**:
-- v0.1.12: Updated to reflect `CCLiquidityPartial.sol` (v0.1.26) with fixed `listingContract` declaration in `_transferWithdrawalAmount`. Updated compatibility and internal call trees.
+- v0.1.12: Updated to reflect `CCLiquidityPartial.sol` (v0.1.25) with fixed `listingContract` declaration in `_transferWithdrawalAmount`. Updated compatibility and internal call trees.
 - v0.1.11: Updated to reflect `CCLiquidityPartial.sol` (v0.1.25) with fixed `listingContract` declarations in `_fetchWithdrawalData` and `_updateWithdrawalAllocation`.
 - v0.1.10: Updated to reflect `CCLiquidityPartial.sol` (v0.1.24) with `_executeWithdrawal` refactored into `_fetchWithdrawalData`, `_updateWithdrawalAllocation`, `_transferWithdrawalAmount` to fix stack too deep error. Extended `WithdrawalContext` with `totalAllocationDeduct` and `price`.
 - v0.1.9: Updated to reflect `CCLiquidityPartial.sol` (v0.1.23) with `_prepWithdrawal` accepting `compensationAmount`, minimal checks (ownership, allocation), non-reverting behavior, and event emission (`ValidationFailed`, `WithdrawalFailed`, `TransferSuccessful`).
@@ -74,6 +74,8 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `compensationAmount`: Normalized compensation amount (token B for xSlot, token A for ySlot).
   - `currentAllocation`: Slot allocation.
   - `tokenA`, `tokenB`: Token addresses from `ICCListing`.
+  - `totalAllocationDeduct`: Total allocation to deduct (primary + converted compensation).
+  - `price`: Current price (tokenB/tokenA, normalized to 1e18) from `ICCListing.prices(0)`.
 - **ICCLiquidity.PreparedWithdrawal** (CCMainPartial):
   - `amountA`: Normalized token A amount to withdraw.
   - `amountB`: Normalized token B amount to withdraw.
@@ -89,13 +91,6 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `value`: Normalized amount.
   - `addr`: Depositor address.
   - `recipient`: Unused (reserved).
-  - **WithdrawalPrepData** (CCLiquidityPartial, private):
-  - `liquidityAddr`: `ICCLiquidity` contract address.
-  - `xLiquid`: Token A liquidity from `liquidityDetailsView`.
-  - `yLiquid`: Token B liquidity from `liquidityDetailsView`.
-  - `price`: Current price (tokenB/tokenA, normalized to 1e18) from `ICCListing.prices(0)`.
-  - **Description**: Used to pass data between helper functions in `_prepWithdrawal` to reduce stack usage.
-
 
 ## Formulas
 1. **Fee Share** (in `_calculateFeeShare`):
@@ -108,25 +103,27 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
      ```
    - **Description**: Computes fee share based on accumulated fees since deposit/claim (`fees` is `yFees` for xSlots, `xFees` for ySlots), proportional to slot `allocation` relative to pool `liquid`, capped at available fees.
    - **Used in**: `claimFees` via `_processFeeShare`.
-2. **Deficit and Compensation** (in `_prepWithdrawal`):
-   - **xSlot Withdrawal**:
+
+2. **Compensation Conversion** (in `_prepWithdrawal` and `_updateWithdrawalAllocation`):
+   - **Price Source**: Uses `ICCListing.prices(0)` which returns tokenB/tokenA ratio normalized to 1e18.
+   - **xSlot Compensation Conversion** (tokenB → tokenA equivalent):
      ```
-     withdrawal.amountA = amount
-     if (xLiquid < amount) {
-       shortfall = amount - xLiquid
-       withdrawal.amountB = (shortfall * prices(0)) / 1e18
-     }
+     convertedCompensation = (compensationAmount * 1e18) / price
      ```
-   - **ySlot Withdrawal**:
+   - **ySlot Compensation Conversion** (tokenA → tokenB equivalent):
      ```
-     withdrawal.amountB = amount
-     if (yLiquid < amount) {
-       shortfall = amount - yLiquid
-       withdrawal.amountA = (shortfall * 1e18) / prices(0)
-     }
+     convertedCompensation = (compensationAmount * price) / 1e18
      ```
-   - **Description**: Calculates primary token withdrawal (`amountA` for xSlot, `amountB` for ySlot). If liquidity (`xLiquid` or `yLiquid`) is insufficient, compensates with the opposite token using `ICCListing.prices(0)` for conversion.
-   - **Used in**: `withdraw` via `_prepWithdrawal`.
+   - **Description**: Converts compensation amount to primary token equivalent for allocation validation. For xSlots, converts tokenB compensation to tokenA equivalent by dividing by price. For ySlots, converts tokenA compensation to tokenB equivalent by multiplying by price.
+   - **Used in**: `withdraw` via `_prepWithdrawal` and `_updateWithdrawalAllocation`.
+
+3. **Total Allocation Deduction**:
+   - **Formula**:
+     ```
+     totalAllocationDeduct = primaryAmount + convertedCompensation
+     ```
+   - **Description**: Total allocation to deduct from slot, combining primary withdrawal and converted compensation amount.
+   - **Used in**: `_updateWithdrawalAllocation` for slot allocation updates.
 
 ## External Functions and Internal Call Trees
 ### depositNativeToken(address listingAddress, address depositor, uint256 amount, bool isTokenA)
@@ -168,18 +165,18 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 ### withdraw(address listingAddress, uint256 outputAmount, uint256 compensationAmount, uint256 index, bool isX)
 - **Parameters**:
   - `listingAddress`: `ICCListing` contract address.
-  - `outputAmount`: Amount to withdraw (normalized to 1e18).
-  - `compensationAmount`: Optional compensation amount (normalized to 1e18).
+  - `outputAmount`: Primary amount to withdraw (normalized to 1e18).
+  - `compensationAmount`: Optional compensation amount in opposite token (normalized to 1e18).
   - `index`: Slot index.
-  - `isX`: True for token A, false for token B.
-- **Behavior**: Withdraws tokens from `CCLiquidityTemplate` for `msg.sender`, using `compensationAmount` for dual-token withdrawals. Validates ownership and allocation, non-reverting with events.
+  - `isX`: True for xSlot (tokenA), false for ySlot (tokenB).
+- **Behavior**: Withdraws tokens from `CCLiquidityTemplate` for `msg.sender`, using `compensationAmount` for dual-token withdrawals. Validates ownership and total allocation (primary + converted compensation), non-reverting with events.
 - **Internal Call Flow**:
-  - `_prepWithdrawal` (CCLiquidityPartial): Validates `msg.sender` as slot owner, checks allocation against `outputAmount + converted compensationAmount` using `ICCListing.prices(0)`. Returns `PreparedWithdrawal` with `amountA` and `amountB`. Emits `ValidationFailed` on failure.
+  - `_prepWithdrawal` (CCLiquidityPartial): Validates `msg.sender` as slot owner, checks total allocation against `outputAmount + converted compensationAmount` using `ICCListing.prices(0)` for conversion. Returns `PreparedWithdrawal` with `amountA` and `amountB`. Emits `ValidationFailed` on failure.
   - `_executeWithdrawal` (CCLiquidityPartial):
     - `_fetchWithdrawalData`: Fetches `liquidityAddressView`, `tokenA`, `tokenB`, slot allocation, and price. Emits `ValidationFailed` on failure.
-    - `_updateWithdrawalAllocation`: Calculates `totalAllocationDeduct` (primary + converted compensation), updates slot via `ccUpdate` (updateType=2 for xSlot, 3 for ySlot). Emits `CompensationCalculated`, `WithdrawalFailed` on failure.
     - `_transferWithdrawalAmount`: Transfers primary (`isX ? tokenA : tokenB`) and compensation (`isX ? tokenB : tokenA`) amounts via `transactNative` or `transactToken`, denormalizing to token decimals. Emits `TransferSuccessful` or `WithdrawalFailed`.
-- **Balance Checks**: Ownership and allocation in `_prepWithdrawal`.
+        - `_updateWithdrawalAllocation`: Calculates `totalAllocationDeduct` (primary + converted compensation), updates slot via `ccUpdate` (updateType=2 for xSlot, 3 for ySlot). Emits `CompensationCalculated`, `WithdrawalFailed` on failure.
+- **Compensation Logic**: For xSlots, primary is tokenA, compensation is tokenB. For ySlots, primary is tokenB, compensation is tokenA. Conversion uses price from listing template.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: One `ccUpdate`, up to two transfers.
 - **Interactions**: Calls `ICCListing` for `liquidityAddressView`, `tokenA`, `tokenB`, `prices`; `ICCLiquidity` for `getXSlotView`, `getYSlotView`, `ccUpdate`, `transactNative`, `transactToken`; `IERC20` for `decimals`.
@@ -229,9 +226,9 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **_depositToken**: Orchestrates token deposit via `_validateDeposit`, `_executeTokenTransfer`, `_updateDeposit`.
 - **_depositNative**: Orchestrates ETH deposit via `_validateDeposit`, `_executeNativeTransfer`, `_updateDeposit`.
 - **_updateDeposit**: Updates liquidity and slot via `ccUpdate`.
-- **_prepWithdrawal**: Validates ownership, allocation, and compensation using `prices(0)`. Returns `PreparedWithdrawal`.
+- **_prepWithdrawal**: Validates ownership, allocation, and total allocation requirement (primary + converted compensation) using `prices(0)`. Returns `PreparedWithdrawal`.
 - **_fetchWithdrawalData**: Fetches `liquidityAddressView`, `tokenA`, `tokenB`, slot allocation, price.
-- **_updateWithdrawalAllocation**: Updates slot allocation via `ccUpdate` with converted compensation.
+- **_updateWithdrawalAllocation**: Calculates total allocation deduction including converted compensation, updates slot allocation via `ccUpdate`.
 - **_transferWithdrawalAmount**: Transfers primary and compensation amounts, denormalizing to token decimals.
 - **_validateFeeClaim**: Validates fee claim parameters, creates `FeeClaimContext`.
 - **_calculateFeeShare**: Computes fee share using formula.
@@ -243,8 +240,11 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 ## Clarifications and Nuances
 - **Token Flow**:
   - **Deposits**: `msg.sender` → `CCLiquidityRouter` → `CCLiquidityTemplate`. Slot assigned to `depositor`. Pre/post balance checks handle tax-on-transfer tokens.
-  - **Withdrawals**: `CCLiquidityTemplate` → `msg.sender`. Partial withdrawals supported; `compensationAmount` uses `prices(0)` for dual-token withdrawals. Amounts denormalized to token decimals.
+  - **Withdrawals**: `CCLiquidityTemplate` → `msg.sender`. Partial withdrawals supported; `compensationAmount` converted using `prices(0)` for allocation validation, then both primary and compensation tokens transferred. Amounts denormalized to token decimals.
   - **Fees**: `CCLiquidityTemplate` → `msg.sender`, `feeShare` based on `allocation` and `liquid`.
+- **Price Integration**: 
+  - Uses `ICCListing.prices(0)` which returns tokenB/tokenA price from Uniswap V2 pair balances, normalized to 1e18.
+  - Conversion formulas properly handle the price ratio for cross-token allocation validation.
 - **Decimal Handling**: Normalizes to 1e18 using `normalize`, denormalizes for transfers using `IERC20.decimals` or 18 for ETH.
 - **Security**:
   - `nonReentrant` prevents reentrancy.
@@ -257,4 +257,5 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **Error Handling**: Detailed errors (`InsufficientAllowance`, `WithdrawalFailed`) and events (`ValidationFailed`, `TransferSuccessful`) aid debugging.
 - **Router Validation**: `CCLiquidityTemplate` validates `routers[msg.sender]`.
 - **Pool Validation**: Supports deposits in any pool state.
+- **Withdrawal Logic**: Simplified in v0.1.23+ to validate only ownership and total allocation requirement, with non-reverting behavior and comprehensive event emission.
 - **Limitations**: Payouts handled in `CCOrderRouter`.
