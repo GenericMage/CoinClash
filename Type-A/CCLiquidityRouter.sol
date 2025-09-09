@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.2
+// Version: 0.1.3
 // Changes:
+// - v0.1.3: Modified withdraw to accept compensationAmount parameter, passing it to _prepWithdrawal and _executeWithdrawal. Removed reverts, ensuring all failures emit events. Simplified to check only ownership and allocation.
 // - v0.1.2: Added depositor parameter to depositToken and depositNativeToken, renamed inputAmount to outputAmount in withdraw function.
 // - v0.1.1: Added depositor parameter to depositToken and depositNative to support third-party deposits. Renamed inputAmount to amount for clarity.
 // - v0.1.0: Bumped version
@@ -27,9 +28,9 @@ contract CCLiquidityRouter is CCLiquidityPartial {
     _depositToken(listingAddress, depositor, amount, isTokenA);
 }
 
-    function withdraw(address listingAddress, uint256 outputAmount, uint256 index, bool isX) external nonReentrant onlyValidListing(listingAddress) {
-    // Withdraws tokens from liquidity pool for msg.sender
-    ICCLiquidity.PreparedWithdrawal memory withdrawal = _prepWithdrawal(listingAddress, msg.sender, outputAmount, index, isX);
+    function withdraw(address listingAddress, uint256 outputAmount, uint256 compensationAmount, uint256 index, bool isX) external nonReentrant onlyValidListing(listingAddress) {
+    // Withdraws tokens from liquidity pool for msg.sender, with user-specified compensation amount
+    ICCLiquidity.PreparedWithdrawal memory withdrawal = _prepWithdrawal(listingAddress, msg.sender, outputAmount, compensationAmount, index, isX);
     _executeWithdrawal(listingAddress, msg.sender, index, isX, withdrawal);
 }
 
