@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
+/*
+// Version: 0.1.22
 // Changes:
+// - v0.1.22: Modified _checkLiquidity to only check xLiquid when isX = true and compensationAmount = 0.
+// Added ValidationFailed and TransferSuccessful events for better debugging.
+// - v0.1.21: Added try-catch for volumeBalances, prices, and liquidityAddressView.
+ - Added ValidationFailed event for slot and liquidity validation failures.
+ - Added TransferSuccessful event for successful primary and compensation transfers.
+ - Minimized reverts in _executeWithdrawal, emitting WithdrawalFailed instead.
 // - v0.1.20: Updated _executeWithdrawal to wrap liquidityDetailsView() in try-catch to catch failures and emit WithdrawalFailed with detailed error messages. Added validation for non-zero liquidityAddress from ICCListing.liquidityAddressView(). Retained prior change log.
 // - v0.1.19: Added _checkLiquidity call in _executeWithdrawal to validate liquidity before transfers, emitting WithdrawalFailed on failure. Enhanced WithdrawalFailed event in _transferPrimaryToken and _transferCompensationToken to include token and liquidity contract addresses. Added detailed error logging in _updateSlotAllocation for ccUpdate failures.
 // - v0.1.18: Updated _executeWithdrawal to use currentAllocation from _prepWithdrawal via PreparedWithdrawal to fix incorrect slot allocation updates. Added denormalization of primaryAmount and compensationAmount in _transferPrimaryToken and _transferCompensationToken to handle non-18-decimal tokens correctly.
@@ -32,6 +40,7 @@ pragma solidity ^0.8.2;
 // - v0.0.18: Removed redundant isRouter checks in _validateDeposit, _prepWithdrawal, _executeWithdrawal, _validateFeeClaim, as CCLiquidityTemplate validates routers[msg.sender]. Updated _executeTokenTransfer to use receivedAmount for transfer and balance checks, handling tax-on-transfer tokens.
 // - v0.0.17: Removed listingId from FeeClaimContext and FeesClaimed event, updated _validateFeeClaim to remove getListingId call, as it’s unnecessary with onlyValidListing validation.
 // Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.0.20).
+*/
 
 import "./CCMainPartial.sol";
 
@@ -42,10 +51,12 @@ contract CCLiquidityPartial is CCMainPartial {
     event SlotDepositorChanged(bool isX, uint256 indexed slotIndex, address indexed oldDepositor, address indexed newDepositor);
     event DepositReceived(address indexed depositor, address token, uint256 amount, uint256 normalizedAmount);
     error InsufficientAllowance(address sender, address token, uint256 required, uint256 available);
-event WithdrawalFailed(address indexed depositor, address indexed listingAddress, bool isX, uint256 slotIndex, uint256 amount, string reason);
-event CompensationCalculated(address indexed depositor, address indexed listingAddress, bool isX, uint256 primaryAmount, uint256 compensationAmount);
-event NoFeesToClaim(address indexed depositor, address indexed listingAddress, bool isX, uint256 liquidityIndex);
-event FeeValidationFailed(address indexed depositor, address indexed listingAddress, bool isX, uint256 liquidityIndex, string reason);
+    event WithdrawalFailed(address indexed depositor, address indexed listingAddress, bool isX, uint256 slotIndex, uint256 amount, string reason);
+    event CompensationCalculated(address indexed depositor, address indexed listingAddress, bool isX, uint256 primaryAmount, uint256 compensationAmount);
+    event NoFeesToClaim(address indexed depositor, address indexed listingAddress, bool isX, uint256 liquidityIndex);
+    event FeeValidationFailed(address indexed depositor, address indexed listingAddress, bool isX, uint256 liquidityIndex, string reason);
+    event ValidationFailed(address indexed depositor, address indexed listingAddress, bool isX, uint256 index, string reason);
+    event TransferSuccessful(address indexed depositor, address indexed listingAddress, bool isX, uint256 index, address token, uint256 amount);
 
 struct WithdrawalContext {
     address listingAddress;
@@ -195,58 +206,151 @@ function _depositNative(address listingAddress, address depositor, uint256 input
     _updateDeposit(context);
 }
 
-// Helper function to fetch liquidity details
-function _getLiquidityDetails(address listingAddress) private view returns (WithdrawalPrepData memory data) {
+// Adjustrd _getLiquidityDetails to take listingAddress and isX, return (WithdrawalPrepData, bool).
+function _getLiquidityDetails(address listingAddress, bool isX) private returns (WithdrawalPrepData memory prepData, bool success) {
+    prepData = WithdrawalPrepData({
+        liquidityAddr: address(0),
+        xLiquid: 0,
+        yLiquid: 0,
+        price: 0,
+        currentAllocation: 0
+    });
     ICCListing listingContract = ICCListing(listingAddress);
-    data.liquidityAddr = listingContract.liquidityAddressView();
-    ICCLiquidity liquidityTemplate = ICCLiquidity(data.liquidityAddr);
-    (uint256 xLiquid, uint256 yLiquid, , , , ) = liquidityTemplate.liquidityDetailsView();
-    data.xLiquid = xLiquid;
-    data.yLiquid = yLiquid;
-    data.price = listingContract.prices(0); // tokenB/tokenA, normalized to 1e18
-    return data;
-}
-
-// Helper function to validate slot ownership and allocation
-function _validateSlot(address depositor, uint256 index, bool isX, address liquidityAddr) private view returns (uint256 currentAllocation) {
-    ICCLiquidity liquidityTemplate = ICCLiquidity(liquidityAddr);
-    if (isX) {
-        ICCLiquidity.Slot memory slot = liquidityTemplate.getXSlotView(index);
-        require(slot.depositor == depositor, "Not slot owner");
-        currentAllocation = slot.allocation;
-    } else {
-        ICCLiquidity.Slot memory slot = liquidityTemplate.getYSlotView(index);
-        require(slot.depositor == depositor, "Not slot owner");
-        currentAllocation = slot.allocation;
+    address liquidityAddr;
+    try listingContract.liquidityAddressView() returns (address addr) {
+        if (addr == address(0)) {
+            emit ValidationFailed(msg.sender, listingAddress, isX, 0, "Invalid liquidity address returned");
+            return (prepData, false);
+        }
+        liquidityAddr = addr;
+        prepData.liquidityAddr = addr;
+    } catch (bytes memory reason) {
+        emit ValidationFailed(msg.sender, listingAddress, isX, 0, string(abi.encodePacked("liquidityAddressView failed: ", reason)));
+        return (prepData, false);
     }
-    return currentAllocation;
+    ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+    try liquidityContract.liquidityDetailsView() returns (uint256 xLiquid, uint256 yLiquid, uint256, uint256, uint256, uint256) {
+        prepData.xLiquid = xLiquid;
+        prepData.yLiquid = yLiquid;
+    } catch (bytes memory reason) {
+        emit ValidationFailed(msg.sender, listingAddress, isX, 0, string(abi.encodePacked("liquidityDetailsView failed: ", reason)));
+        return (prepData, false);
+    }
+    try listingContract.prices(0) returns (uint256 price) {
+        prepData.price = price;
+    } catch (bytes memory reason) {
+        emit ValidationFailed(msg.sender, listingAddress, isX, 0, string(abi.encodePacked("prices failed: ", reason)));
+        return (prepData, false);
+    }
+    return (prepData, true);
 }
 
-// Helper function to calculate compensation
-function _calculateCompensation(uint256 amount, bool isX, WithdrawalPrepData memory data) private pure returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
+// Adjusted  _validateSlot to take correct parameters, use try-catch only on external calls.
+// Refactored _validateSlot to use if-else with separate try/catch for getXSlotView and getYSlotView to comply with Solidity's external call restrictions.
+function _validateSlot(address depositor, uint256 index, bool isX, address liquidityAddr) private returns (uint256 currentAllocation, bool success) {
+    // Validates slot ownership and returns allocation, using try/catch for external calls only
+    ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+    ICCLiquidity.Slot memory slot;
     if (isX) {
-        withdrawal.amountA = amount;
-        if (data.xLiquid < amount) {
-            uint256 shortfall = amount - data.xLiquid;
-            withdrawal.amountB = (shortfall * data.price) / 1e18; // Compensate with tokenB
+        // Direct external call to getXSlotView with try/catch
+        try liquidityContract.getXSlotView(index) returns (ICCLiquidity.Slot memory _slot) {
+            slot = _slot;
+        } catch (bytes memory reason) {
+            emit ValidationFailed(depositor, address(0), isX, index, string(abi.encodePacked("getXSlotView failed: ", reason)));
+            return (0, false);
         }
     } else {
-        withdrawal.amountB = amount;
-        if (data.yLiquid < amount) {
-            uint256 shortfall = amount - data.yLiquid;
-            withdrawal.amountA = (shortfall * 1e18) / data.price; // Compensate with tokenA
+        // Direct external call to getYSlotView with try/catch
+        try liquidityContract.getYSlotView(index) returns (ICCLiquidity.Slot memory _slot) {
+            slot = _slot;
+        } catch (bytes memory reason) {
+            emit ValidationFailed(depositor, address(0), isX, index, string(abi.encodePacked("getYSlotView failed: ", reason)));
+            return (0, false);
         }
     }
-    return withdrawal;
+    // Validate ownership without try/catch (internal check)
+    if (slot.depositor != depositor) {
+        emit ValidationFailed(depositor, address(0), isX, index, "Depositor not slot owner");
+        return (0, false);
+    }
+    return (slot.allocation, true);
 }
 
-// Refactored _prepWithdrawal function
-function _prepWithdrawal(address listingAddress, address depositor, uint256 amount, uint256 index, bool isX) internal view returns (ICCLiquidity.PreparedWithdrawal memory withdrawal) {
-    // Prepares withdrawal, calculates compensation in opposite token if liquidity is insufficient
-    WithdrawalPrepData memory data = _getLiquidityDetails(listingAddress);
-    data.currentAllocation = _validateSlot(depositor, index, isX, data.liquidityAddr);
-    require(data.currentAllocation >= amount, "Withdrawal exceeds slot allocation");
-    withdrawal = _calculateCompensation(amount, isX, data);
+// Adjusted to take WithdrawalContext and WithdrawalPrepData, return (ICCLiquidity.PreparedWithdrawal, bool).
+function _calculateCompensation(WithdrawalContext memory context, WithdrawalPrepData memory prepData) private returns (ICCLiquidity.PreparedWithdrawal memory withdrawal, bool success) {
+    withdrawal = ICCLiquidity.PreparedWithdrawal({ amountA: 0, amountB: 0 });
+    success = false;
+    if (prepData.price == 0) {
+        emit ValidationFailed(context.depositor, context.listingAddress, context.isX, context.index, "Zero price returned");
+        return (withdrawal, false);
+    }
+    uint256 xBalance;
+    uint256 yBalance;
+    try ICCListing(context.listingAddress).volumeBalances(0) returns (uint256 _xBalance, uint256 _yBalance) {
+        xBalance = _xBalance;
+        yBalance = _yBalance;
+    } catch (bytes memory reason) {
+        emit ValidationFailed(context.depositor, context.listingAddress, context.isX, context.index, string(abi.encodePacked("volumeBalances failed: ", reason)));
+        return (withdrawal, false);
+    }
+    uint256 compensation;
+    if (context.isX) {
+        withdrawal.amountA = context.primaryAmount;
+        compensation = (context.primaryAmount * prepData.price) / 1e18;
+        if (compensation > yBalance) {
+            emit ValidationFailed(context.depositor, context.listingAddress, context.isX, context.index, "Insufficient yBalance for compensation");
+            return (withdrawal, false);
+        }
+        withdrawal.amountB = compensation;
+    } else {
+        withdrawal.amountB = context.primaryAmount;
+        compensation = (context.primaryAmount * 1e18) / prepData.price;
+        if (compensation > xBalance) {
+            emit ValidationFailed(context.depositor, context.listingAddress, context.isX, context.index, "Insufficient xBalance for compensation");
+            return (withdrawal, false);
+        }
+        withdrawal.amountA = compensation;
+    }
+    success = true;
+    return (withdrawal, success);
+}
+
+// Refactored _prepWithdrawal function  to properly destructure tuples and handle success flags
+function _prepWithdrawal(address listingAddress, address depositor, uint256 amount, uint256 index, bool isX) internal returns (ICCLiquidity.PreparedWithdrawal memory) {
+    WithdrawalPrepData memory data;
+    bool getSuccess;
+    (data, getSuccess) = _getLiquidityDetails(listingAddress, isX);
+    if (!getSuccess) {
+        revert("Prep failed: liquidity details");
+    }
+    uint256 currentAllocation;
+    bool slotSuccess;
+    (currentAllocation, slotSuccess) = _validateSlot(depositor, index, isX, data.liquidityAddr);
+    if (!slotSuccess) {
+        revert("Prep failed: slot validation");
+    }
+    data.currentAllocation = currentAllocation;
+    if (currentAllocation < amount) {
+        revert("Insufficient slot allocation");
+    }
+    WithdrawalContext memory context = WithdrawalContext({
+        listingAddress: listingAddress,
+        depositor: depositor,
+        index: index,
+        isX: isX,
+        primaryAmount: amount,
+        compensationAmount: 0, // Will be calculated
+        currentAllocation: currentAllocation,
+        tokenA: ICCListing(listingAddress).tokenA(),
+        tokenB: ICCListing(listingAddress).tokenB()
+    });
+    ICCLiquidity.PreparedWithdrawal memory withdrawal;
+    bool calcSuccess;
+    (withdrawal, calcSuccess) = _calculateCompensation(context, data);
+    if (!calcSuccess) {
+        revert("Prep failed: compensation calculation");
+    }
+    context.compensationAmount = isX ? withdrawal.amountB : withdrawal.amountA;
     return withdrawal;
 }
 
@@ -266,14 +370,24 @@ function _validateSlotOwnership(WithdrawalContext memory context, ICCLiquidity l
 }
 
 function _checkLiquidity(WithdrawalContext memory context, uint256 xLiquid, uint256 yLiquid) internal {
-    // Checks available liquidity
-    if (context.isX && xLiquid < context.primaryAmount) {
+    // Checks available liquidity, only validates xLiquid for isX withdrawals with no compensation
+    if (context.isX && context.primaryAmount > xLiquid) {
         emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, "Insufficient xLiquid in liquidity contract");
-        revert("Insufficient xLiquid");
+        return;
     }
-    if (!context.isX && yLiquid < context.primaryAmount) {
+    if (!context.isX && context.primaryAmount > yLiquid) {
         emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, "Insufficient yLiquid in liquidity contract");
-        revert("Insufficient yLiquid");
+        return;
+    }
+    if (context.compensationAmount > 0) {
+        if (context.isX && context.compensationAmount > yLiquid) {
+            emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.compensationAmount, "Insufficient yLiquid for compensation");
+            return;
+        }
+        if (!context.isX && context.compensationAmount > xLiquid) {
+            emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.compensationAmount, "Insufficient xLiquid for compensation");
+            return;
+        }
     }
 }
 
@@ -344,14 +458,29 @@ function _transferCompensationToken(WithdrawalContext memory context, ICCLiquidi
     }
 }
 
-// Updated function to replace the existing _executeWithdrawal
+// Updated function to ensure non-reverting behaviour 
 function _executeWithdrawal(address listingAddress, address depositor, uint256 index, bool isX, ICCLiquidity.PreparedWithdrawal memory withdrawal) internal {
-    // Executes withdrawal with compensation, updates liquidity, and transfers tokens
     ICCListing listingContract = ICCListing(listingAddress);
-    address liquidityAddress = listingContract.liquidityAddressView();
-    require(liquidityAddress != address(0), "Invalid liquidity address from listing");
+    address liquidityAddress;
+    try listingContract.liquidityAddressView() returns (address addr) {
+        if (addr == address(0)) {
+            emit ValidationFailed(depositor, listingAddress, isX, index, "Invalid liquidity address returned");
+            return;
+        }
+        liquidityAddress = addr;
+    } catch (bytes memory reason) {
+        emit ValidationFailed(depositor, listingAddress, isX, index, string(abi.encodePacked("liquidityAddressView failed: ", reason)));
+        return;
+    }
     ICCLiquidity liquidityTemplate = ICCLiquidity(liquidityAddress);
-    uint256 currentAllocation = _validateSlot(depositor, index, isX, liquidityAddress); // Fetch allocation from _prepWithdrawal's validation
+    uint256 currentAllocation;
+    bool slotValid;
+    (currentAllocation, slotValid) = _validateSlot(depositor, index, isX, liquidityAddress);
+    if (!slotValid) return;
+    if (currentAllocation < (isX ? withdrawal.amountA : withdrawal.amountB)) {
+        emit ValidationFailed(depositor, listingAddress, isX, index, "Insufficient slot allocation");
+        return;
+    }
     WithdrawalContext memory context = WithdrawalContext({
         listingAddress: listingAddress,
         depositor: depositor,
@@ -363,104 +492,222 @@ function _executeWithdrawal(address listingAddress, address depositor, uint256 i
         tokenA: listingContract.tokenA(),
         tokenB: listingContract.tokenB()
     });
-    // Add liquidity check before transfers
     uint256 xLiquid;
     uint256 yLiquid;
     try liquidityTemplate.liquidityDetailsView() returns (uint256 _xLiquid, uint256 _yLiquid, uint256, uint256, uint256, uint256) {
         xLiquid = _xLiquid;
         yLiquid = _yLiquid;
     } catch (bytes memory reason) {
-        string memory errorMsg = string(abi.encodePacked("liquidityDetailsView failed for liquidity contract ", uint2str(uint160(liquidityAddress)), ": ", reason));
-        emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, errorMsg);
-        revert(errorMsg);
+        emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("liquidityDetailsView failed: ", reason)));
+        return;
     }
     _checkLiquidity(context, xLiquid, yLiquid);
     _updateSlotAllocation(context, liquidityTemplate);
-    _transferPrimaryToken(context, liquidityTemplate);
-    _transferCompensationToken(context, liquidityTemplate);
+    if (context.primaryAmount > 0) {
+        address token = context.isX ? context.tokenA : context.tokenB;
+        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        uint256 denormalizedAmount = denormalize(context.primaryAmount, decimals);
+        if (token == address(0)) {
+            try liquidityTemplate.transactNative(context.depositor, denormalizedAmount, context.depositor) {
+                emit TransferSuccessful(context.depositor, context.listingAddress, context.isX, context.index, token, denormalizedAmount);
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("Native transfer failed: ", reason)));
+                return;
+            }
+        } else {
+            try liquidityTemplate.transactToken(context.depositor, token, denormalizedAmount, context.depositor) {
+                emit TransferSuccessful(context.depositor, context.listingAddress, context.isX, context.index, token, denormalizedAmount);
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("Token transfer failed: ", reason)));
+                return;
+            }
+        }
+    }
+    if (context.compensationAmount > 0) {
+        emit CompensationCalculated(context.depositor, context.listingAddress, context.isX, context.primaryAmount, context.compensationAmount);
+        address token = context.isX ? context.tokenB : context.tokenA;
+        uint8 decimals = token == address(0) ? 18 : IERC20(token).decimals();
+        uint256 denormalizedAmount = denormalize(context.compensationAmount, decimals);
+        if (token == address(0)) {
+            try liquidityTemplate.transactNative(context.depositor, denormalizedAmount, context.depositor) {
+                emit TransferSuccessful(context.depositor, context.listingAddress, !context.isX, context.index, token, denormalizedAmount);
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(context.depositor, context.listingAddress, !context.isX, context.index, context.compensationAmount, string(abi.encodePacked("Native compensation transfer failed: ", reason)));
+                return;
+            }
+        } else {
+            try liquidityTemplate.transactToken(context.depositor, token, denormalizedAmount, context.depositor) {
+                emit TransferSuccessful(context.depositor, context.listingAddress, !context.isX, context.index, token, denormalizedAmount);
+            } catch (bytes memory reason) {
+                emit WithdrawalFailed(context.depositor, context.listingAddress, !context.isX, context.index, context.compensationAmount, string(abi.encodePacked("Token compensation transfer failed: ", reason)));
+                return;
+            }
+        }
+    }
 }
 
-    function _validateFeeClaim(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal returns (FeeClaimContext memory) {
+function _validateFeeClaim(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal returns (FeeClaimContext memory) {
+
     // Validates fee claim parameters and ensures sufficient fees
+
     ICCListing listingContract = ICCListing(listingAddress);
+
     address liquidityAddr = listingContract.liquidityAddressView();
+
     ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+
     require(depositor != address(0), "Invalid depositor");
+
     (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, , ) = liquidityContract.liquidityDetailsView();
+
     ICCLiquidity.Slot memory slot = isX ? liquidityContract.getXSlotView(liquidityIndex) : liquidityContract.getYSlotView(liquidityIndex);
+
     require(slot.depositor == depositor, "Depositor not slot owner");
+
     require(xLiquid > 0 || yLiquid > 0, "No liquidity available");
+
     require(slot.allocation > 0, "No allocation for slot");
+
     uint256 fees = isX ? yFees : xFees;
+
     if (fees == 0) {
+
         emit FeeValidationFailed(depositor, listingAddress, isX, liquidityIndex, "No fees available");
+
         revert("No fees available");
+
     }
+
     return FeeClaimContext({
+
         listingAddress: listingAddress,
+
         depositor: depositor,
+
         liquidityIndex: liquidityIndex,
+
         isX: isX,
+
         liquidityAddr: liquidityAddr,
+
         xBalance: 0, // Unused, retained for compatibility
+
         xLiquid: xLiquid,
+
         yLiquid: yLiquid,
+
         xFees: xFees,
+
         yFees: yFees,
+
         liquid: isX ? xLiquid : yLiquid,
+
         fees: fees,
+
         allocation: slot.allocation,
+
         dFeesAcc: slot.dFeesAcc,
+
         transferToken: isX ? listingContract.tokenB() : listingContract.tokenA(),
+
         feeShare: 0
+
     });
+
 }
+
+
 
     function _calculateFeeShare(FeeClaimContext memory context) internal pure returns (FeeClaimContext memory) {
+
         uint256 contributedFees = context.fees > context.dFeesAcc ? context.fees - context.dFeesAcc : 0;
+
         uint256 liquidityContribution = context.liquid > 0 ? (context.allocation * 1e18) / context.liquid : 0;
+
         context.feeShare = (contributedFees * liquidityContribution) / 1e18;
+
         context.feeShare = context.feeShare > context.fees ? context.fees : context.feeShare;
+
         return context;
+
     }
 
+
+
     function _executeFeeClaim(FeeClaimContext memory context) internal {
+
     // Executes fee claim, updates fees and dFeesAcc to xFeesAcc/yFeesAcc, and transfers fees
+
     if (context.feeShare == 0) {
+
         emit NoFeesToClaim(context.depositor, context.listingAddress, context.isX, context.liquidityIndex);
+
         return;
+
     }
+
     ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
+
     uint256 xFeesAcc;
+
     uint256 yFeesAcc;
+
     try liquidityContract.liquidityDetailsView() returns (uint256, uint256, uint256, uint256, uint256 _xFeesAcc, uint256 _yFeesAcc) {
+
         xFeesAcc = _xFeesAcc;
+
         yFeesAcc = _yFeesAcc;
+
     } catch (bytes memory reason) {
+
         revert(string(abi.encodePacked("Liquidity details fetch failed: ", reason)));
+
     }
+
     ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](2);
+
     updates[0] = ICCLiquidity.UpdateType(1, context.isX ? 1 : 0, context.fees - context.feeShare, address(0), address(0));
+
     updates[1] = ICCLiquidity.UpdateType(context.isX ? 6 : 7, context.liquidityIndex, context.isX ? yFeesAcc : xFeesAcc, context.depositor, address(0));
+
     try liquidityContract.ccUpdate(context.depositor, updates) {
+
     } catch (bytes memory reason) {
+
         revert(string(abi.encodePacked("Fee claim update failed: ", reason)));
+
     }
+
     uint8 decimals = context.transferToken == address(0) ? 18 : IERC20(context.transferToken).decimals();
+
     uint256 denormalizedFee = denormalize(context.feeShare, decimals);
+
     if (context.transferToken == address(0)) {
+
         try liquidityContract.transactNative(context.depositor, denormalizedFee, context.depositor) {
+
         } catch (bytes memory reason) {
+
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
+
         }
+
     } else {
+
         try liquidityContract.transactToken(context.depositor, context.transferToken, denormalizedFee, context.depositor) {
+
         } catch (bytes memory reason) {
+
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
+
         }
+
     }
+
     emit FeesClaimed(context.listingAddress, context.liquidityIndex, context.isX ? 0 : context.feeShare, context.isX ? context.feeShare : 0);
+
 }
+
 
     function _processFeeShare(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal {
         FeeClaimContext memory context = _validateFeeClaim(listingAddress, depositor, liquidityIndex, isX);
