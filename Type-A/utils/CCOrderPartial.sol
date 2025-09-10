@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.6
+// Version: 0.1.7
 // Changes:
+// - v0.1.7: Refactored _executeSingleOrder to split ccUpdate into three separate calls for Core, Pricing, and Amounts structs, ensuring correct UpdateType encoding per CCListingTemplate.sol v0.3.8 requirements.
 // - v0.1.6: Replaced updateLiquidity with ccUpdate in settleSingleLongLiquid and settleSingleShortLiquid to align with ICCLiquidity interface update removing updateLiquidity.
 // - v0.1.5: Updated settleSingleLongLiquid and settleSingleShortLiquid to use ICCLiquidity instead of ICCListing for getLongPayout, getShortPayout, and ssUpdate, aligning with payout functionality move to CCLiquidityTemplate.sol v0.1.9.
 // - v0.1.4: Updated settleSingleLongLiquid and settleSingleShortLiquid to use active payout arrays, fetch liquidity balances, settle required amount, reduce required by requested amount, update filled and amountSent based on pre/post checks, and update liquidity balances via ICCLiquidity.updateLiquidity.
@@ -63,6 +64,27 @@ contract CCOrderPartial is CCMainPartial {
         return OrderPrep(maker, recipient, normalizedAmount, maxPrice, minPrice, 0, 0);
     }
 
+        // Helper function to execute ccUpdate for a single struct
+    function _callCCUpdate(
+        ICCListing listingContract,
+        uint8 updateType,
+        uint8 structId,
+        uint256 value,
+        address addr,
+        address recipient,
+        uint256 maxPrice,
+        uint256 minPrice,
+        uint256 amountSent
+    ) private {
+        uint8[] memory updateTypeArray = new uint8[](1);
+        uint8[] memory updateSort = new uint8[](1);
+        uint256[] memory updateData = new uint256[](1);
+        updateTypeArray[0] = updateType;
+        updateSort[0] = structId;
+        updateData[0] = value;
+        listingContract.ccUpdate(updateTypeArray, updateSort, updateData);
+    }
+
     function _executeSingleOrder(
         address listing,
         OrderPrep memory prep,
@@ -71,23 +93,45 @@ contract CCOrderPartial is CCMainPartial {
         // Executes single order creation, initializes amountSent and filled to 0
         ICCListing listingContract = ICCListing(listing);
         uint256 orderId = listingContract.getNextOrderId();
-        uint8[] memory updateType = new uint8[](3);
-        uint8[] memory updateSort = new uint8[](3);
-        uint256[] memory updateData = new uint256[](3);
         
-        updateType[0] = isBuy ? 1 : 2; // Buy or Sell
-        updateSort[0] = 0; // Core
-        updateData[0] = uint256(bytes32(abi.encode(prep.maker, prep.recipient, uint8(1)))); // status=pending
+        // Core struct update
+        _callCCUpdate(
+            listingContract,
+            isBuy ? 1 : 2, // Buy or Sell
+            0, // Core
+            uint256(1), // status=pending
+            prep.maker,
+            prep.recipient,
+            0,
+            0,
+            0
+        );
         
-        updateType[1] = isBuy ? 1 : 2;
-        updateSort[1] = 1; // Pricing
-        updateData[1] = uint256(bytes32(abi.encode(prep.maxPrice, prep.minPrice)));
+        // Pricing struct update
+        _callCCUpdate(
+            listingContract,
+            isBuy ? 1 : 2,
+            1, // Pricing
+            uint256(bytes32(abi.encode(prep.maxPrice, prep.minPrice))),
+            address(0),
+            address(0),
+            prep.maxPrice,
+            prep.minPrice,
+            0
+        );
         
-        updateType[2] = isBuy ? 1 : 2;
-        updateSort[2] = 2; // Amounts
-        updateData[2] = uint256(bytes32(abi.encode(prep.normalizedReceived, uint256(0), uint256(0)))); // pending, filled=0, amountSent=0
-        
-        listingContract.ccUpdate(updateType, updateSort, updateData);
+        // Amounts struct update
+        _callCCUpdate(
+            listingContract,
+            isBuy ? 1 : 2,
+            2, // Amounts
+            uint256(bytes32(abi.encode(prep.normalizedReceived, uint256(0), uint256(0)))),
+            address(0),
+            address(0),
+            0,
+            0,
+            0
+        );
     }
 
     function _clearOrderData(
