@@ -2,8 +2,9 @@
 pragma solidity ^0.8.2;
 
 /*
-// Version: 0.1.26
+// Version: 0.1.27
 // Changes:
+// - v0.1.27: Modified _transferWithdrawalAmount to track success of primary and compensation transfers, reverting if compensation transfer fails when compensationAmount > 0. Ensures slot allocation is only updated if both transfers succeed, preventing allocation reduction without full transfer. Preserves existing event emissions and functionality.
 // - v0.1.26: Reordered _executeWithdrawal to call _transferWithdrawalAmount before _updateWithdrawalAllocation to prevent slot allocation reduction if transactNative or transactToken fails.
 // - v0.1.25: Refactored _executeWithdrawal to address stack too deep error by splitting into helper functions (_fetchWithdrawalData, _updateWithdrawalAllocation, _transferWithdrawalAmount). Extended WithdrawalContext to include totalAllocationDeduct and price. Removed redundant local variables, ensured non-reverting behavior, and maintained v0.1.23 functionality (minimal checks, event emission, optional compensationAmount).
 // - v0.1.24: Removed _checkLiquidity, WithdrawalPrepData struct, _getLiquidityDetails, _validateSlot, and _calculateCompensation, as they are no longer used after v0.1.23 simplified withdrawal logic to skip liquidity checks and helper functions.
@@ -379,9 +380,11 @@ function _updateWithdrawalAllocation(WithdrawalContext memory context) internal 
 }
 
 function _transferWithdrawalAmount(WithdrawalContext memory context) internal {
-    // Transfers primary and compensation amounts, emits events for success or failure
+    // Transfers primary and compensation amounts, emits events for success or failure, reverts if compensation transfer fails when compensationAmount > 0
     ICCListing listingContract = ICCListing(context.listingAddress);
     ICCLiquidity liquidityTemplate = ICCLiquidity(listingContract.liquidityAddressView());
+    bool primarySuccess = false;
+    bool compensationSuccess = true; // Default to true if no compensation transfer is needed
 
     // Transfer primary amount
     if (context.primaryAmount > 0) {
@@ -391,12 +394,14 @@ function _transferWithdrawalAmount(WithdrawalContext memory context) internal {
         if (token == address(0)) {
             try liquidityTemplate.transactNative(context.depositor, denormalizedAmount, context.depositor) {
                 emit TransferSuccessful(context.depositor, context.listingAddress, context.isX, context.index, token, denormalizedAmount);
+                primarySuccess = true;
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("Native transfer failed: ", reason)));
             }
         } else {
             try liquidityTemplate.transactToken(context.depositor, token, denormalizedAmount, context.depositor) {
                 emit TransferSuccessful(context.depositor, context.listingAddress, context.isX, context.index, token, denormalizedAmount);
+                primarySuccess = true;
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, context.isX, context.index, context.primaryAmount, string(abi.encodePacked("Token transfer failed: ", reason)));
             }
@@ -411,16 +416,30 @@ function _transferWithdrawalAmount(WithdrawalContext memory context) internal {
         if (token == address(0)) {
             try liquidityTemplate.transactNative(context.depositor, denormalizedAmount, context.depositor) {
                 emit TransferSuccessful(context.depositor, context.listingAddress, !context.isX, context.index, token, denormalizedAmount);
+                compensationSuccess = true;
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, !context.isX, context.index, context.compensationAmount, string(abi.encodePacked("Native compensation transfer failed: ", reason)));
+                compensationSuccess = false;
             }
         } else {
             try liquidityTemplate.transactToken(context.depositor, token, denormalizedAmount, context.depositor) {
                 emit TransferSuccessful(context.depositor, context.listingAddress, !context.isX, context.index, token, denormalizedAmount);
+                compensationSuccess = true;
             } catch (bytes memory reason) {
                 emit WithdrawalFailed(context.depositor, context.listingAddress, !context.isX, context.index, context.compensationAmount, string(abi.encodePacked("Token compensation transfer failed: ", reason)));
+                compensationSuccess = false;
             }
         }
+    }
+
+    // Revert if compensation transfer failed when compensationAmount > 0
+    if (context.compensationAmount > 0 && !compensationSuccess) {
+        revert("Compensation transfer failed, aborting withdrawal to prevent allocation update");
+    }
+
+    // Require primary transfer success if primaryAmount > 0
+    if (context.primaryAmount > 0 && !primarySuccess) {
+        revert("Primary transfer failed, aborting withdrawal to prevent allocation update");
     }
 }
 

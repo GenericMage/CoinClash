@@ -8,7 +8,8 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 **Version**: 0.1.12 (Updated 2025-09-09)
 
 **Changes**:
-- v0.1.12: Updated to reflect `CCLiquidityPartial.sol` (v0.1.25) with fixed `listingContract` declaration in `_transferWithdrawalAmount`. Updated compatibility and internal call trees.
+- v0.1.13: Updated to reflect `CCLiquidityPartial.sol` (v0.1.27) with `_transferWithdrawalAmount` modified to revert if compensation transfer fails when `compensationAmount > 0`, ensuring slot allocation updates only after successful transfers.
+- v0.1.12: Updated to reflect `CCLiquidityPartial.sol` (v0.1.26) with `_executeWithdrawal` reordered to call `_transferWithdrawalAmount` before `_updateWithdrawalAllocation`.
 - v0.1.11: Updated to reflect `CCLiquidityPartial.sol` (v0.1.25) with fixed `listingContract` declarations in `_fetchWithdrawalData` and `_updateWithdrawalAllocation`.
 - v0.1.10: Updated to reflect `CCLiquidityPartial.sol` (v0.1.24) with `_executeWithdrawal` refactored into `_fetchWithdrawalData`, `_updateWithdrawalAllocation`, `_transferWithdrawalAmount` to fix stack too deep error. Extended `WithdrawalContext` with `totalAllocationDeduct` and `price`.
 - v0.1.9: Updated to reflect `CCLiquidityPartial.sol` (v0.1.23) with `_prepWithdrawal` accepting `compensationAmount`, minimal checks (ownership, allocation), non-reverting behavior, and event emission (`ValidationFailed`, `WithdrawalFailed`, `TransferSuccessful`).
@@ -174,7 +175,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `_prepWithdrawal` (CCLiquidityPartial): Validates `msg.sender` as slot owner, checks total allocation against `outputAmount + converted compensationAmount` using `ICCListing.prices(0)` for conversion. Returns `PreparedWithdrawal` with `amountA` and `amountB`. Emits `ValidationFailed` on failure.
   - `_executeWithdrawal` (CCLiquidityPartial):
     - `_fetchWithdrawalData`: Fetches `liquidityAddressView`, `tokenA`, `tokenB`, slot allocation, and price. Emits `ValidationFailed` on failure.
-    - `_transferWithdrawalAmount`: Transfers primary (`isX ? tokenA : tokenB`) and compensation (`isX ? tokenB : tokenA`) amounts via `transactNative` or `transactToken`, denormalizing to token decimals. Emits `TransferSuccessful` or `WithdrawalFailed`.
+    - Calls `_transferWithdrawalAmount`: Attempts `transactNative` or `transactToken` for primary and compensation amounts, tracks success, reverts if primary fails or compensation fails when `compensationAmount > 0`, emits `TransferSuccessful` or `WithdrawalFailed`.
         - `_updateWithdrawalAllocation`: Calculates `totalAllocationDeduct` (primary + converted compensation), updates slot via `ccUpdate` (updateType=2 for xSlot, 3 for ySlot). Emits `CompensationCalculated`, `WithdrawalFailed` on failure.
 - **Compensation Logic**: For xSlots, primary is tokenA, compensation is tokenB. For ySlots, primary is tokenB, compensation is tokenA. Conversion uses price from listing template.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
@@ -229,7 +230,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 - **_prepWithdrawal**: Validates ownership, allocation, and total allocation requirement (primary + converted compensation) using `prices(0)`. Returns `PreparedWithdrawal`.
 - **_fetchWithdrawalData**: Fetches `liquidityAddressView`, `tokenA`, `tokenB`, slot allocation, price.
 - **_updateWithdrawalAllocation**: Calculates total allocation deduction including converted compensation, updates slot allocation via `ccUpdate`.
-- **_transferWithdrawalAmount**: Transfers primary and compensation amounts, denormalizing to token decimals.
+- **_transferWithdrawalAmount**: Transfers primary and compensation amounts via `ICCLiquidity.transactNative` or `transactToken`, denormalizes amounts, tracks transfer success, reverts if primary fails or compensation fails when `compensationAmount > 0`, emits `TransferSuccessful`, `WithdrawalFailed`. Used by `_executeWithdrawal`.
 - **_validateFeeClaim**: Validates fee claim parameters, creates `FeeClaimContext`.
 - **_calculateFeeShare**: Computes fee share using formula.
 - **_executeFeeClaim**: Updates fees and `dFeesAcc`, transfers fees.
