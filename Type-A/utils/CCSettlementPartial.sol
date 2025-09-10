@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.3
+// Version: 0.1.5
 // Changes:
+// - v0.1.5: Modified _applyOrderUpdate to call ccUpdate for each UpdateType struct individually, ensuring compliance with requirement for separate updates.
 // - v0.1.4: Refactored _processBuyOrder and _processSellOrder to resolve stack-too-deep error. Split into helper functions (_validateOrderParams, _computeSwapAmount, _executeOrderSwap, _prepareUpdateData, _applyOrderUpdate) based on param groups (validation, swap calculation, execution, update prep, update application). Each helper handles at most 4 variables using OrderProcessContext struct. Ensured incremental updates to Core, Pricing, and Amounts structs via listingContract.ccUpdate.
 // - v0.1.3: Added events NonCriticalPriceOutOfBounds, NonCriticalNoPendingOrder, NonCriticalZeroSwapAmount to log non-critical issues. Emitted in _processBuyOrder and _processSellOrder for price out of bounds, no pending orders, and zero swap amount cases to ensure non-reverting behavior with logging. Compatible with CCListingTemplate.sol v0.2.26 and CCUniPartial.sol v0.1.5.
 // - v0.1.2: Added _computeMaxAmountIn to fix DeclarationError in _processBuyOrder and _processSellOrder. Calculates max input amount using reserves from CCUniPartial.sol’s _fetchReserves and price constraints. Ensured pending/filled use pre-transfer amount (tokenB for buys, tokenA for sells), amountSent uses post-transfer amount (tokenA for buys, tokenB for sells) with pre/post balance checks. Compatible with CCListingTemplate.sol v0.2.26 and CCUniPartial.sol v0.1.5.
@@ -289,28 +290,39 @@ function _prepareUpdateData(
     }
 }
 
-// Helper function to apply updates
-function _applyOrderUpdate(
-    address listingAddress,
-    ICCListing listingContract,
-    OrderProcessContext memory context
-) internal returns (ICCListing.UpdateType[] memory) {
-    // Applies updates via ccUpdate
-    if (context.updates.length == 0) {
-        return new ICCListing.UpdateType[](0);
+    // Helper function to apply updates for each struct individually
+    function _applyOrderUpdate(
+        address listingAddress,
+        ICCListing listingContract,
+        OrderProcessContext memory context
+    ) internal returns (ICCListing.UpdateType[] memory) {
+        // Applies updates via ccUpdate, one struct at a time
+        if (context.updates.length == 0) {
+            return new ICCListing.UpdateType[](0);
+        }
+        for (uint256 i = 0; i < context.updates.length; i++) {
+            uint8[] memory updateType = new uint8[](1);
+            uint8[] memory updateSort = new uint8[](1);
+            uint256[] memory updateData = new uint256[](1);
+            updateType[0] = context.updates[i].updateType;
+            updateSort[0] = context.updates[i].structId;
+            if (context.updates[i].structId == 0) {
+                updateData[0] = uint256(bytes32(abi.encode(context.updates[i].addr, context.updates[i].recipient, uint8(context.updates[i].value))));
+            } else if (context.updates[i].structId == 1) {
+                updateData[0] = uint256(bytes32(abi.encode(context.updates[i].maxPrice, context.updates[i].minPrice)));
+            } else if (context.updates[i].structId == 2) {
+                updateData[0] = uint256(bytes32(abi.encode(context.updates[i].value, context.filled + context.updates[i].value, context.updates[i].amountSent)));
+            }
+            try listingContract.ccUpdate(updateType, updateSort, updateData) {
+                // Success
+                context.updates[i].addr = context.makerAddress;
+                context.updates[i].recipient = context.recipientAddress;
+            } catch Error(string memory reason) {
+                revert(string(abi.encodePacked("ccUpdate failed for order ", uint2str(context.orderId), ": ", reason)));
+            }
+        }
+        return context.updates;
     }
-    (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) = _prepareUpdateData(context);
-    try listingContract.ccUpdate(updateType, updateSort, updateData) {
-        // Success
-    } catch Error(string memory reason) {
-        revert(string(abi.encodePacked("ccUpdate failed for order ", uint2str(context.orderId), ": ", reason)));
-    }
-    for (uint256 i = 0; i < context.updates.length; i++) {
-        context.updates[i].addr = context.makerAddress;
-        context.updates[i].recipient = context.recipientAddress;
-    }
-    return context.updates;
-}
 
 // Updated _processBuyOrder function
 function _processBuyOrder(
