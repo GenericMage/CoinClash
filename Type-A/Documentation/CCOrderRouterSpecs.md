@@ -5,11 +5,11 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.4 (Updated 2025-08-31)
+**Version:** 0.1.5 (Updated 2025-09-10)
 
 **Inheritance Tree:** `CCOrderRouter` → `CCOrderPartial` → `CCMainPartial`
 
-**Compatibility:** `CCListingTemplate.sol` (v0.3.2), `CCOrderPartial.sol` (v0.1.5), `CCMainPartial.sol` (v0.1.4), `ICCLiquidity.sol` (v0.0.5), `CCLiquidityTemplate.sol` (v0.1.9).
+**Compatibility:** `CCListingTemplate.sol` (v0.3.2), `CCOrderPartial.sol` (v0.1.6), `CCMainPartial.sol` (v0.1.5), `ICCLiquidity.sol` (v0.0.5), `CCLiquidityTemplate.sol` (v0.1.9).
 
 ## Mappings
 - **`payoutPendingAmounts`**: `mapping(address => mapping(uint256 => uint256))` (inherited from `CCOrderPartial`)
@@ -102,7 +102,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
     - `_prepPayoutContext`: Initializes context (`listingAddress`, `liquidityAddr`, `tokenOut`, `tokenDecimals`, `recipientAddress`).
     - `_checkLiquidityBalance`: Verifies liquidity (`yAmount >= requiredAmount`).
     - `_transferNative`/`_transferToken`: Transfers tokens, uses pre/post balance checks for `amountReceived`, `normalizedReceived`.
-    - Calls `ICCLiquidity.updateLiquidity` to reduce liquidity balance by `payout.required`.
+    - Calls `ICCLiquidity.ccUpdate` to reduce liquidity balance by `payout.required` (updateType=0, index=1 for yLiquid).
     - Updates `payoutPendingAmounts` (subtracts `payout.required`).
     - Creates `PayoutUpdate` (`payoutType=0`, `orderId`, `required=0`, `filled=payout.filled + payout.required`, `amountSent=normalizedReceived`).
   - Resizes updates array, calls `ICCLiquidity.ssUpdate`.
@@ -120,7 +120,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
     - `_prepPayoutContext`: Initializes context for tokenA.
     - `_checkLiquidityBalance`: Verifies liquidity (`xAmount >= amount`).
     - `_transferNative`/`_transferToken`: Transfers tokens, uses pre/post balance checks.
-    - Calls `ICCLiquidity.updateLiquidity` to reduce liquidity balance by `payout.amount`.
+    - Calls `ICCLiquidity.ccUpdate` to reduce liquidity balance by `payout.amount` (updateType=0, index=0 for xLiquid).
     - Updates `payoutPendingAmounts` (subtracts `payout.amount`).
     - Creates `PayoutUpdate` (`payoutType=1`, `orderId`, `required=0`, `filled=payout.filled + payout.amount`, `amountSent=normalizedReceived`).
   - Resizes updates array, calls `ICCLiquidity.ssUpdate`.
@@ -151,7 +151,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
   - **Long vs. Short**: Long payouts transfer tokenB, short payouts transfer tokenA, both via `ICCLiquidity` liquidity pool.
   - **Active Payouts**: Uses `ICCLiquidity.activeLongPayoutsView`/`activeShortPayoutsView` to fetch only pending payouts, improving efficiency.
   - **Zero-Amount Payouts**: If `required`/`amount` is zero or `status != 1`, sets `PayoutUpdate.required=0`, retains existing `filled` and `amountSent`.
-  - **Liquidity Updates**: `settleSingleLongLiquid`/`settleSingleShortLiquid` call `ICCLiquidity.updateLiquidity` to reduce liquidity balances by the requested amount (`payout.required`/`payout.amount`).
+  - **Liquidity Updates**: `settleSingleLongLiquid`/`settleSingleShortLiquid` call `ICCLiquidity.ccUpdate` to reduce liquidity balances by the requested amount (`payout.required`/`payout.amount`) to avoid tax on transfer errors. 
   - **Amount Handling**: `required` set to 0 post-settlement, `filled` incremented by requested amount, `amountSent` reflects actual transferred amount (post-tax).
 - **Decimal Handling**: Normalizes to 1e18 decimals using `normalize`, denormalizes for transfers using `denormalize` with `decimalsA`/`decimalsB`.
 - **Security**:

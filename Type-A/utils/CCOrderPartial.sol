@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.5
+// Version: 0.1.6
 // Changes:
+// - v0.1.6: Replaced updateLiquidity with ccUpdate in settleSingleLongLiquid and settleSingleShortLiquid to align with ICCLiquidity interface update removing updateLiquidity.
 // - v0.1.5: Updated settleSingleLongLiquid and settleSingleShortLiquid to use ICCLiquidity instead of ICCListing for getLongPayout, getShortPayout, and ssUpdate, aligning with payout functionality move to CCLiquidityTemplate.sol v0.1.9.
 // - v0.1.4: Updated settleSingleLongLiquid and settleSingleShortLiquid to use active payout arrays, fetch liquidity balances, settle required amount, reduce required by requested amount, update filled and amountSent based on pre/post checks, and update liquidity balances via ICCLiquidity.updateLiquidity.
 // - v0.1.3: Updated `settleSingleLongLiquid` and `settleSingleShortLiquid` to use `payout.required` or `payout.amount` as `filled` in `PayoutUpdate` to account for transfer taxes, ensuring `filled` reflects the full amount withdrawn from liquidity pool. `amountSent` now uses pre/post balance checks. Removed listing template balance usage for payouts, relying solely on liquidity pool transfers via `_transferNative` or `_transferToken`.
@@ -234,7 +235,7 @@ contract CCOrderPartial is CCMainPartial {
     address listingAddress,
     uint256 orderIdentifier
 ) internal returns (ICCLiquidity.PayoutUpdate[] memory updates) {
-    // Settles single long liquidation payout using liquidity pool, updates liquidity balances
+    // Settles single long liquidation payout using liquidity pool, updates liquidity balances via ccUpdate
     ICCListing listing = ICCListing(listingAddress);
     ICCLiquidity liquidityContract = ICCLiquidity(listing.liquidityAddressView());
     ICCLiquidity.LongPayoutStruct memory payout = liquidityContract.getLongPayout(orderIdentifier);
@@ -290,8 +291,16 @@ contract CCOrderPartial is CCMainPartial {
         return new ICCLiquidity.PayoutUpdate[](0);
     }
     payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.required;
-    // Update liquidity balance
-    liquidityContract.updateLiquidity(context.recipientAddress, true, payout.required);
+    // Adjusted: Replaced updateLiquidity with ccUpdate
+    ICCLiquidity.UpdateType[] memory liquidityUpdates = new ICCLiquidity.UpdateType[](1);
+    liquidityUpdates[0] = ICCLiquidity.UpdateType({
+        updateType: 0, // balance
+        index: 1, // yLiquid
+        value: payout.required,
+        addr: context.recipientAddress,
+        recipient: address(0)
+    });
+    liquidityContract.ccUpdate(context.recipientAddress, liquidityUpdates);
     updates = new ICCLiquidity.PayoutUpdate[](1);
     updates[0] = ICCLiquidity.PayoutUpdate({
         payoutType: 0, // Long
@@ -308,7 +317,7 @@ function settleSingleShortLiquid(
     address listingAddress,
     uint256 orderIdentifier
 ) internal returns (ICCLiquidity.PayoutUpdate[] memory updates) {
-    // Settles single short liquidation payout using liquidity pool, updates liquidity balances
+    // Settles single short liquidation payout using liquidity pool, updates liquidity balances via ccUpdate
     ICCListing listing = ICCListing(listingAddress);
     ICCLiquidity liquidityContract = ICCLiquidity(listing.liquidityAddressView());
     ICCLiquidity.ShortPayoutStruct memory payout = liquidityContract.getShortPayout(orderIdentifier);
@@ -364,15 +373,23 @@ function settleSingleShortLiquid(
         return new ICCLiquidity.PayoutUpdate[](0);
     }
     payoutPendingAmounts[listingAddress][orderIdentifier] -= payout.amount;
-    // Update liquidity balance
-    liquidityContract.updateLiquidity(context.recipientAddress, false, payout.amount);
+    // Adjusted: Replaced updateLiquidity with ccUpdate
+    ICCLiquidity.UpdateType[] memory liquidityUpdates = new ICCLiquidity.UpdateType[](1);
+    liquidityUpdates[0] = ICCLiquidity.UpdateType({
+        updateType: 0, // balance
+        index: 0, // xLiquid
+        value: payout.amount,
+        addr: context.recipientAddress,
+        recipient: address(0)
+    });
+    liquidityContract.ccUpdate(context.recipientAddress, liquidityUpdates);
     updates = new ICCLiquidity.PayoutUpdate[](1);
     updates[0] = ICCLiquidity.PayoutUpdate({
         payoutType: 1, // Short
         recipient: payout.recipientAddress,
         orderId: orderIdentifier,
         required: 0, // Reduce required by requested amount
-        filled: payout.filled + payout.amount, // Update filled by requested amount amount
+        filled: payout.filled + payout.amount, // Update filled by requested amount
         amountSent: normalizedReceived // Actual amount sent after pre/post checks
     });
     liquidityContract.ssUpdate(updates);
