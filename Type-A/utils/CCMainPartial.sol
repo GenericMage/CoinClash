@@ -3,6 +3,7 @@ pragma solidity ^0.8.2;
 
 // Version: 0.1.5
 // Changes:
+// - v0.1.5: Updated ICCListing interface to replace UpdateType with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs and modified ccUpdate function signature to accept these structs. 
 // - v0.1.5: Added historical data interfaces.
 // - v0.1.4: Updated ICCListing interface to move payout-related structs and functions aligning with CCListingTemplate.sol v0.3.5 where payout functionality was moved to CCLiquidityTemplate.sol v0.1.9. 
 // - v0.1.3: Updated ICCLiquidity interface to rename update to ccUpdate, reflecting changes in CCLiquidityTemplate.sol.
@@ -19,63 +20,92 @@ import "../imports/IERC20.sol";
 import "../imports/ReentrancyGuard.sol";
 
 interface ICCListing {
-    struct UpdateType {
-        uint8 updateType; // 0=balance, 1=buy order, 2=sell order, 3=historical
-        uint8 structId;   // 0=Core, 1=Pricing, 2=Amounts
-        uint256 index;    // orderId or slot index
-        uint256 value;    // principal or amount
-        address addr;     // makerAddress
-        address recipient; // recipientAddress
-        uint256 maxPrice; // for Pricing struct
-        uint256 minPrice; // for Pricing struct
-        uint256 amountSent; // for Amounts struct
+        struct BuyOrderUpdate {
+            uint8 structId; // 0: Core, 1: Pricing, 2: Amounts
+            uint256 orderId; // Order ID
+            address makerAddress; // Maker address
+            address recipientAddress; // Recipient address
+            uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+            uint256 maxPrice; // Max price for Pricing
+            uint256 minPrice; // Min price for Pricing
+            uint256 pending; // Pending amount for Amounts
+            uint256 filled; // Filled amount for Amounts
+            uint256 amountSent; // Amount sent for Amounts
+        }
+
+        struct SellOrderUpdate {
+            uint8 structId; // 0: Core, 1: Pricing, 2: Amounts
+            uint256 orderId; // Order ID
+            address makerAddress; // Maker address
+            address recipientAddress; // Recipient address
+            uint8 status; // 0: cancelled, 1: pending, 2: partially filled, 3: filled
+            uint256 maxPrice; // Max price for Pricing
+            uint256 minPrice; // Min price for Pricing
+            uint256 pending; // Pending amount for Amounts
+            uint256 filled; // Filled amount for Amounts
+            uint256 amountSent; // Amount sent for Amounts
+        }
+
+        struct BalanceUpdate {
+            uint256 xBalance; // Normalized xBalance
+            uint256 yBalance; // Normalized yBalance
+        }
+
+        struct HistoricalUpdate {
+            uint256 price; // Current price
+            uint256 xBalance; // xBalance
+            uint256 yBalance; // yBalance
+            uint256 xVolume; // xVolume
+            uint256 yVolume; // yVolume
+            uint256 timestamp; // Timestamp
+        }
+
+        struct HistoricalData {
+            uint256 price;
+            uint256 xBalance;
+            uint256 yBalance;
+            uint256 xVolume;
+            uint256 yVolume;
+            uint256 timestamp;
+        }
+
+        function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
+        function prices(uint256 _listingId) external view returns (uint256);
+        function liquidityAddressView() external view returns (address);
+        function tokenA() external view returns (address);
+        function tokenB() external view returns (address);
+        function decimalsA() external view returns (uint8);
+        function decimalsB() external view returns (uint8);
+        function getNextOrderId() external view returns (uint256);
+        function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data);
+        function historicalDataLengthView() external view returns (uint256 length);
+        function pendingBuyOrdersView() external view returns (uint256[] memory);
+        function pendingSellOrdersView() external view returns (uint256[] memory);
+        function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
+        function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
+        function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
+        function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
+        function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
+        function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
+        function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
+        function transactToken(address token, uint256 amount, address recipient) external;
+        function transactNative(uint256 amount, address recipient) external payable;
+        function uniswapV2PairView() external view returns (address);
+        function setUniswapV2Pair(address _uniswapV2Pair) external;
+        function setRouters(address[] memory _routers) external;
+        function setListingId(uint256 _listingId) external;
+        function setLiquidityAddress(address _liquidityAddress) external;
+        function setTokens(address _tokenA, address _tokenB) external;
+        function setAgent(address _agent) external;
+        function setRegistry(address _registryAddress) external;
+        function ccUpdate(
+            BuyOrderUpdate[] calldata buyUpdates,
+            SellOrderUpdate[] calldata sellUpdates,
+            BalanceUpdate[] calldata balanceUpdates,
+            HistoricalUpdate[] calldata historicalUpdates
+        ) external;
+        function agentView() external view returns (address);
     }
-    
-    struct HistoricalData {
-        uint256 price;
-        uint256 xBalance;
-        uint256 yBalance;
-        uint256 xVolume;
-        uint256 yVolume;
-        uint256 timestamp;
-    }
-    
-    function volumeBalances(uint256 listingId) external view returns (uint256 xBalance, uint256 yBalance);
-    function prices(uint256 _listingId) external view returns (uint256);
-    function liquidityAddressView() external view returns (address);
-    function tokenA() external view returns (address);
-    function tokenB() external view returns (address);
-    function decimalsA() external view returns (uint8);
-    function decimalsB() external view returns (uint8);
-    function getNextOrderId() external view returns (uint256);
-    function getHistoricalDataView(uint256 index) external view returns (HistoricalData memory data);
-    function historicalDataLengthView() external view returns (uint256 length);
-    function pendingBuyOrdersView() external view returns (uint256[] memory);
-    function pendingSellOrdersView() external view returns (uint256[] memory);
-    function makerPendingOrdersView(address maker) external view returns (uint256[] memory);
-    function getBuyOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
-    function getBuyOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
-    function getBuyOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
-    function getSellOrderCore(uint256 orderId) external view returns (address makerAddress, address recipientAddress, uint8 status);
-    function getSellOrderPricing(uint256 orderId) external view returns (uint256 maxPrice, uint256 minPrice);
-    function getSellOrderAmounts(uint256 orderId) external view returns (uint256 pending, uint256 filled, uint256 amountSent);
-    function transactToken(address token, uint256 amount, address recipient) external;
-    function transactNative(uint256 amount, address recipient) external payable;
-    function uniswapV2PairView() external view returns (address);
-    function setUniswapV2Pair(address _uniswapV2Pair) external;
-    function setRouters(address[] memory _routers) external;
-    function setListingId(uint256 _listingId) external;
-    function setLiquidityAddress(address _liquidityAddress) external;
-    function setTokens(address _tokenA, address _tokenB) external;
-    function setAgent(address _agent) external;
-    function setRegistry(address _registryAddress) external;
-    function ccUpdate(
-        uint8[] calldata updateType,
-        uint8[] calldata updateSort,
-        uint256[] calldata updateData
-    ) external;
-    function agentView() external view returns (address);
-}
 
 interface ICCLiquidity {
     struct UpdateType {

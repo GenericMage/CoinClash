@@ -3,6 +3,7 @@ pragma solidity ^0.8.2;
 
 // Version: 0.1.7
 // Changes:
+// - v0.1.8: Refactored _executeSingleOrder to use BuyOrderUpdate/SellOrderUpdate structs for ccUpdate calls, ensuring compatibility with CCListingTemplate.sol v0.3.10.
 // - v0.1.7: Refactored _executeSingleOrder to split ccUpdate into three separate calls for Core, Pricing, and Amounts structs, ensuring correct UpdateType encoding per CCListingTemplate.sol v0.3.8 requirements.
 // - v0.1.6: Replaced updateLiquidity with ccUpdate in settleSingleLongLiquid and settleSingleShortLiquid to align with ICCLiquidity interface update removing updateLiquidity.
 // - v0.1.5: Updated settleSingleLongLiquid and settleSingleShortLiquid to use ICCLiquidity instead of ICCListing for getLongPayout, getShortPayout, and ssUpdate, aligning with payout functionality move to CCLiquidityTemplate.sol v0.1.9.
@@ -64,110 +65,159 @@ contract CCOrderPartial is CCMainPartial {
         return OrderPrep(maker, recipient, normalizedAmount, maxPrice, minPrice, 0, 0);
     }
 
-        // Helper function to execute ccUpdate for a single struct
-    function _callCCUpdate(
-        ICCListing listingContract,
-        uint8 updateType,
-        uint8 structId,
-        uint256 value,
-        address addr,
-        address recipient,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 amountSent
-    ) private {
-        uint8[] memory updateTypeArray = new uint8[](1);
-        uint8[] memory updateSort = new uint8[](1);
-        uint256[] memory updateData = new uint256[](1);
-        updateTypeArray[0] = updateType;
-        updateSort[0] = structId;
-        updateData[0] = value;
-        listingContract.ccUpdate(updateTypeArray, updateSort, updateData);
-    }
-
     function _executeSingleOrder(
-        address listing,
-        OrderPrep memory prep,
-        bool isBuy
-    ) internal {
-        // Executes single order creation, initializes amountSent and filled to 0
-        ICCListing listingContract = ICCListing(listing);
-        uint256 orderId = listingContract.getNextOrderId();
-        
+    address listing,
+    OrderPrep memory prep,
+    bool isBuy
+) internal {
+    // Executes single order creation, initializes amountSent and filled to 0
+    ICCListing listingContract = ICCListing(listing);
+    uint256 orderId = listingContract.getNextOrderId();
+
+    // Prepare updates
+    if (isBuy) {
+        ICCListing.BuyOrderUpdate[] memory buyUpdates = new ICCListing.BuyOrderUpdate[](3);
         // Core struct update
-        _callCCUpdate(
-            listingContract,
-            isBuy ? 1 : 2, // Buy or Sell
-            0, // Core
-            uint256(1), // status=pending
-            prep.maker,
-            prep.recipient,
-            0,
-            0,
-            0
-        );
-        
+        buyUpdates[0] = ICCListing.BuyOrderUpdate({
+            structId: 0,
+            orderId: orderId,
+            makerAddress: prep.maker,
+            recipientAddress: prep.recipient,
+            status: 1, // pending
+            maxPrice: 0,
+            minPrice: 0,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
         // Pricing struct update
-        _callCCUpdate(
-            listingContract,
-            isBuy ? 1 : 2,
-            1, // Pricing
-            uint256(bytes32(abi.encode(prep.maxPrice, prep.minPrice))),
-            address(0),
-            address(0),
-            prep.maxPrice,
-            prep.minPrice,
-            0
-        );
-        
+        buyUpdates[1] = ICCListing.BuyOrderUpdate({
+            structId: 1,
+            orderId: orderId,
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            status: 0,
+            maxPrice: prep.maxPrice,
+            minPrice: prep.minPrice,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
         // Amounts struct update
-        _callCCUpdate(
-            listingContract,
-            isBuy ? 1 : 2,
-            2, // Amounts
-            uint256(bytes32(abi.encode(prep.normalizedReceived, uint256(0), uint256(0)))),
-            address(0),
-            address(0),
-            0,
-            0,
-            0
-        );
+        buyUpdates[2] = ICCListing.BuyOrderUpdate({
+            structId: 2,
+            orderId: orderId,
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            status: 0,
+            maxPrice: 0,
+            minPrice: 0,
+            pending: prep.normalizedReceived,
+            filled: 0,
+            amountSent: 0
+        });
+        listingContract.ccUpdate(buyUpdates, new ICCListing.SellOrderUpdate[](0), new ICCListing.BalanceUpdate[](0), new ICCListing.HistoricalUpdate[](0));
+    } else {
+        ICCListing.SellOrderUpdate[] memory sellUpdates = new ICCListing.SellOrderUpdate[](3);
+        // Core struct update
+        sellUpdates[0] = ICCListing.SellOrderUpdate({
+            structId: 0,
+            orderId: orderId,
+            makerAddress: prep.maker,
+            recipientAddress: prep.recipient,
+            status: 1, // pending
+            maxPrice: 0,
+            minPrice: 0,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
+        // Pricing struct update
+        sellUpdates[1] = ICCListing.SellOrderUpdate({
+            structId: 1,
+            orderId: orderId,
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            status: 0,
+            maxPrice: prep.maxPrice,
+            minPrice: prep.minPrice,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
+        // Amounts struct update
+        sellUpdates[2] = ICCListing.SellOrderUpdate({
+            structId: 2,
+            orderId: orderId,
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            status: 0,
+            maxPrice: 0,
+            minPrice: 0,
+            pending: prep.normalizedReceived,
+            filled: 0,
+            amountSent: 0
+        });
+        listingContract.ccUpdate(new ICCListing.BuyOrderUpdate[](0), sellUpdates, new ICCListing.BalanceUpdate[](0), new ICCListing.HistoricalUpdate[](0));
     }
+}
 
     function _clearOrderData(
-        address listing,
-        uint256 orderId,
-        bool isBuy
-    ) internal {
-        // Clears order data, refunds pending amounts, sets status to cancelled
-        ICCListing listingContract = ICCListing(listing);
-        (address maker, address recipient, uint8 status) = isBuy
-            ? listingContract.getBuyOrderCore(orderId)
-            : listingContract.getSellOrderCore(orderId);
-        require(maker == msg.sender, "Only maker can cancel");
-        (uint256 pending, uint256 filled, uint256 amountSent) = isBuy
-            ? listingContract.getBuyOrderAmounts(orderId)
-            : listingContract.getSellOrderAmounts(orderId);
-        if (pending > 0 && (status == 1 || status == 2)) {
-            address tokenAddress = isBuy ? listingContract.tokenB() : listingContract.tokenA();
-            uint8 tokenDecimals = isBuy ? listingContract.decimalsB() : listingContract.decimalsA();
-            uint256 refundAmount = denormalize(pending, tokenDecimals);
-            if (tokenAddress == address(0)) {
-                listingContract.transactNative(refundAmount, recipient);
-            } else {
-                listingContract.transactToken(tokenAddress, refundAmount, recipient);
-            }
+    address listing,
+    uint256 orderId,
+    bool isBuy
+) internal {
+    // Clears order data, refunds pending amounts, sets status to cancelled
+    ICCListing listingContract = ICCListing(listing);
+    (address maker, address recipient, uint8 status) = isBuy
+        ? listingContract.getBuyOrderCore(orderId)
+        : listingContract.getSellOrderCore(orderId);
+    require(maker == msg.sender, "Only maker can cancel");
+    (uint256 pending, uint256 filled, uint256 amountSent) = isBuy
+        ? listingContract.getBuyOrderAmounts(orderId)
+        : listingContract.getSellOrderAmounts(orderId);
+    if (pending > 0 && (status == 1 || status == 2)) {
+        address tokenAddress = isBuy ? listingContract.tokenB() : listingContract.tokenA();
+        uint8 tokenDecimals = isBuy ? listingContract.decimalsB() : listingContract.decimalsA();
+        uint256 refundAmount = denormalize(pending, tokenDecimals);
+        if (tokenAddress == address(0)) {
+            listingContract.transactNative(refundAmount, recipient);
+        } else {
+            listingContract.transactToken(tokenAddress, refundAmount, recipient);
         }
-        uint8[] memory updateType = new uint8[](1);
-        uint8[] memory updateSort = new uint8[](1);
-        uint256[] memory updateData = new uint256[](1);
-        
-        updateType[0] = isBuy ? 1 : 2;
-        updateSort[0] = 0; // Core
-        updateData[0] = uint256(bytes32(abi.encode(address(0), address(0), uint8(0)))); // status=cancelled
-        
-        listingContract.ccUpdate(updateType, updateSort, updateData);
     }
+    if (isBuy) {
+        ICCListing.BuyOrderUpdate[] memory buyUpdates = new ICCListing.BuyOrderUpdate[](1);
+        buyUpdates[0] = ICCListing.BuyOrderUpdate({
+            structId: 0, // Core
+            orderId: orderId,
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            status: 0, // cancelled
+            maxPrice: 0,
+            minPrice: 0,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
+        listingContract.ccUpdate(buyUpdates, new ICCListing.SellOrderUpdate[](0), new ICCListing.BalanceUpdate[](0), new ICCListing.HistoricalUpdate[](0));
+    } else {
+        ICCListing.SellOrderUpdate[] memory sellUpdates = new ICCListing.SellOrderUpdate[](1);
+        sellUpdates[0] = ICCListing.SellOrderUpdate({
+            structId: 0, // Core
+            orderId: orderId,
+            makerAddress: address(0),
+            recipientAddress: address(0),
+            status: 0, // cancelled
+            maxPrice: 0,
+            minPrice: 0,
+            pending: 0,
+            filled: 0,
+            amountSent: 0
+        });
+        listingContract.ccUpdate(new ICCListing.BuyOrderUpdate[](0), sellUpdates, new ICCListing.BalanceUpdate[](0), new ICCListing.HistoricalUpdate[](0));
+    }
+}
 
     function _prepPayoutContext(
         address listingAddress,

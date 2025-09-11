@@ -1,15 +1,15 @@
 # CCOrderRouter Contract Documentation
 
 ## Overview
-The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a router for creating, canceling, and settling buy/sell orders and long/short liquidation payouts on a decentralized trading platform. It inherits from `CCOrderPartial` (v0.1.7), which extends `CCMainPartial` (v0.1.5), and integrates with `ICCListing` (v0.3.2), `ICCLiquidity` (v0.0.5), and `IERC20` interfaces, using `ReentrancyGuard` for security. The contract handles order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`), cancellation (`clearSingleOrder`, `clearOrders`), and liquidation payout settlement (`settleLongLiquid`, `settleShortLiquid`). State variables are hidden, accessed via view functions, with normalized amounts (1e18 decimals) for precision.
+The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a router for creating, canceling, and settling buy/sell orders and long/short liquidation payouts on a decentralized trading platform. It inherits from `CCOrderPartial` (v0.1.9), which extends `CCMainPartial` (v0.1.5), and integrates with `ICCListing` (v0.1.5), `ICCLiquidity` (v0.0.5), and `IERC20` interfaces, using `ReentrancyGuard` for security. The contract handles order creation (`createTokenBuyOrder`, `createNativeBuyOrder`, `createTokenSellOrder`, `createNativeSellOrder`), cancellation (`clearSingleOrder`, `clearOrders`), and liquidation payout settlement (`settleLongLiquid`, `settleShortLiquid`). State variables are hidden, accessed via view functions, with normalized amounts (1e18 decimals) for precision.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.5 (Updated 2025-09-10)
+**Version:** 0.1.5 (Updated 2025-09-11)
 
 **Inheritance Tree:** `CCOrderRouter` → `CCOrderPartial` → `CCMainPartial`
 
-**Compatibility:** `CCListingTemplate.sol` (v0.3.8), `CCOrderPartial.sol` (v0.1.7), `CCMainPartial.sol` (v0.1.5), `ICCLiquidity.sol` (v0.0.5), `CCLiquidityTemplate.sol` (v0.1.9).
+**Compatibility:** `CCListingTemplate.sol` (v0.3.10), `CCOrderPartial.sol` (v0.1.9), `CCMainPartial.sol` (v0.1.5), `ICCLiquidity.sol` (v0.0.5), `CCLiquidityTemplate.sol` (v0.1.9).
 
 ## Mappings
 - **`payoutPendingAmounts`**: `mapping(address => mapping(uint256 => uint256))` (inherited from `CCOrderPartial`)
@@ -22,7 +22,8 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **ICCLiquidity.PayoutUpdate**: Contains `payoutType` (uint8, 0=Long, 1=Short), `recipient` (address), `orderId` (uint256), `required` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized).
 - **ICCLiquidity.LongPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `required` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized), `orderId` (uint256), `status` (uint8).
 - **ICCLiquidity.ShortPayoutStruct**: Contains `makerAddress` (address), `recipientAddress` (address), `amount` (uint256, normalized), `filled` (uint256, normalized), `amountSent` (uint256, normalized), `orderId` (uint256), `status` (uint8).
-- **ICCListing.UpdateType**: Contains `updateType` (uint8), `structId` (uint8), `index` (uint256), `value` (uint256), `addr` (address), `recipient` (address), `maxPrice` (uint256), `minPrice` (uint256), `amountSent` (uint256).
+- **ICCListing.BuyOrderUpdate**: Contains `structId` (uint8, 0=Core, 1=Pricing, 2=Amounts), `orderId` (uint256), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `maxPrice` (uint256), `minPrice` (uint256), `pending` (uint256), `filled` (uint256), `amountSent` (uint256).
+- **ICCListing.SellOrderUpdate**: Same fields as `BuyOrderUpdate`.
 
 ## Formulas
 1. **Payout Amount**:
@@ -42,7 +43,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Internal Call Flow**:
   - `_handleOrderPrep`: Validates inputs, normalizes `inputAmount` to 1e18 decimals.
   - `_checkTransferAmountToken`: Performs pre/post balance checks for tokenB, returns `amountReceived`, `normalizedReceived`.
-  - `_executeSingleOrder`: Splits into three `ccUpdate` calls (Core, Pricing, Amounts structs) per `CCListingTemplate.sol` v0.3.8.
+  - `_executeSingleOrder`: Splits into three `ICCListing.BuyOrderUpdate` calls (Core, Pricing, Amounts structs), calls `ICCListing.ccUpdate`.
 - **Balance Checks**: Pre/post balance in `_checkTransferAmountToken` for `amountReceived`, `normalizedReceived`.
 - **Restrictions**: `onlyValidListing` (validates via `ICCAgent.isValidListing`), `nonReentrant`, tokenB must be ERC20.
 - **Events/Errors**: Reverts on invalid maker, recipient, amount, or transfer failure.
@@ -53,7 +54,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Internal Call Flow**:
   - `_handleOrderPrep`: Normalizes `inputAmount`.
   - `_checkTransferAmountNative`: Checks `msg.value == inputAmount`, performs pre/post balance checks, calls `ICCListing.transactNative`.
-  - `_executeSingleOrder`: Constructs `UpdateType` arrays (Core, Pricing, Amounts), calls `ccUpdate`.
+  - `_executeSingleOrder`: Constructs `ICCListing.BuyOrderUpdate` arrays (Core, Pricing, Amounts), calls `ccUpdate`.
 - **Balance Checks**: Pre/post balance in `_checkTransferAmountNative`.
 - **Restrictions**: `onlyValidListing`, `nonReentrant`, tokenB must be native.
 - **Events/Errors**: Reverts on incorrect ETH amount or no ETH received.
@@ -61,7 +62,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 ### createTokenSellOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
 - **Parameters**: Same as `createTokenBuyOrder`.
 - **Behavior**: Creates sell order for ERC20 tokenA, transfers tokens, calls `_executeSingleOrder`.
-- **Internal Call Flow**: Similar to `createTokenBuyOrder`, targets tokenA.
+- **Internal Call Flow**: Similar to `createTokenBuyOrder`, uses `ICCListing.SellOrderUpdate` for tokenA.
 - **Balance Checks**: Pre/post balance in `_checkTransferAmountToken`.
 - **Restrictions**: `onlyValidListing`, `nonReentrant`, tokenA must be ERC20.
 - **Events/Errors**: Reverts on invalid tokenA or transfer failure.
@@ -69,7 +70,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 ### createNativeSellOrder(address listingAddress, address recipientAddress, uint256 inputAmount, uint256 maxPrice, uint256 minPrice)
 - **Parameters**: Same as `createTokenBuyOrder`.
 - **Behavior**: Creates sell order for native ETH (tokenA), transfers ETH, calls `_executeSingleOrder`.
-- **Internal Call Flow**: Similar to `createNativeBuyOrder`, targets tokenA.
+- **Internal Call Flow**: Similar to `createNativeBuyOrder`, uses `ICCListing.SellOrderUpdate` for tokenA.
 - **Balance Checks**: Pre/post balance in `_checkTransferAmountNative`.
 - **Restrictions**: `onlyValidListing`, `nonReentrant`, tokenA must be native.
 - **Events/Errors**: Reverts on incorrect ETH amount or no ETH received.
@@ -78,7 +79,7 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Parameters**: `listingAddress` (listing contract), `orderIdentifier` (order ID), `isBuyOrder` (true for buy, false for sell).
 - **Behavior**: Cancels a single order, refunds pending amounts via `_clearOrderData`.
 - **Internal Call Flow**:
-  - `_clearOrderData`: Validates maker (`msg.sender`), fetches order details (`getBuyOrderCore`/`getSellOrderCore`, `getBuyOrderAmounts`/`getSellOrderAmounts`), refunds via `ICCListing.transactNative`/`transactToken`, updates status via `ccUpdate`.
+  - `_clearOrderData`: Validates maker (`msg.sender`), fetches order details (`getBuyOrderCore`/`getSellOrderCore`, `getBuyOrderAmounts`/`getSellOrderAmounts`), refunds via `ICCListing.transactNative`/`transactToken`, updates status to 0 (cancelled) via `ICCListing.ccUpdate` with `BuyOrderUpdate`/`SellOrderUpdate`.
 - **Restrictions**: `onlyValidListing`, `nonReentrant`, maker-only cancellation.
 - **Events/Errors**: Reverts if caller is not maker.
 
@@ -161,6 +162,6 @@ The `CCOrderRouter` contract, implemented in Solidity (`^0.8.2`), serves as a ro
 - **Gas Optimization**:
   - `maxIterations` for user-controlled loop limits.
   - Dynamic array resizing in `settleLongLiquid`/`settleShortLiquid`.
-  - Helper functions (`_prepPayoutContext`, `_checkLiquidityBalance`, `_transferNative`, `_transferToken`) reduce complexity.
+  - Helper functions (`_prepPayoutContext`, `_checkLiquidityBalance`, `_transferNative`, `_transferToken`, `_executeSingleOrder`, `_clearOrderData`) reduce complexity.
 - **Limitations**: No direct liquidity management or fee updates; `uniswapV2Router` settable but unused in current implementation.
 - **Balance Checks**: Pre/post balance checks in `_checkTransferAmountToken`, `_checkTransferAmountNative`, `_transferNative`, `_transferToken` ensure accurate `amountReceived` and `normalizedReceived` for tax-affected transfers.
