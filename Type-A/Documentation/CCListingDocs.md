@@ -3,9 +3,10 @@
 ## Overview
 The `CCListingTemplate` contract (Solidity ^0.8.2) enables decentralized trading for a token pair, leveraging Uniswap V2 for price discovery via `IERC20.balanceOf`. It manages buy/sell orders and normalized (1e18 precision) balances. Volumes are tracked in `_historicalData` during order settlement/cancellation, with auto-generated historical data if not provided by routers. Licensed under BSL 1.1 - Peng Protocol 2025, it uses explicit casting, avoids inline assembly, and ensures graceful degradation with try-catch for external calls.
 
-**Version**: 0.3.10 (Updated 2025-09-11)
+**Version**: 0.3.11 (Updated 2025-09-11)
 
 **Changes**:
+- v0.3.11: Updated `_processHistoricalUpdate` to use full `HistoricalUpdate` struct, removing `structId` and `value` parameters. Added `_updateHistoricalData` and `_updateDayStartIndex` helper functions for clarity. Modified `ccUpdate` to align with new `_processHistoricalUpdate` logic. Removed `uint2str` function as it’s no longer used in error messages.
 - v0.3.10: Modified `ccUpdate` to accept `BuyOrderUpdate[]`, `SellOrderUpdate[]`, `BalanceUpdate[]`, `HistoricalUpdate[]` instead of `updateType`, `updateSort`, `updateData`. Replaced `UpdateType` with new structs. Updated `_processBuyOrderUpdate` and `_processSellOrderUpdate` to use direct struct fields, removing `abi.decode` and `uint2str` in errors.
 - v0.3.9: Fixed `_processBuyOrderUpdate` and `_processSellOrderUpdate` to use `UpdateType` fields directly for Core updates, removing incorrect `abi.decode` of `uint2str(value)`.
 - v0.3.8: Corrected `_processBuyOrderUpdate` and `_processSellOrderUpdate` to update `_historicalData.xVolume` (tokenA) with `amountSent` for buy orders and `filled` for sell orders; `yVolume` (tokenB) with `filled` for buy orders and `amountSent` for sell orders. Volume changes computed as differences.
@@ -170,13 +171,13 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) enables decentralized trading
      - `structId=2` (Amounts): Updates `buyOrderAmounts[orderId]`, adds `filled` difference to `yVolume`, `amountSent` to `xVolume`.
   3. Processes sell updates via `_processSellOrderUpdate` (similar, `xVolume` for `filled`, `yVolume` for `amountSent`).
   4. Processes balance updates, sets `_balance`, emits `BalancesUpdated`.
-  5. Processes historical updates, pushes to `_historicalData`, updates `_dayStartIndices`.
+  5. Processes historical updates via `_processHistoricalUpdate`, pushes to `_historicalData`, updates `_dayStartIndices` if new day.
   6. Checks `orderStatus` for completeness, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.
   7. If `balanceUpdated`, fetches pair balances via `IUniswapV2Pair`, `IERC20.balanceOf`.
   8. Calls `globalizeUpdate`.
 - **State Changes**: `_balance`, `buyOrderCore`, `buyOrderPricing`, `buyOrderAmounts`, `sellOrderCore`, `sellOrderPricing`, `sellOrderAmounts`, `_pendingBuyOrders`, `_pendingSellOrders`, `makerPendingOrders`, `orderStatus`, `_historicalData`, `_dayStartIndices`.
 - **External Interactions**: `IUniswapV2Pair.token0`, `IERC20.balanceOf`, `ICCLiquidityTemplate.liquidityDetail`, `ITokenRegistry.initializeTokens`, `ICCGlobalizer.globalizeOrders`.
-- **Internal Call Tree**: `_processBuyOrderUpdate` (calls `removePendingOrder`, `_updateRegistry`), `_processSellOrderUpdate` (similar), `_updateRegistry` (`ITokenRegistry.initializeTokens`), `globalizeUpdate` (`ICCGlobalizer.globalizeOrders`), `_floorToMidnight`, `_isSameDay`, `removePendingOrder`.
+- **Internal Call Tree**: `_processBuyOrderUpdate` (calls `removePendingOrder`, `_updateRegistry`), `_processSellOrderUpdate` (similar), `_updateHistoricalData` (called by `_processHistoricalUpdate`), `_updateDayStartIndex` (called by `_processHistoricalUpdate`), `_updateRegistry` (`ITokenRegistry.initializeTokens`), `globalizeUpdate` (`ICCGlobalizer.globalizeOrders`), `_floorToMidnight`, `_isSameDay`, `removePendingOrder`.
 - **Errors**: Emits `UpdateFailed`, `OrderUpdateIncomplete`, `OrderUpdatesComplete`, `ExternalCallFailed`, `RegistryUpdateFailed`, `GlobalUpdateFailed`.
 
 ### View Functions
@@ -202,7 +203,7 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) enables decentralized trading
 - Checks if timestamps are on the same day. Used in `ccUpdate`.
 
 #### _floorToMidnight(uint256 timestamp) returns (uint256 midnight)
-- Rounds timestamp to midnight UTC. Used in `setTokens`, `ccUpdate`.
+- Rounds timestamp to midnight UTC. Used in `setTokens`, `ccUpdate`, `_updateHistoricalData`.
 
 #### _findVolumeChange(bool isA, uint256 startTime, uint256 maxIterations) returns (uint256 volumeChange)
 - Queries `_historicalData` for volume since `startTime`, using `maxIterations`.
@@ -219,8 +220,14 @@ The `CCListingTemplate` contract (Solidity ^0.8.2) enables decentralized trading
 #### _processSellOrderUpdate(SellOrderUpdate memory update)
 - Updates sell order structs, `_pendingSellOrders`, `makerPendingOrders`, `_historicalData` volumes (`xVolume` for `filled`, `yVolume` for `amountSent`). Calls `removePendingOrder`, `_updateRegistry`.
 
-#### _processHistoricalUpdate(uint8 structId, uint256 value) returns (bool historicalUpdated)
-- Creates `HistoricalData` entry. Calls `_floorToMidnight`.
+#### _updateHistoricalData(HistoricalUpdate memory update)
+- Pushes new `HistoricalData` entry with normalized balances if `xBalance` or `yBalance` is zero. Called by `_processHistoricalUpdate`.
+
+#### _updateDayStartIndex(uint256 timestamp)
+- Updates `_dayStartIndices` for new midnight timestamp. Called by `_processHistoricalUpdate`.
+
+#### _processHistoricalUpdate(HistoricalUpdate memory update) returns (bool historicalUpdated)
+- Validates `price`, calls `_updateHistoricalData`, `_updateDayStartIndex`. Used in `ccUpdate`.
 
 ## Parameters and Interactions
 - **Orders**: `ccUpdate` updates `_balance` (via `BalanceUpdate`), buy orders (input: tokenB `filled`, output: tokenA `amountSent`), sell orders (input: tokenA `filled`, output: tokenB `amountSent`). Tracked via `orderStatus`, emits `OrderUpdatesComplete` or `OrderUpdateIncomplete`.

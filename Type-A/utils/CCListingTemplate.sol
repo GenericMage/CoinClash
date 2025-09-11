@@ -3,28 +3,9 @@ pragma solidity ^0.8.2;
 
 // Version: 0.3.9
 // Changes:
+// - v0.3.11: Patched _processHistoricalUpdate to use HistoricalUpdate struct directly. Removed structId and value parameters, using full HistoricalUpdate struct fields. Added _updateHistoricalData and _updateDayStartIndex helper functions. Removed uint2str usage in error messages for simplicity.
 // - v0.3.10: Modified ccUpdate to accept UpdateTypeData[] instead of separate updateType, updateSort, updateData arrays. Replaced UpdateType struct with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs. Updated _processBuyOrderUpdate and _processSellOrderUpdate to handle new struct-based updates without decoding. Ensured direct struct field assignments. Removed uint2str usage in error messages for simplicity.
 // - v0.3.9: Patched _processBuyOrderUpdate and _processSellOrderUpdate to use UpdateType struct fields (addr, recipient, value as status) directly for Core struct updates, removing incorrect abi.decode of uint2str(value). No function signature changes required.
-// - v0.3.8: Corrected _processBuyOrderUpdate and _processSellOrderUpdate to properly update historical volumes: xVolume (tokenA) updated with amountSent for buy orders and filled for sell orders; yVolume (tokenB) updated with filled for buy orders and amountSent for sell orders. Volume changes computed as difference between new and old values.
-// - v0.3.7: Modified _processBuyOrderUpdate and _processSellOrderUpdate to update historical volumes only when 'filled' or 'amountSent' are provided. Computes volume change as difference between new and old values (e.g., new filled - old filled). Updates xVolume for principal token (buy: tokenB, sell: tokenA) when 'filled' is updated, and yVolume for settlement token (buy: tokenA, sell: tokenB) when 'amountSent' is updated.
-// -v0.3.6: Adjusted setRouters and resetRouters to use routerAddresses array for clarity and better resetting. 
-// - v0.3.5: Moved payout functionality to liquidity template .
-// - v0.3.4: Changed routers visibility. 
-// - v0.3.3: Added resetRouters function to fetch lister from agent, restrict to lister, and update routers array with agent's latest routers.
-// - v0.3.2: Added view functions for active payout arrays/mappings: activeLongPayoutsView, activeShortPayoutsView, and activeUserPayoutIDsView.
-// - v0.3.1: Added activeLongPayouts, activeShortPayouts, and activeUserPayoutIDs arrays to track active payout IDs.
-// - Modified PayoutUpdate struct to include orderId for explicit targeting.
-// - Updated ssUpdate to use orderId from PayoutUpdate, populate/depopulate active payout arrays, and retain original arrays.
-// - Integrated removePendingOrder for active payout arrays when status is 0 (cancelled) or 3 (filled).
-// - v0.3.0: Bumped version
-// - v0.2.25: Modified ccUpdate and helper functions (_processBuyOrderUpdate, _processSellOrderUpdate) to remove logic reducing pending relative to filled or assigning pending/filled based on order creation vs settlement. Routers now directly assign all fields except where data is unavailable or auto-generated (e.g., historical data timestamps, order status tracking).
-// - Retained auto-generated fields: orderStatus tracking, _historicalData timestamp, _dayStartIndices, and volume updates.
-// Changes:
-// - Renamed `update` function to `ccUpdate`.
-// - Split `UpdateType` params into `updateType`, `updateSort`, and `updateData` arrays.
-// - `updateData` handles direct struct assignments based on `updateSort` (structId and index).
-// - Other updates use separate `updateSort` and `updateData` arrays.
-// - Updated internal helper functions to handle new parameter structure.
 
 interface IERC20 {
     function decimals() external view returns (uint8);
@@ -466,105 +447,113 @@ contract CCListingTemplate {
         }
     }
 
-    // Processes historical data updates
-    function _processHistoricalUpdate(uint8 structId, uint256 value) internal returns (bool historicalUpdated) {
-        // Handles historical data updates
-        if (structId != 0) {
-            emit UpdateFailed(listingId, "Invalid historical structId");
-            return false;
+// Helper function to update historical data array
+function _updateHistoricalData(HistoricalUpdate memory update) internal {
+    // Pushes new historical data entry
+    uint256 balanceA = tokenA == address(0) ? address(this).balance : normalize(IERC20(tokenA).balanceOf(address(this)), decimalsA);
+    uint256 balanceB = tokenB == address(0) ? address(this).balance : normalize(IERC20(tokenB).balanceOf(address(this)), decimalsB);
+    _historicalData.push(HistoricalData({
+        price: update.price,
+        xBalance: update.xBalance > 0 ? update.xBalance : balanceA,
+        yBalance: update.yBalance > 0 ? update.yBalance : balanceB,
+        xVolume: update.xVolume,
+        yVolume: update.yVolume,
+        timestamp: update.timestamp > 0 ? update.timestamp : _floorToMidnight(block.timestamp)
+    }));
+}
+
+// Helper function to update day start index
+function _updateDayStartIndex(uint256 timestamp) internal {
+    // Updates day start index for new midnight timestamp
+    uint256 midnight = _floorToMidnight(timestamp);
+    if (_dayStartIndices[midnight] == 0) {
+        _dayStartIndices[midnight] = _historicalData.length - 1;
+    }
+}
+
+// Updated _processHistoricalUpdate to use full HistoricalUpdate struct
+function _processHistoricalUpdate(HistoricalUpdate memory update) internal returns (bool historicalUpdated) {
+    // Processes historical data update using struct fields directly
+    if (update.price == 0) {
+        emit UpdateFailed(listingId, "Invalid historical price");
+        return false;
+    }
+    _updateHistoricalData(update);
+    _updateDayStartIndex(update.timestamp);
+    return true;
+}
+
+// Updated ccUpdate function to align with new _processHistoricalUpdate
+function ccUpdate(
+    BuyOrderUpdate[] calldata buyUpdates,
+    SellOrderUpdate[] calldata sellUpdates,
+    BalanceUpdate[] calldata balanceUpdates,
+    HistoricalUpdate[] calldata historicalUpdates
+) external {
+    // Validates caller is a router
+    require(routers[msg.sender], "Not a router");
+
+    bool balanceUpdated = false;
+    // Process buy order updates
+    for (uint256 i = 0; i < buyUpdates.length; i++) {
+        _processBuyOrderUpdate(buyUpdates[i]);
+    }
+    // Process sell order updates
+    for (uint256 i = 0; i < sellUpdates.length; i++) {
+        _processSellOrderUpdate(sellUpdates[i]);
+    }
+    // Process balance updates
+    for (uint256 i = 0; i < balanceUpdates.length; i++) {
+        _balance.xBalance = balanceUpdates[i].xBalance;
+        _balance.yBalance = balanceUpdates[i].yBalance;
+        balanceUpdated = true;
+        emit BalancesUpdated(listingId, _balance.xBalance, _balance.yBalance);
+    }
+    // Process historical data updates
+    for (uint256 i = 0; i < historicalUpdates.length; i++) {
+        if (!_processHistoricalUpdate(historicalUpdates[i])) {
+            emit UpdateFailed(listingId, "Historical update failed");
         }
-        _historicalData.push(HistoricalData({
-            price: value,
-            xBalance: _balance.xBalance,
-            yBalance: _balance.yBalance,
-            xVolume: 0,
-            yVolume: 0,
-            timestamp: value > 0 ? block.timestamp : _floorToMidnight(block.timestamp)
-        }));
-        uint256 midnight = _floorToMidnight(block.timestamp);
-        if (_dayStartIndices[midnight] == 0) {
+        uint256 midnight = _floorToMidnight(historicalUpdates[i].timestamp);
+        if (!_isSameDay(_historicalData[_historicalData.length - 1].timestamp, historicalUpdates[i].timestamp)) {
             _dayStartIndices[midnight] = _historicalData.length - 1;
         }
-        return true;
     }
-    
-    // Modified ccUpdate function to use new structs
-function ccUpdate(
-        BuyOrderUpdate[] calldata buyUpdates,
-        SellOrderUpdate[] calldata sellUpdates,
-        BalanceUpdate[] calldata balanceUpdates,
-        HistoricalUpdate[] calldata historicalUpdates
-    ) external {
-        // Validates caller is a router
-        require(routers[msg.sender], "Not a router");
-
-        bool balanceUpdated = false;
-        // Process buy order updates
-        for (uint256 i = 0; i < buyUpdates.length; i++) {
-            _processBuyOrderUpdate(buyUpdates[i]);
+    // Process updated orders for completeness
+    for (uint256 i = 0; i < buyUpdates.length; i++) {
+        uint256 orderId = buyUpdates[i].orderId;
+        OrderStatus storage status = orderStatus[orderId];
+        bool isBuy = true;
+        if (status.hasCore && status.hasPricing && status.hasAmounts) {
+            emit OrderUpdatesComplete(listingId, orderId, isBuy);
+        } else {
+            string memory reason = !status.hasCore ? "Missing Core struct" :
+                                  !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
+            emit OrderUpdateIncomplete(listingId, orderId, reason);
         }
-        // Process sell order updates
-        for (uint256 i = 0; i < sellUpdates.length; i++) {
-            _processSellOrderUpdate(sellUpdates[i]);
-        }
-        // Process balance updates
-        for (uint256 i = 0; i < balanceUpdates.length; i++) {
-            _balance.xBalance = balanceUpdates[i].xBalance;
-            _balance.yBalance = balanceUpdates[i].yBalance;
-            balanceUpdated = true;
-            emit BalancesUpdated(listingId, _balance.xBalance, _balance.yBalance);
-        }
-        // Process historical data updates
-        for (uint256 i = 0; i < historicalUpdates.length; i++) {
-            HistoricalUpdate memory update = historicalUpdates[i];
-            uint256 midnight = _floorToMidnight(update.timestamp);
-            if (!_isSameDay(_historicalData[_historicalData.length - 1].timestamp, update.timestamp)) {
-                _dayStartIndices[midnight] = _historicalData.length;
-            }
-            _historicalData.push(HistoricalData({
-                price: update.price,
-                xBalance: update.xBalance,
-                yBalance: update.yBalance,
-                xVolume: update.xVolume,
-                yVolume: update.yVolume,
-                timestamp: update.timestamp
-            }));
-        }
-        // Process updated orders for completeness
-        for (uint256 i = 0; i < buyUpdates.length; i++) {
-            uint256 orderId = buyUpdates[i].orderId;
-            OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = true;
-            if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(listingId, orderId, isBuy);
-            } else {
-                string memory reason = !status.hasCore ? "Missing Core struct" :
-                                      !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
-                emit OrderUpdateIncomplete(listingId, orderId, reason);
-            }
-        }
-        for (uint256 i = 0; i < sellUpdates.length; i++) {
-            uint256 orderId = sellUpdates[i].orderId;
-            OrderStatus storage status = orderStatus[orderId];
-            bool isBuy = false;
-            if (status.hasCore && status.hasPricing && status.hasAmounts) {
-                emit OrderUpdatesComplete(listingId, orderId, isBuy);
-            } else {
-                string memory reason = !status.hasCore ? "Missing Core struct" :
-                                      !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
-                emit OrderUpdateIncomplete(listingId, orderId, reason);
-            }
-        }
-        if (balanceUpdated) {
-            try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
-                uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
-                uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
-            } catch {
-                emit UpdateFailed(listingId, "Failed to update price");
-            }
-        }
-        globalizeUpdate();
     }
+    for (uint256 i = 0; i < sellUpdates.length; i++) {
+        uint256 orderId = sellUpdates[i].orderId;
+        OrderStatus storage status = orderStatus[orderId];
+        bool isBuy = false;
+        if (status.hasCore && status.hasPricing && status.hasAmounts) {
+            emit OrderUpdatesComplete(listingId, orderId, isBuy);
+        } else {
+            string memory reason = !status.hasCore ? "Missing Core struct" :
+                                  !status.hasPricing ? "Missing Pricing struct" : "Missing Amounts struct";
+            emit OrderUpdateIncomplete(listingId, orderId, reason);
+        }
+    }
+    if (balanceUpdated) {
+        try IUniswapV2Pair(uniswapV2PairView).token0() returns (address) {
+            uint256 balanceA = normalize(IERC20(tokenA).balanceOf(uniswapV2PairView), decimalsA);
+            uint256 balanceB = normalize(IERC20(tokenB).balanceOf(uniswapV2PairView), decimalsB);
+        } catch {
+            emit UpdateFailed(listingId, "Failed to update price");
+        }
+    }
+    globalizeUpdate();
+}
 
     // Sets globalizer contract address, callable once
     function setGlobalizerAddress(address globalizerAddress_) external {
