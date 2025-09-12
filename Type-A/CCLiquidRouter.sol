@@ -1,8 +1,9 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 
- Version: 0.0.24
- Changes:
+ Version: 0.0.25
+Changes: 
+- v0.0.25: Updated settleBuyLiquid, settleSellLiquid, and _createHistoricalUpdate to use CCListingTemplate.sol v0.3.9 ccUpdate with BuyOrderUpdate, SellOrderUpdate, BalanceUpdate, HistoricalUpdate structs. Removed array-based updates.
  - v0.0.24: Modified settleBuyLiquid, settleSellLiquid in CCLiquidRouter.sol to call ccUpdate separately for each ICCListing.UpdateType struct.
  - v0.0.23: Modified settleBuyLiquid and settleSellLiquid to use makerPendingOrdersView for msg.sender's orders. I
  - v0.0.22: Refactored settleBuy/SellLiquid to resolve "Stack too deep" error. Moved historical data update logic to _createHistoricalUpdate helper function using HistoricalUpdateContext struct with ≤4 variables. 
@@ -54,88 +55,66 @@ function _createHistoricalUpdate(address listingAddress, ICCListing listingContr
         context.xVolume = historicalData.xVolume;
         context.yVolume = historicalData.yVolume;
     }
-    uint8[] memory updateType = new uint8[](1);
-    uint8[] memory updateSort = new uint8[](1);
-    uint256[] memory updateData = new uint256[](1);
-    updateType[0] = 3; // Historical update
-    updateSort[0] = 0; // Historical struct
-    updateData[0] = uint256(bytes32(abi.encode(
-        listingContract.prices(0),
-        context.xBalance,
-        context.yBalance,
-        context.xVolume,
-        context.yVolume,
-        block.timestamp
-    )));
-    try listingContract.ccUpdate(updateType, updateSort, updateData) {
+    ICCListing.HistoricalUpdate memory update = ICCListing.HistoricalUpdate({
+        price: listingContract.prices(0),
+        xBalance: context.xBalance,
+        yBalance: context.yBalance,
+        xVolume: context.xVolume,
+        yVolume: context.yVolume,
+        timestamp: block.timestamp
+    });
+    ICCListing.BuyOrderUpdate[] memory buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+    ICCListing.SellOrderUpdate[] memory sellUpdates = new ICCListing.SellOrderUpdate[](0);
+    ICCListing.BalanceUpdate[] memory balanceUpdates = new ICCListing.BalanceUpdate[](0);
+    ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](1);
+    historicalUpdates[0] = update;
+    try listingContract.ccUpdate(buyUpdates, sellUpdates, balanceUpdates, historicalUpdates) {
     } catch Error(string memory reason) {
         emit UpdateFailed(listingAddress, string(abi.encodePacked("Historical update failed: ", reason)));
     }
 }
 
 function settleBuyLiquid(address listingAddress, uint256 maxIterations, uint256 step) external onlyValidListing(listingAddress) nonReentrant {
-        // Settles buy orders for msg.sender, calling ccUpdate per struct
-        ICCListing listingContract = ICCListing(listingAddress);
-        uint256[] memory pendingOrders = listingContract.makerPendingOrdersView(msg.sender);
-        if (pendingOrders.length == 0 || step >= pendingOrders.length) {
-            emit NoPendingOrders(listingAddress, true);
-            return;
-        }
-        (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
-        if (yBalance == 0) {
-            emit InsufficientBalance(listingAddress, 1, yBalance);
-            return;
-        }
-        if (pendingOrders.length > 0) {
-            _createHistoricalUpdate(listingAddress, listingContract);
-        }
-        ICCListing.UpdateType[] memory updates = _processOrderBatch(listingAddress, maxIterations, true, step);
-        for (uint256 i = 0; i < updates.length; i++) {
-            uint8[] memory updateType = new uint8[](1);
-            uint8[] memory updateSort = new uint8[](1);
-            uint256[] memory updateData = new uint256[](1);
-            updateType[0] = updates[i].updateType;
-            updateSort[0] = updates[i].structId;
-            updateData[0] = updates[i].value;
-            try listingContract.ccUpdate(updateType, updateSort, updateData) {
-            } catch Error(string memory reason) {
-                emit UpdateFailed(listingAddress, string(abi.encodePacked("Update ", uint2str(i), ": ", reason)));
-            } catch {
-                emit UpdateFailed(listingAddress, string(abi.encodePacked("Update ", uint2str(i), ": Unknown error")));
-            }
-        }
+    // Settles buy orders for msg.sender
+    ICCListing listingContract = ICCListing(listingAddress);
+    uint256[] memory pendingOrders = listingContract.makerPendingOrdersView(msg.sender);
+    if (pendingOrders.length == 0 || step >= pendingOrders.length) {
+        emit NoPendingOrders(listingAddress, true);
+        return;
     }
+    (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
+    if (yBalance == 0) {
+        emit InsufficientBalance(listingAddress, 1, yBalance);
+        return;
+    }
+    if (pendingOrders.length > 0) {
+        _createHistoricalUpdate(listingAddress, listingContract);
+    }
+    bool success = _processOrderBatch(listingAddress, maxIterations, true, step);
+    if (!success) {
+        emit UpdateFailed(listingAddress, "Buy order batch processing failed");
+    }
+}
 
-    function settleSellLiquid(address listingAddress, uint256 maxIterations, uint256 step) external onlyValidListing(listingAddress) nonReentrant {
-        // Settles sell orders for msg.sender, calling ccUpdate per struct
-        ICCListing listingContract = ICCListing(listingAddress);
-        uint256[] memory pendingOrders = listingContract.makerPendingOrdersView(msg.sender);
-        if (pendingOrders.length == 0 || step >= pendingOrders.length) {
-            emit NoPendingOrders(listingAddress, false);
-            return;
-        }
-        (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
-        if (xBalance == 0) {
-            emit InsufficientBalance(listingAddress, 1, xBalance);
-            return;
-        }
-        if (pendingOrders.length > 0) {
-            _createHistoricalUpdate(listingAddress, listingContract);
-        }
-        ICCListing.UpdateType[] memory updates = _processOrderBatch(listingAddress, maxIterations, false, step);
-        for (uint256 i = 0; i < updates.length; i++) {
-            uint8[] memory updateType = new uint8[](1);
-            uint8[] memory updateSort = new uint8[](1);
-            uint256[] memory updateData = new uint256[](1);
-            updateType[0] = updates[i].updateType;
-            updateSort[0] = updates[i].structId;
-            updateData[0] = updates[i].value;
-            try listingContract.ccUpdate(updateType, updateSort, updateData) {
-            } catch Error(string memory reason) {
-                emit UpdateFailed(listingAddress, string(abi.encodePacked("Update ", uint2str(i), ": ", reason)));
-            } catch {
-                emit UpdateFailed(listingAddress, string(abi.encodePacked("Update ", uint2str(i), ": Unknown error")));
-            }
-        }
+function settleSellLiquid(address listingAddress, uint256 maxIterations, uint256 step) external onlyValidListing(listingAddress) nonReentrant {
+    // Settles sell orders for msg.sender
+    ICCListing listingContract = ICCListing(listingAddress);
+    uint256[] memory pendingOrders = listingContract.makerPendingOrdersView(msg.sender);
+    if (pendingOrders.length == 0 || step >= pendingOrders.length) {
+        emit NoPendingOrders(listingAddress, false);
+        return;
     }
+    (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
+    if (xBalance == 0) {
+        emit InsufficientBalance(listingAddress, 1, xBalance);
+        return;
+    }
+    if (pendingOrders.length > 0) {
+        _createHistoricalUpdate(listingAddress, listingContract);
+    }
+    bool success = _processOrderBatch(listingAddress, maxIterations, false, step);
+    if (!success) {
+        emit UpdateFailed(listingAddress, "Sell order batch processing failed");
+    }
+}
 }

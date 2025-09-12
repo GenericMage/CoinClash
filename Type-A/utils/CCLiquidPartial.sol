@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.0.37
- Changes:
+Version: 0.0.38
+Changes: 
+- v0.0.38: Updated _createBuyOrderUpdates, _createSellOrderUpdates, _prepBuyLiquidUpdates, and _prepSellLiquidUpdates to use CCListingTemplate.sol v0.3.9 ccUpdate with BuyOrderUpdate, SellOrderUpdate structs. Ensured compatibility with CCLiquidRouter.sol v0.0.25.
  - v0.0.37: Optimized CCLiquidPartial.sol by removing unused params and local variables, streamlined structs (removed unused fields in OrderContext, PrepOrderUpdateResult), consolidated repetitive logic in _prepareLiquidityUpdates and _executeOrderWithFees, reduced file size by ~6KB. Maintained compatibility with CCListingTemplate.sol v0.3.2, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.24.
  - v0.0.36: Updated _prepareLiquidityUpdates, _executeOrderWithFees, _processOrderBatch to call ccUpdate individually for each update type.
  - v0.0.35: Removed duplicate _computeFee, retained _computeFee (v0.0.34) for stack efficiency. Updated _prepareLiquidityUpdates to use new _computeFee. Maintained fee transfer, correct liquidity updates.
@@ -224,25 +225,63 @@ contract CCLiquidPartial is CCMainPartial {
         updateData = normalizedReceived;
     }
 
-    function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) private view returns (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) {
-        updateType = new uint8[](3);
-        updateSort = new uint8[](3);
-        updateData = new uint256[](3);
-        uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2;
-        (updateType[0], updateSort[0], updateData[0]) = _prepareCoreUpdate(orderIdentifier, context.recipient, true, newStatus);
-        (updateType[1], updateSort[1], updateData[1]) = _prepareAmountsUpdate(orderIdentifier, context.recipient, true, context.preTransferWithdrawn, context.amountSent);
-        (updateType[2], updateSort[2], updateData[2]) = _prepareBalanceUpdate(context.normalizedReceived, true);
-    }
+    function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) private view returns (ICCListing.BuyOrderUpdate[] memory updates) {
+    updates = new ICCListing.BuyOrderUpdate[](2);
+    uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2;
+    updates[0] = ICCListing.BuyOrderUpdate({
+        structId: 0,
+        orderId: orderIdentifier,
+        makerAddress: context.makerAddress,
+        recipientAddress: context.recipient,
+        status: newStatus,
+        maxPrice: 0,
+        minPrice: 0,
+        pending: 0,
+        filled: 0,
+        amountSent: 0
+    });
+    updates[1] = ICCListing.BuyOrderUpdate({
+        structId: 2,
+        orderId: orderIdentifier,
+        makerAddress: address(0),
+        recipientAddress: address(0),
+        status: 0,
+        maxPrice: 0,
+        minPrice: 0,
+        pending: context.preTransferWithdrawn >= pendingAmount ? 0 : pendingAmount - context.preTransferWithdrawn,
+        filled: context.preTransferWithdrawn,
+        amountSent: context.amountSent
+    });
+}
 
-    function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) private view returns (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) {
-        updateType = new uint8[](3);
-        updateSort = new uint8[](3);
-        updateData = new uint256[](3);
-        uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2;
-        (updateType[0], updateSort[0], updateData[0]) = _prepareCoreUpdate(orderIdentifier, context.recipient, false, newStatus);
-        (updateType[1], updateSort[1], updateData[1]) = _prepareAmountsUpdate(orderIdentifier, context.recipient, false, context.preTransferWithdrawn, context.amountSent);
-        (updateType[2], updateSort[2], updateData[2]) = _prepareBalanceUpdate(context.normalizedReceived, false);
-    }
+function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) private view returns (ICCListing.SellOrderUpdate[] memory updates) {
+    updates = new ICCListing.SellOrderUpdate[](2);
+    uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2;
+    updates[0] = ICCListing.SellOrderUpdate({
+        structId: 0,
+        orderId: orderIdentifier,
+        makerAddress: context.makerAddress,
+        recipientAddress: context.recipient,
+        status: newStatus,
+        maxPrice: 0,
+        minPrice: 0,
+        pending: 0,
+        filled: 0,
+        amountSent: 0
+    });
+    updates[1] = ICCListing.SellOrderUpdate({
+        structId: 2,
+        orderId: orderIdentifier,
+        makerAddress: address(0),
+        recipientAddress: address(0),
+        status: 0,
+        maxPrice: 0,
+        minPrice: 0,
+        pending: context.preTransferWithdrawn >= pendingAmount ? 0 : pendingAmount - context.preTransferWithdrawn,
+        filled: context.preTransferWithdrawn,
+        amountSent: context.amountSent
+    });
+}
 
     function _prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal returns (PrepOrderUpdateResult memory result) {
         ICCListing listingContract = ICCListing(listingAddress);
@@ -298,95 +337,121 @@ contract CCLiquidPartial is CCMainPartial {
         }
     }
 
-    function _prepBuyLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) internal returns (ICCListing.UpdateType[] memory) {
-        if (!_checkPricing(address(context.listingContract), orderIdentifier, true, pendingAmount)) {
-            (uint256 maxPrice, uint256 minPrice) = context.listingContract.getBuyOrderPricing(orderIdentifier);
-            (uint256 impactPrice,) = _computeSwapImpact(address(context.listingContract), pendingAmount, true);
-            emit PriceOutOfBounds(address(context.listingContract), orderIdentifier, impactPrice, maxPrice, minPrice);
-            return new ICCListing.UpdateType[](0);
-        }
-        (uint256 amountOut, , ) = _prepareLiquidityTransaction(address(context.listingContract), pendingAmount, true);
-        if (uniswapV2Router == address(0)) {
-            emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
-            return new ICCListing.UpdateType[](0);
-        }
-        PrepOrderUpdateResult memory result = _prepBuyOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount);
-        if (result.normalizedReceived == 0) {
-            emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received");
-            return new ICCListing.UpdateType[](0);
-        }
-        BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
-            makerAddress: result.makerAddress,
-            recipient: result.recipientAddress,
-            status: 0,
-            amountReceived: result.amountReceived,
-            normalizedReceived: result.normalizedReceived,
-            amountSent: result.amountSent,
-            preTransferWithdrawn: result.preTransferWithdrawn
-        });
-        (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) = _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-        try context.listingContract.ccUpdate(updateType, updateSort, updateData) {} catch Error(string memory reason) {
-            emit UpdateFailed(address(context.listingContract), reason);
-        }
-        return new ICCListing.UpdateType[](0);
+    function _prepBuyLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) private returns (bool success) {
+    // Prepares and executes buy order updates, returns success status
+    if (uniswapV2Router == address(0)) {
+        emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
+        return false;
     }
+    PrepOrderUpdateResult memory result = _prepBuyOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount);
+    if (result.normalizedReceived == 0) {
+        emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received");
+        return false;
+    }
+    BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
+        makerAddress: result.makerAddress,
+        recipient: result.recipientAddress,
+        status: 0,
+        amountReceived: result.amountReceived,
+        normalizedReceived: result.normalizedReceived,
+        amountSent: result.amountSent,
+        preTransferWithdrawn: result.preTransferWithdrawn
+    });
+    ICCListing.BuyOrderUpdate[] memory buyUpdates = _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    ICCListing.SellOrderUpdate[] memory sellUpdates = new ICCListing.SellOrderUpdate[](0);
+    ICCListing.BalanceUpdate[] memory balanceUpdates = new ICCListing.BalanceUpdate[](0);
+    ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](0);
+    try context.listingContract.ccUpdate(buyUpdates, sellUpdates, balanceUpdates, historicalUpdates) {
+        success = true;
+    } catch Error(string memory reason) {
+        emit UpdateFailed(address(context.listingContract), reason);
+        success = false;
+    }
+}
 
-    function _prepSellLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) internal returns (ICCListing.UpdateType[] memory) {
-        if (!_checkPricing(address(context.listingContract), orderIdentifier, false, pendingAmount)) {
-            (uint256 maxPrice, uint256 minPrice) = context.listingContract.getSellOrderPricing(orderIdentifier);
-            (uint256 impactPrice,) = _computeSwapImpact(address(context.listingContract), pendingAmount, false);
-            emit PriceOutOfBounds(address(context.listingContract), orderIdentifier, impactPrice, maxPrice, minPrice);
-            return new ICCListing.UpdateType[](0);
-        }
-        (uint256 amountOut, , ) = _prepareLiquidityTransaction(address(context.listingContract), pendingAmount, false);
-        if (uniswapV2Router == address(0)) {
-            emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
-            return new ICCListing.UpdateType[](0);
-        }
-        PrepOrderUpdateResult memory result = _prepSellOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount);
-        if (result.normalizedReceived == 0) {
-            emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received");
-            return new ICCListing.UpdateType[](0);
-        }
-        SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
-            makerAddress: result.makerAddress,
-            recipient: result.recipientAddress,
-            status: 0,
-            amountReceived: result.amountReceived,
-            normalizedReceived: result.normalizedReceived,
-            amountSent: result.amountSent,
-            preTransferWithdrawn: result.preTransferWithdrawn
-        });
-        (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) = _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
-        try context.listingContract.ccUpdate(updateType, updateSort, updateData) {} catch Error(string memory reason) {
-            emit UpdateFailed(address(context.listingContract), reason);
-        }
-        return new ICCListing.UpdateType[](0);
+function _prepSellLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) private returns (bool success) {
+    // Prepares and executes sell order updates, returns success status
+    if (uniswapV2Router == address(0)) {
+        emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
+        return false;
     }
+    PrepOrderUpdateResult memory result = _prepSellOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount);
+    if (result.normalizedReceived == 0) {
+        emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received");
+        return false;
+    }
+    SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
+        makerAddress: result.makerAddress,
+        recipient: result.recipientAddress,
+        status: 0,
+        amountReceived: result.amountReceived,
+        normalizedReceived: result.normalizedReceived,
+        amountSent: result.amountSent,
+        preTransferWithdrawn: result.preTransferWithdrawn
+    });
+    ICCListing.SellOrderUpdate[] memory sellUpdates = _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
+    ICCListing.BuyOrderUpdate[] memory buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+    ICCListing.BalanceUpdate[] memory balanceUpdates = new ICCListing.BalanceUpdate[](0);
+    ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](0);
+    try context.listingContract.ccUpdate(buyUpdates, sellUpdates, balanceUpdates, historicalUpdates) {
+        success = true;
+    } catch Error(string memory reason) {
+        emit UpdateFailed(address(context.listingContract), reason);
+        success = false;
+    }
+}
 
-    function executeSingleBuyLiquid(address listingAddress, uint256 orderIdentifier) internal returns (ICCListing.UpdateType[] memory) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pendingAmount,,) = listingContract.getBuyOrderAmounts(orderIdentifier);
-        if (pendingAmount == 0) return new ICCListing.UpdateType[](0);
-        OrderContext memory context = OrderContext({
-            listingContract: listingContract,
-            tokenIn: listingContract.tokenB(),
-            tokenOut: listingContract.tokenA()
-        });
-        return _prepBuyLiquidUpdates(context, orderIdentifier, pendingAmount);
+    function executeSingleBuyLiquid(address listingAddress, uint256 orderIdentifier) internal returns (bool success) {
+    // Executes single buy order update, returns success status
+    ICCListing listingContract = ICCListing(listingAddress);
+    (address maker, address recipient, uint8 status) = listingContract.getBuyOrderCore(orderIdentifier);
+    (uint256 pending,,) = listingContract.getBuyOrderAmounts(orderIdentifier);
+    BuyOrderUpdateContext memory context = BuyOrderUpdateContext({
+        makerAddress: maker,
+        recipient: recipient,
+        status: status,
+        amountReceived: 0,
+        normalizedReceived: 0,
+        amountSent: 0,
+        preTransferWithdrawn: 0
+    });
+    ICCListing.BuyOrderUpdate[] memory updates = _createBuyOrderUpdates(orderIdentifier, context, pending);
+    ICCListing.SellOrderUpdate[] memory sellUpdates = new ICCListing.SellOrderUpdate[](0);
+    ICCListing.BalanceUpdate[] memory balanceUpdates = new ICCListing.BalanceUpdate[](0);
+    ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](0);
+    try listingContract.ccUpdate(updates, sellUpdates, balanceUpdates, historicalUpdates) {
+        success = true;
+    } catch Error(string memory reason) {
+        emit UpdateFailed(listingAddress, string(abi.encodePacked("Buy order update failed: ", reason)));
+        success = false;
     }
+}
 
-    function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier) internal returns (ICCListing.UpdateType[] memory) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pendingAmount,,) = listingContract.getSellOrderAmounts(orderIdentifier);
-        if (pendingAmount == 0) return new ICCListing.UpdateType[](0);
-        OrderContext memory context = OrderContext({
-            listingContract: listingContract,
-            tokenIn: listingContract.tokenA(),
-            tokenOut: listingContract.tokenB()
-        });
-        return _prepSellLiquidUpdates(context, orderIdentifier, pendingAmount);
+function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier) internal returns (bool success) {
+    // Executes single sell order update, returns success status
+    ICCListing listingContract = ICCListing(listingAddress);
+    (address maker, address recipient, uint8 status) = listingContract.getSellOrderCore(orderIdentifier);
+    (uint256 pending,,) = listingContract.getSellOrderAmounts(orderIdentifier);
+    SellOrderUpdateContext memory context = SellOrderUpdateContext({
+        makerAddress: maker,
+        recipient: recipient,
+        status: status,
+        amountReceived: 0,
+        normalizedReceived: 0,
+        amountSent: 0,
+        preTransferWithdrawn: 0
+    });
+    ICCListing.SellOrderUpdate[] memory updates = _createSellOrderUpdates(orderIdentifier, context, pending);
+    ICCListing.BuyOrderUpdate[] memory buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+    ICCListing.BalanceUpdate[] memory balanceUpdates = new ICCListing.BalanceUpdate[](0);
+    ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](0);
+    try listingContract.ccUpdate(buyUpdates, updates, balanceUpdates, historicalUpdates) {
+        success = true;
+    } catch Error(string memory reason) {
+        emit UpdateFailed(listingAddress, string(abi.encodePacked("Sell order update failed: ", reason)));
+        success = false;
     }
+}
 
     function _collectOrderIdentifiers(address listingAddress, uint256 maxIterations, bool isBuyOrder, uint256 step) internal view returns (uint256[] memory orderIdentifiers, uint256 iterationCount) {
         ICCListing listingContract = ICCListing(listingAddress);
@@ -517,41 +582,56 @@ contract CCLiquidPartial is CCMainPartial {
         }
     }
 
-    function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount, FeeContext memory feeContext) private returns (ICCListing.UpdateType[] memory) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        emit FeeDeducted(listingAddress, orderIdentifier, isBuyOrder, feeContext.feeAmount, feeContext.netAmount);
-        LiquidityUpdateContext memory liquidityContext = _computeSwapAmount(listingAddress, feeContext, isBuyOrder);
-        _prepareLiquidityUpdates(listingAddress, orderIdentifier, liquidityContext);
-        return isBuyOrder
-            ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
-            : executeSingleSellLiquid(listingAddress, orderIdentifier);
-    }
+    function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount, FeeContext memory feeContext) private returns (bool success) {
+    // Executes order with fees, returns success status
+    ICCListing listingContract = ICCListing(listingAddress);
+    emit FeeDeducted(listingAddress, orderIdentifier, isBuyOrder, feeContext.feeAmount, feeContext.netAmount);
+    LiquidityUpdateContext memory liquidityContext = _computeSwapAmount(listingAddress, feeContext, isBuyOrder);
+    _prepareLiquidityUpdates(listingAddress, orderIdentifier, liquidityContext);
+    success = isBuyOrder
+        ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
+        : executeSingleSellLiquid(listingAddress, orderIdentifier);
+}
 
-    function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (ICCListing.UpdateType[] memory) {
-        OrderProcessingContext memory context = _validateOrderPricing(listingAddress, orderIdentifier, isBuyOrder, pendingAmount);
-        if (context.impactPrice == 0) return new ICCListing.UpdateType[](0);
-        FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
-        return _executeOrderWithFees(listingAddress, orderIdentifier, isBuyOrder, pendingAmount, feeContext);
-    }
+    function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (bool success) {
+    // Processes single order, returns success status
+    OrderProcessingContext memory context = _validateOrderPricing(listingAddress, orderIdentifier, isBuyOrder, pendingAmount);
+    if (context.impactPrice == 0) return false;
+    FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
+    success = _executeOrderWithFees(listingAddress, orderIdentifier, isBuyOrder, pendingAmount, feeContext);
+}
 
-    function _processOrderBatch(address listingAddress, uint256 maxIterations, bool isBuyOrder, uint256 step) internal returns (ICCListing.UpdateType[] memory) {
-        (uint256[] memory orderIdentifiers, uint256 iterationCount) = _collectOrderIdentifiers(listingAddress, maxIterations, isBuyOrder, step);
-        for (uint256 i = 0; i < iterationCount; i++) {
-            (uint256 pendingAmount,,) = isBuyOrder
-                ? ICCListing(listingAddress).getBuyOrderAmounts(orderIdentifiers[i])
-                : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
-            if (pendingAmount == 0) continue;
-            _processSingleOrder(listingAddress, orderIdentifiers[i], isBuyOrder, pendingAmount);
+    function _processOrderBatch(address listingAddress, uint256 maxIterations, bool isBuyOrder, uint256 step) internal returns (bool success) {
+    // Processes a batch of orders, returns true if any order is processed successfully
+    (uint256[] memory orderIdentifiers, uint256 iterationCount) = _collectOrderIdentifiers(listingAddress, maxIterations, isBuyOrder, step);
+    success = false;
+    for (uint256 i = 0; i < iterationCount; i++) {
+        (uint256 pendingAmount,,) = isBuyOrder
+            ? ICCListing(listingAddress).getBuyOrderAmounts(orderIdentifiers[i])
+            : ICCListing(listingAddress).getSellOrderAmounts(orderIdentifiers[i]);
+        if (pendingAmount == 0) continue;
+        if (_processSingleOrder(listingAddress, orderIdentifiers[i], isBuyOrder, pendingAmount)) {
+            success = true;
         }
-        return new ICCListing.UpdateType[](0);
     }
+}
 
-    function _finalizeUpdates(ICCListing.UpdateType[] memory tempUpdates, uint256 updateIndex) internal pure returns (ICCListing.UpdateType[] memory finalUpdates) {
-        finalUpdates = new ICCListing.UpdateType[](updateIndex);
+    function _finalizeUpdates(bool isBuyOrder, ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates, uint256 updateIndex) internal pure returns (ICCListing.BuyOrderUpdate[] memory finalBuyUpdates, ICCListing.SellOrderUpdate[] memory finalSellUpdates) {
+    // Finalizes updates for buy or sell orders
+    if (isBuyOrder) {
+        finalBuyUpdates = new ICCListing.BuyOrderUpdate[](updateIndex);
         for (uint256 i = 0; i < updateIndex; i++) {
-            finalUpdates[i] = tempUpdates[i];
+            finalBuyUpdates[i] = buyUpdates[i];
         }
+        finalSellUpdates = new ICCListing.SellOrderUpdate[](0);
+    } else {
+        finalSellUpdates = new ICCListing.SellOrderUpdate[](updateIndex);
+        for (uint256 i = 0; i < updateIndex; i++) {
+            finalSellUpdates[i] = sellUpdates[i];
+        }
+        finalBuyUpdates = new ICCListing.BuyOrderUpdate[](0);
     }
+}
 
     function uint2str(uint256 _i) internal pure returns (string memory str) {
         if (_i == 0) return "0";
