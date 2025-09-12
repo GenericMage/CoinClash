@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.5
+// Version: 0.1.6
 // Changes:
+// - v0.1.6: Modified _applyOrderUpdate and _prepareUpdateData to use ICCListing.BuyOrderUpdate and SellOrderUpdate structs directly, removing encoding/decoding. Updated OrderProcessContext to hold BuyOrderUpdate[] or SellOrderUpdate[]. Fixed return types for _processBuyOrder and _processSellOrder.
 // - v0.1.5: Modified _applyOrderUpdate to call ccUpdate for each UpdateType struct individually, ensuring compliance with requirement for separate updates.
 // - v0.1.4: Refactored _processBuyOrder and _processSellOrder to resolve stack-too-deep error. Split into helper functions (_validateOrderParams, _computeSwapAmount, _executeOrderSwap, _prepareUpdateData, _applyOrderUpdate) based on param groups (validation, swap calculation, execution, update prep, update application). Each helper handles at most 4 variables using OrderProcessContext struct. Ensured incremental updates to Core, Pricing, and Amounts structs via listingContract.ccUpdate.
 // - v0.1.3: Added events NonCriticalPriceOutOfBounds, NonCriticalNoPendingOrder, NonCriticalZeroSwapAmount to log non-critical issues. Emitted in _processBuyOrder and _processSellOrder for price out of bounds, no pending orders, and zero swap amount cases to ensure non-reverting behavior with logging. Compatible with CCListingTemplate.sol v0.2.26 and CCUniPartial.sol v0.1.5.
@@ -29,20 +30,21 @@ contract CCSettlementPartial is CCUniPartial {
     }
     
     struct OrderProcessContext {
-    uint256 orderId;
-    uint256 pendingAmount;
-    uint256 filled;
-    uint256 amountSent;
-    address makerAddress;
-    address recipientAddress;
-    uint8 status;
-    uint256 maxPrice;
-    uint256 minPrice;
-    uint256 currentPrice;
-    uint256 maxAmountIn;
-    uint256 swapAmount;
-    ICCListing.UpdateType[] updates;
-}
+        uint256 orderId;
+        uint256 pendingAmount;
+        uint256 filled;
+        uint256 amountSent;
+        address makerAddress;
+        address recipientAddress;
+        uint8 status;
+        uint256 maxPrice;
+        uint256 minPrice;
+        uint256 currentPrice;
+        uint256 maxAmountIn;
+        uint256 swapAmount;
+        ICCListing.BuyOrderUpdate[] buyUpdates; // Updated for buy orders
+        ICCListing.SellOrderUpdate[] sellUpdates; // Updated for sell orders
+    }
     
     event NonCriticalPriceOutOfBounds(address indexed listingAddress, uint256 indexed orderIdentifier, bool isBuyOrder, uint256 currentPrice, uint256 minPrice, uint256 maxPrice);
     event NonCriticalNoPendingOrder(address indexed listingAddress, uint256 indexed orderIdentifier, bool isBuyOrder);
@@ -250,114 +252,154 @@ function _computeSwapAmount(
     return context;
 }
 
-// Helper function to execute swap
-function _executeOrderSwap(
-    address listingAddress,
-    bool isBuyOrder,
-    OrderProcessContext memory context
-) internal returns (OrderProcessContext memory) {
-    // Executes swap via Uniswap V2
-    if (context.swapAmount == 0) {
+    // Updated _executeOrderSwap to use buyUpdates or sellUpdates
+    function _executeOrderSwap(
+        address listingAddress,
+        bool isBuyOrder,
+        OrderProcessContext memory context
+    ) internal returns (OrderProcessContext memory) {
+        // Executes swap via Uniswap V2; updates are prepared in CCUniPartial.sol, refined here, and applied once in CCSettlementRouter.sol via ccUpdate
+        if (context.swapAmount == 0) {
+            return context;
+        }
+        if (isBuyOrder) {
+            context.buyUpdates = _executePartialBuySwap(listingAddress, context.orderId, context.swapAmount, context.pendingAmount);
+        } else {
+            context.sellUpdates = _executePartialSellSwap(listingAddress, context.orderId, context.swapAmount, context.pendingAmount);
+        }
         return context;
     }
-    context.updates = isBuyOrder
-        ? _executePartialBuySwap(listingAddress, context.orderId, context.swapAmount, context.pendingAmount)
-        : _executePartialSellSwap(listingAddress, context.orderId, context.swapAmount, context.pendingAmount);
-    return context;
-}
 
-// Helper function to prepare update data
-function _prepareUpdateData(
-    OrderProcessContext memory context
-) internal pure returns (uint8[] memory updateType, uint8[] memory updateSort, uint256[] memory updateData) {
-    // Prepares data for ccUpdate
-    if (context.updates.length == 0) {
-        return (new uint8[](0), new uint8[](0), new uint256[](0));
-    }
-    updateType = new uint8[](context.updates.length);
-    updateSort = new uint8[](context.updates.length);
-    updateData = new uint256[](context.updates.length);
-    for (uint256 i = 0; i < context.updates.length; i++) {
-        updateType[i] = context.updates[i].updateType;
-        updateSort[i] = context.updates[i].structId;
-        if (context.updates[i].structId == 0) {
-            updateData[i] = uint256(bytes32(abi.encode(context.updates[i].addr, context.updates[i].recipient, uint8(context.updates[i].value))));
-        } else if (context.updates[i].structId == 1) {
-            updateData[i] = uint256(bytes32(abi.encode(context.updates[i].maxPrice, context.updates[i].minPrice)));
-        } else if (context.updates[i].structId == 2) {
-            updateData[i] = uint256(bytes32(abi.encode(context.updates[i].value, context.filled + context.updates[i].value, context.updates[i].amountSent)));
+
+    // Updated _prepareUpdateData to create new structs directly
+    function _prepareUpdateData(
+        OrderProcessContext memory context,
+        bool isBuyOrder
+    ) internal pure returns (
+        ICCListing.BuyOrderUpdate[] memory buyUpdates,
+        ICCListing.SellOrderUpdate[] memory sellUpdates
+    ) {
+        // Prepares BuyOrderUpdate or SellOrderUpdate structs without encoding
+        if (isBuyOrder) {
+            buyUpdates = new ICCListing.BuyOrderUpdate[](2);
+            buyUpdates[0] = ICCListing.BuyOrderUpdate({
+                structId: 2, // Amounts
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: context.status,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: context.swapAmount,
+                filled: context.filled + context.swapAmount,
+                amountSent: context.amountSent
+            });
+            buyUpdates[1] = ICCListing.BuyOrderUpdate({
+                structId: 0, // Core
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: 0,
+                filled: 0,
+                amountSent: 0
+            });
+            sellUpdates = new ICCListing.SellOrderUpdate[](0);
+        } else {
+            sellUpdates = new ICCListing.SellOrderUpdate[](2);
+            sellUpdates[0] = ICCListing.SellOrderUpdate({
+                structId: 2, // Amounts
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: context.status,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: context.swapAmount,
+                filled: context.filled + context.swapAmount,
+                amountSent: context.amountSent
+            });
+            sellUpdates[1] = ICCListing.SellOrderUpdate({
+                structId: 0, // Core
+                orderId: context.orderId,
+                makerAddress: context.makerAddress,
+                recipientAddress: context.recipientAddress,
+                status: context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2,
+                maxPrice: 0,
+                minPrice: 0,
+                pending: 0,
+                filled: 0,
+                amountSent: 0
+            });
+            buyUpdates = new ICCListing.BuyOrderUpdate[](0);
         }
     }
-}
 
-    // Helper function to apply updates for each struct individually
+    // Updated _applyOrderUpdate to use new structs
     function _applyOrderUpdate(
         address listingAddress,
         ICCListing listingContract,
-        OrderProcessContext memory context
-    ) internal returns (ICCListing.UpdateType[] memory) {
-        // Applies updates via ccUpdate, one struct at a time
-        if (context.updates.length == 0) {
-            return new ICCListing.UpdateType[](0);
+        OrderProcessContext memory context,
+        bool isBuyOrder
+    ) internal returns (
+        ICCListing.BuyOrderUpdate[] memory buyUpdates,
+        ICCListing.SellOrderUpdate[] memory sellUpdates
+    ) {
+        // Applies updates using BuyOrderUpdate or SellOrderUpdate structs
+        (buyUpdates, sellUpdates) = _prepareUpdateData(context, isBuyOrder);
+        if (buyUpdates.length == 0 && sellUpdates.length == 0) {
+            return (buyUpdates, sellUpdates);
         }
-        for (uint256 i = 0; i < context.updates.length; i++) {
-            uint8[] memory updateType = new uint8[](1);
-            uint8[] memory updateSort = new uint8[](1);
-            uint256[] memory updateData = new uint256[](1);
-            updateType[0] = context.updates[i].updateType;
-            updateSort[0] = context.updates[i].structId;
-            if (context.updates[i].structId == 0) {
-                updateData[0] = uint256(bytes32(abi.encode(context.updates[i].addr, context.updates[i].recipient, uint8(context.updates[i].value))));
-            } else if (context.updates[i].structId == 1) {
-                updateData[0] = uint256(bytes32(abi.encode(context.updates[i].maxPrice, context.updates[i].minPrice)));
-            } else if (context.updates[i].structId == 2) {
-                updateData[0] = uint256(bytes32(abi.encode(context.updates[i].value, context.filled + context.updates[i].value, context.updates[i].amountSent)));
-            }
-            try listingContract.ccUpdate(updateType, updateSort, updateData) {
-                // Success
-                context.updates[i].addr = context.makerAddress;
-                context.updates[i].recipient = context.recipientAddress;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("ccUpdate failed for order ", uint2str(context.orderId), ": ", reason)));
-            }
+        try listingContract.ccUpdate(
+            isBuyOrder ? buyUpdates : new ICCListing.BuyOrderUpdate[](0),
+            isBuyOrder ? new ICCListing.SellOrderUpdate[](0) : sellUpdates,
+            new ICCListing.BalanceUpdate[](0),
+            new ICCListing.HistoricalUpdate[](0)
+        ) {
+            return (buyUpdates, sellUpdates);
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("ccUpdate failed for order ", uint2str(context.orderId), ": ", reason)));
         }
-        return context.updates;
     }
 
-// Updated _processBuyOrder function
-function _processBuyOrder(
-    address listingAddress,
-    uint256 orderIdentifier,
-    ICCListing listingContract
-) internal returns (ICCListing.UpdateType[] memory updates) {
-    // Processes a single buy order using Uniswap V2 swap
-    if (uniswapV2Router == address(0)) {
-        revert(string(abi.encodePacked("Missing Uniswap V2 router for buy order ", uint2str(orderIdentifier))));
+    // Updated _processBuyOrder to return BuyOrderUpdate[]
+    function _processBuyOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        ICCListing listingContract
+    ) internal returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
+        if (uniswapV2Router == address(0)) {
+            revert(string(abi.encodePacked("Missing Uniswap V2 router for buy order ", uint2str(orderIdentifier))));
+        }
+        OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
+        context = _computeSwapAmount(listingAddress, true, context);
+        context = _executeOrderSwap(listingAddress, true, context);
+        (buyUpdates, ) = _applyOrderUpdate(listingAddress, listingContract, context, true);
+        return buyUpdates;
     }
-    OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
-    context = _computeSwapAmount(listingAddress, true, context);
-    context = _executeOrderSwap(listingAddress, true, context);
-    return _applyOrderUpdate(listingAddress, listingContract, context);
-}
 
-// Updated _processSellOrder function
-function _processSellOrder(
-    address listingAddress,
-    uint256 orderIdentifier,
-    ICCListing listingContract
-) internal returns (ICCListing.UpdateType[] memory updates) {
-    // Processes a single sell order using Uniswap V2 swap
-    if (uniswapV2Router == address(0)) {
-        revert(string(abi.encodePacked("Missing Uniswap V2 router for sell order ", uint2str(orderIdentifier))));
+    // Updated _processSellOrder to return SellOrderUpdate[]
+    function _processSellOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        ICCListing listingContract
+    ) internal returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
+
+        if (uniswapV2Router == address(0)) {
+            revert(string(abi.encodePacked("Missing Uniswap V2 router for sell order ", uint2str(orderIdentifier))));
+        }
+        OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
+        context = _computeSwapAmount(listingAddress, false, context);
+        context = _executeOrderSwap(listingAddress, false, context);
+        (, sellUpdates) = _applyOrderUpdate(listingAddress, listingContract, context, false);
+        return sellUpdates;
     }
-    OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
-    context = _computeSwapAmount(listingAddress, false, context);
-    context = _executeOrderSwap(listingAddress, false, context);
-    return _applyOrderUpdate(listingAddress, listingContract, context);
-}
-
-    function uint2str(uint256 _i) internal pure returns (string memory str) {
+    
         // Utility function to convert uint to string for error messages
+    function uint2str(uint256 _i) internal pure returns (string memory str) {
+        // Converts uint256 to string for error message formatting
         if (_i == 0) return "0";
         uint256 j = _i;
         uint256 length;
