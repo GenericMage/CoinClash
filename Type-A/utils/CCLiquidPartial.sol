@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-Version: 0.0.39
-Changes: 
+Version: 0.0.40
+Changes:
+- v0.0.40: Fixed _prepareLiquidityUpdates to correctly update yLiquid (index 1) for buy orders and xLiquid (index 0) for sell orders. Updated _createBuyOrderUpdates and _createSellOrderUpdates to use transactToken for ERC20 and transactNative for ETH. Fixed status calculation to check pendingAmount - preTransferWithdrawn > 0 for partial fills. Updated _executeOrderWithFees to capture current historical volume from listingContract without incrementing, preventing double-counting with CCListingTemplate.sol. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.39: Added reverts for critical errors in _executeOrderWithFees and _prepareLiquidityUpdates. Added pre-settlement validation in _processSingleOrder to skip orders with invalid pricing or insufficient x/yLiquid. Ensured transactToken/transactNative only use available x/yLiquid. Non-critical errors (e.g., no orders) remain non-reverting. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.38: Updated _createBuyOrderUpdates, _createSellOrderUpdates, _prepBuyLiquidUpdates, and _prepSellLiquidUpdates to use CCListingTemplate.sol v0.3.9 ccUpdate with BuyOrderUpdate, SellOrderUpdate structs. Ensured compatibility with CCLiquidRouter.sol v0.0.25.
  - v0.0.37: Optimized CCLiquidPartial.sol by removing unused params and local variables, streamlined structs (removed unused fields in OrderContext, PrepOrderUpdateResult), consolidated repetitive logic in _prepareLiquidityUpdates and _executeOrderWithFees, reduced file size by ~6KB. Maintained compatibility with CCListingTemplate.sol v0.3.2, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.24.
@@ -228,8 +229,9 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     function _createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory context, uint256 pendingAmount) private view returns (ICCListing.BuyOrderUpdate[] memory updates) {
+    // Creates buy order updates, uses explicit status logic
     updates = new ICCListing.BuyOrderUpdate[](2);
-    uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2;
+    uint8 newStatus = pendingAmount == 0 ? 0 : (context.preTransferWithdrawn >= pendingAmount ? 3 : 2);
     updates[0] = ICCListing.BuyOrderUpdate({
         structId: 0,
         orderId: orderIdentifier,
@@ -250,15 +252,16 @@ contract CCLiquidPartial is CCMainPartial {
         status: 0,
         maxPrice: 0,
         minPrice: 0,
-        pending: context.preTransferWithdrawn >= pendingAmount ? 0 : pendingAmount - context.preTransferWithdrawn,
+        pending: pendingAmount >= context.preTransferWithdrawn ? pendingAmount - context.preTransferWithdrawn : 0,
         filled: context.preTransferWithdrawn,
         amountSent: context.amountSent
     });
 }
 
 function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory context, uint256 pendingAmount) private view returns (ICCListing.SellOrderUpdate[] memory updates) {
+    // Creates sell order updates, uses explicit status logic
     updates = new ICCListing.SellOrderUpdate[](2);
-    uint8 newStatus = context.preTransferWithdrawn >= pendingAmount ? 3 : 2;
+    uint8 newStatus = pendingAmount == 0 ? 0 : (context.preTransferWithdrawn >= pendingAmount ? 3 : 2);
     updates[0] = ICCListing.SellOrderUpdate({
         structId: 0,
         orderId: orderIdentifier,
@@ -279,7 +282,7 @@ function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext
         status: 0,
         maxPrice: 0,
         minPrice: 0,
-        pending: context.preTransferWithdrawn >= pendingAmount ? 0 : pendingAmount - context.preTransferWithdrawn,
+        pending: pendingAmount >= context.preTransferWithdrawn ? pendingAmount - context.preTransferWithdrawn : 0,
         filled: context.preTransferWithdrawn,
         amountSent: context.amountSent
     });
@@ -536,7 +539,7 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
     }
 
     function _prepareLiquidityUpdates(address listingAddress, uint256 orderIdentifier, LiquidityUpdateContext memory context) private {
-    // Prepares liquidity updates, reverts on critical failures
+    // Prepares liquidity updates, corrects index for buy/sell, reverts on critical failures
     ICCListing listingContract = ICCListing(listingAddress);
     ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
     (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
@@ -552,10 +555,11 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
 
     ICCLiquidity.UpdateType memory update;
 
+    // Update incoming liquidity (buy: yLiquid, sell: xLiquid)
     update = ICCLiquidity.UpdateType({
         updateType: 0,
-        index: context.isBuyOrder ? 0 : 1,
-        value: context.isBuyOrder ? xLiquid + normalizedPending : yLiquid + normalizedPending,
+        index: context.isBuyOrder ? 1 : 0,
+        value: context.isBuyOrder ? yLiquid + normalizedPending : xLiquid + normalizedPending,
         addr: address(this),
         recipient: address(0)
     });
@@ -563,10 +567,11 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
         revert(string(abi.encodePacked("Incoming liquidity update failed: ", reason)));
     }
 
+    // Update outgoing liquidity (buy: xLiquid, sell: yLiquid)
     update = ICCLiquidity.UpdateType({
         updateType: 0,
-        index: context.isBuyOrder ? 1 : 0,
-        value: context.isBuyOrder ? yLiquid - normalizedSettle : xLiquid - normalizedSettle,
+        index: context.isBuyOrder ? 0 : 1,
+        value: context.isBuyOrder ? xLiquid - normalizedSettle : yLiquid - normalizedSettle,
         addr: address(this),
         recipient: address(0)
     });
@@ -574,6 +579,7 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
         revert(string(abi.encodePacked("Outgoing liquidity update failed: ", reason)));
     }
 
+    // Update fees
     update = ICCLiquidity.UpdateType({
         updateType: 1,
         index: context.isBuyOrder ? 1 : 0,
@@ -585,21 +591,57 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
         revert(string(abi.encodePacked("Fee update failed: ", reason)));
     }
 
-    try listingContract.transactToken(tokenAddress, context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
-        revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+    // Use transactToken for ERC20, transactNative for ETH
+    if (tokenAddress == address(0)) {
+        try listingContract.transactNative(context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Native transfer failed: ", reason)));
+        }
+    } else {
+        try listingContract.transactToken(tokenAddress, context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+        }
     }
 }
 
 function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount, FeeContext memory feeContext) private returns (bool success) {
-    // Executes order with fees, reverts on critical failures
+    // Executes order with fees, captures current volume, reverts on critical failures
     ICCListing listingContract = ICCListing(listingAddress);
     emit FeeDeducted(listingAddress, orderIdentifier, isBuyOrder, feeContext.feeAmount, feeContext.netAmount);
     LiquidityUpdateContext memory liquidityContext = _computeSwapAmount(listingAddress, feeContext, isBuyOrder);
     _prepareLiquidityUpdates(listingAddress, orderIdentifier, liquidityContext);
+    
+    // Capture current historical volume without incrementing
+    ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](1);
+    (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
+    uint256 historicalLength = listingContract.historicalDataLengthView();
+    uint256 xVolume = 0;
+    uint256 yVolume = 0;
+    if (historicalLength > 0) {
+        ICCListing.HistoricalData memory lastData = listingContract.getHistoricalDataView(historicalLength - 1);
+        xVolume = lastData.xVolume;
+        yVolume = lastData.yVolume;
+    }
+    historicalUpdates[0] = ICCListing.HistoricalUpdate({
+        price: listingContract.prices(0),
+        xBalance: xBalance,
+        yBalance: yBalance,
+        xVolume: xVolume,
+        yVolume: yVolume,
+        timestamp: block.timestamp
+    });
+    try listingContract.ccUpdate(
+        new ICCListing.BuyOrderUpdate[](0),
+        new ICCListing.SellOrderUpdate[](0),
+        new ICCListing.BalanceUpdate[](0),
+        historicalUpdates
+    ) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Historical update failed: ", reason)));
+    }
+
     success = isBuyOrder
         ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
         : executeSingleSellLiquid(listingAddress, orderIdentifier);
-    require(success, string(abi.encodePacked("Order execution failed for orderId: ", uint2str(orderIdentifier))));
+    require(success, "Order execution failed");
 }
 
 function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (bool success) {

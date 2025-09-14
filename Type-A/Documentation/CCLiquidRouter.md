@@ -1,7 +1,7 @@
 # CCLiquidRouter Contract Documentation
 
 ## Overview
-The `CCLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `CCLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair`. Features include a fee system (max 1% based on liquidity usage), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step`. Uses `ReentrancyGuard` for security. Fees are transferred with `pendingAmount` and recorded in `xFees`/`yFees`. Liquidity updates: `pendingAmount` increases `xLiquid`/`yLiquid`, `amountOut` decreases `yLiquid`/`xLiquid`.
+The `CCLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `CCLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair`. Features include a fee system (max 1% based on liquidity usage), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step`. Uses `ReentrancyGuard` for security. Fees are transferred with `pendingAmount` and recorded in `xFees`/`yFees`. Liquidity updates: for buy orders, `pendingAmount` increases `yLiquid`, `amountOut` decreases `xLiquid`; for sell orders, `pendingAmount` increases `xLiquid`, `amountOut` decreases `yLiquid`.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
@@ -33,7 +33,7 @@ Formulas in `CCLiquidPartial.sol` (v0.0.40) govern settlement and price impact c
    - **Formula**: `price = listingContract.prices(0)`.
    - **Used in**: `_computeCurrentPrice`, `_validateOrderPricing`, `_processSingleOrder`.
    - **Description**: Fetches price from `ICCListing.prices(0)` with try-catch, ensuring settlement price is within `minPrice` and `maxPrice`. Reverts with detailed reason if fetch fails.
-   - **Usage**: Ensures settlement price aligns with listing template in `_processSingleOrder`.
+   - **Usage**: Ensures settlement price aligns with `CCListingTemplate` in `_processSingleOrder`.
 
 2. **Swap Impact**:
    - **Formula**:
@@ -57,7 +57,7 @@ Formulas in `CCLiquidPartial.sol` (v0.0.40) govern settlement and price impact c
 5. **Normalization/Denormalization**:
    - **Normalize**: `normalize(amount, decimals) = decimals < 18 ? amount * 10^(18-decimals) : amount / 10^(decimals-18)`.
    - **Denormalize**: `denormalize(amount, decimals) = decimals < 18 ? amount / 10^(18-decimals) : amount * 10^(decimals-18)`.
-   - **Used in**: `_getSwapReserves`, `_computeSwapImpact`, `_prepBuy/SellOrderUpdate`, `_processSingleOrder`, `_prepareLiquidityUpdates`, `_computeFee`, `_prepareLiquidityUpdates`.
+   - **Used in**: `_getSwapReserves`, `_computeSwapImpact`, `_prepBuy/SellOrderUpdate`, `_processSingleOrder`, `_prepareLiquidityUpdates`, `_computeFee`, `_executeOrderWithFees`.
    - **Description**: Ensures 18-decimal precision for calculations, reverting to native decimals for transfers.
 
 6. **Fee Calculation**:
@@ -67,8 +67,8 @@ Formulas in `CCLiquidPartial.sol` (v0.0.40) govern settlement and price impact c
 
 7. **Liquidity Updates**:
    - **Formula**:
-     - Buy: `xLiquid += normalize(pendingAmount)`, `yLiquid -= normalize(amountOut)`, `yFees += normalize(feeAmount)`.
-     - Sell: `yLiquid += normalize(pendingAmount)`, `xLiquid -= normalize(amountOut)`, `xFees += normalize(feeAmount)`.
+     - Buy: `yLiquid += normalize(pendingAmount)`, `xLiquid -= normalize(amountOut)`, `yFees += normalize(feeAmount)`.
+     - Sell: `xLiquid += normalize(pendingAmount)`, `yLiquid -= normalize(amountOut)`, `xFees += normalize(feeAmount)`.
    - **Used in**: `_prepareLiquidityUpdates`, `ICCLiquidity.ccUpdate`.
 
 ## External Functions
@@ -78,32 +78,46 @@ Formulas in `CCLiquidPartial.sol` (v0.0.40) govern settlement and price impact c
   - `listingAddress` (address): `ICCListing` contract address for order book.
   - `maxIterations` (uint256): Maximum orders to process in a batch.
   - `step` (uint256): Starting index for order processing (gas optimization).
-- **Behavior**: Settles buy orders for `msg.sender`. Checks pending orders via `makerPendingOrdersView(msg.sender)` and `yBalance` via `volumeBalances(0)`. Creates historical data entry if orders exist. Processes orders via `_processOrderBatch`, which handles `ccUpdate` with `BuyOrderUpdate` structs. Emits events for failures. Validates `yLiquid` and `xLiquid` before settlement, skipping orders with insufficient liquidity or invalid pricing.
+- **Behavior**: Settles buy orders for `msg.sender`. Checks pending orders via `makerPendingOrdersView(msg.sender)` and `yBalance` via `volumeBalances(0)`. Creates historical data entry via `_createHistoricalUpdate` if orders exist. Processes orders via `_processOrderBatch`, which handles `ccUpdate` with `BuyOrderUpdate` structs. Emits events for failures. Validates `xLiquid` and `yLiquid` before settlement, skipping orders with insufficient liquidity or invalid pricing. Does not initiate partial fills but can complete existing ones (status 2).
 - **Internal Call Flow**:
-  1. `listingContract.makerPendingOrdersView(msg.sender)`: Fetches pending buy order IDs.
-  2. `listingContract.volumeBalances(0)`: Checks `yBalance`.
-  3. `_createHistoricalUpdate`: Creates `HistoricalUpdate` with `volumeBalances(0)`, `prices(0)`, `historicalDataLengthView`, `getHistoricalDataView`, and `block.timestamp`.
-  4. `_processOrderBatch(listingAddress, maxIterations, true, step)`:
-     - `_collectOrderIdentifiers`: Fetches order IDs from `step`.
-     - `_processSingleOrder`: Validates prices (`_validateOrderPricing`, `_computeCurrentPrice`, `_computeSwapImpact`), checks `xLiquid`/`yLiquid`, computes fees (`_computeFee`), executes order (`_executeOrderWithFees`).
-     - `_executeOrderWithFees`: Emits `FeeDeducted`, updates liquidity (`_prepareLiquidityUpdates`, `ICCLiquidity.ccUpdate`), calls `executeSingleBuyLiquid`, reverts on critical failures (execution, liquidity updates, transfers).
-     - `executeSingleBuyLiquid`: Calls `_prepBuyLiquidUpdates`, `_prepBuyOrderUpdate`, `_createBuyOrderUpdates`, executes `ccUpdate` with `BuyOrderUpdate[]`.
+  - Validates listing with `onlyValidListing`.
+  - Checks `pendingOrders` length and `step` via `makerPendingOrdersView`.
+  - Checks `yBalance` via `volumeBalances(0)`.
+  - Calls `_createHistoricalUpdate`:
+    - Fetches `volumeBalances(0)`, `prices(0)`, `historicalDataLengthView`, `getHistoricalDataView`.
+    - Creates `HistoricalUpdate` with current `xVolume`, `yVolume`.
+    - Calls `ccUpdate` with `HistoricalUpdate[]`.
+  - Calls `_processOrderBatch(listingAddress, maxIterations, true, step)`:
+    - Calls `_collectOrderIdentifiers` to fetch order IDs.
+    - Iterates orders, calls `_processSingleOrder`:
+      - Fetches `getBuyOrderAmounts/Core/Pricing`.
+      - Calls `_validateOrderPricing` (uses `_computeCurrentPrice`, `_computeSwapImpact`, `_checkPricing`).
+      - Validates liquidity via `liquidityAmounts`.
+      - Calls `_computeFee`, `_executeOrderWithFees`:
+        - Emits `FeeDeducted`.
+        - Calls `_computeSwapAmount`, `_prepareLiquidityUpdates` (updates `yLiquid`, `xLiquid`, `yFees` via `ccUpdate`).
+        - Creates `HistoricalUpdate` with current `xVolume`, `yVolume`.
+        - Calls `executeSingleBuyLiquid`:
+          - Calls `_prepBuyLiquidUpdates`, `_prepBuyOrderUpdate`, `_createBuyOrderUpdates`.
+          - Executes `ccUpdate` with `BuyOrderUpdate[]`.
 - **Emits**: `NoPendingOrders` (empty orders or invalid step), `InsufficientBalance` (zero `yBalance` or insufficient `xLiquid`/`yLiquid`), `UpdateFailed` (batch processing failure), `PriceOutOfBounds` (invalid pricing).
 - **Graceful Degradation**: Returns without reverting if no orders, `step` exceeds orders, or insufficient balance. Skips orders with insufficient liquidity or invalid pricing.
-- **Note**: `amountSent` (tokenA) reflects the current settlement, accumulating total tokens sent across settlements.
+- **Note**: `amountSent` (tokenA) accumulates total tokens sent across settlements.
 
 ### settleSellLiquid(address listingAddress, uint256 maxIterations, uint256 step)
 - **Parameters**: Same as `settleBuyLiquid`.
-- **Behavior**: Settles sell orders for `msg.sender`. Checks pending orders via `makerPendingOrdersView(msg.sender)` and `xBalance` via `volumeBalances(0)`. Creates historical data entry if orders exist. Processes orders via `_processOrderBatch`, which handles `ccUpdate` with `SellOrderUpdate` structs. Emits events for failures. Validates `xLiquid` and `yLiquid` before settlement, skipping orders with insufficient liquidity or invalid pricing.
+- **Behavior**: Settles sell orders for `msg.sender`. Checks pending orders via `makerPendingOrdersView(msg.sender)` and `xBalance` via `volumeBalances(0)`. Creates historical data entry via `_createHistoricalUpdate` if orders exist. Processes orders via `_processOrderBatch`, which handles `ccUpdate` with `SellOrderUpdate` structs. Emits events for failures. Validates `xLiquid` and `yLiquid` before settlement, skipping orders with insufficient liquidity or invalid pricing. Does not initiate partial fills but can complete existing ones (status 2).
 - **Internal Call Flow**: Similar to `settleBuyLiquid`, but:
   - Uses `xBalance` from `volumeBalances(0)`.
   - Calls `_processOrderBatch(listingAddress, maxIterations, false, step)`:
     - Uses `getSellOrderAmounts/Core/Pricing`.
-    - Updates `yLiquid`, `xLiquid`, `xFees` in `_prepareLiquidityUpdates`.
-    - Calls `executeSingleSellLiquid` (uses `_prepSellLiquidUpdates`, `_createSellOrderUpdates`, `ccUpdate` with `SellOrderUpdate[]`).
+    - Updates `xLiquid`, `yLiquid`, `xFees` in `_prepareLiquidityUpdates`.
+    - Calls `executeSingleSellLiquid`:
+      - Calls `_prepSellLiquidUpdates`, `_prepSellOrderUpdate`, `_createSellOrderUpdates`.
+      - Executes `ccUpdate` with `SellOrderUpdate[]`.
 - **Emits**: `NoPendingOrders`, `InsufficientBalance` (zero `xBalance` or insufficient `xLiquid`/`yLiquid`), `UpdateFailed`, `PriceOutOfBounds`.
 - **Graceful Degradation**: Same as `settleBuyLiquid`.
-- **Note**: `amountSent` (tokenB) reflects the current settlement, accumulating total tokens sent.
+- **Note**: `amountSent` (tokenB) accumulates total tokens sent across settlements.
 
 ## Internal Functions (CCLiquidPartial, v0.0.40)
 - **_getSwapReserves**: Fetches Uniswap V2 reserves via `IERC20.balanceOf` (`token0`, `tokenB`) into `SwapImpactContext`.
@@ -120,14 +134,14 @@ Formulas in `CCLiquidPartial.sol` (v0.0.40) govern settlement and price impact c
 - **_executeSingleBuyLiquid**: Executes buy order via `_prepBuyLiquidUpdates`.
 - **_executeSingleSellLiquid**: Executes sell order via `_prepSellLiquidUpdates`.
 - **_collectOrderIdentifiers**: Fetches order IDs from `step` up to `maxIterations`.
-- **_prepareLiquidityUpdates**: Transfers `pendingAmount`, updates `xLiquid`, `yLiquid`, `xFees`/`yFees` via `ICCLiquidity.ccUpdate`, reverts on critical failures (liquidity updates, transfers).
+- **_prepareLiquidityUpdates**: Transfers `pendingAmount` (via `transactToken` for ERC20, `transactNative` for ETH), updates `xLiquid`, `yLiquid`, `xFees`/`yFees` via `ICCLiquidity.ccUpdate`, reverts on critical failures.
 - **_validateOrderPricing**: Validates prices, emits `PriceOutOfBounds`.
 - **_computeFee**: Calculates `feeAmount`, `netAmount` based on liquidity usage.
 - **_computeSwapAmount**: Computes `amountOut` for liquidity updates.
 - **_toSingleUpdateArray**: Converts single update to array for `ICCLiquidity.ccUpdate`.
-- **_createBuyOrderUpdates**: Builds `BuyOrderUpdate` structs for `ccUpdate`.
-- **_createSellOrderUpdates**: Builds `SellOrderUpdate` structs for `ccUpdate`.
-- **_executeOrderWithFees**: Emits `FeeDeducted`, executes order, calls `executeSingleBuy/SellLiquid`, reverts on critical failures.
+- **_createBuyOrderUpdates**: Builds `BuyOrderUpdate` structs for `ccUpdate`, sets status (0: cancelled, 2: partially filled, 3: filled).
+- **_createSellOrderUpdates**: Builds `SellOrderUpdate` structs for `ccUpdate`, sets status (0: cancelled, 2: partially filled, 3: filled).
+- **_executeOrderWithFees**: Emits `FeeDeducted`, creates `HistoricalUpdate` with current `xVolume`, `yVolume`, executes order, calls `executeSingleBuy/SellLiquid`, reverts on critical failures.
 - **_processSingleOrder**: Validates prices and liquidity, computes fees, executes order, skips on insufficient liquidity or invalid pricing.
 - **_processOrderBatch**: Iterates orders, skips settled orders, returns success status.
 - **_finalizeUpdates**: Resizes `BuyOrderUpdate[]` or `SellOrderUpdate[]` based on `isBuyOrder`.
@@ -153,13 +167,15 @@ Formulas in `CCLiquidPartial.sol` (v0.0.40) govern settlement and price impact c
   - Optimized struct fields in `CCLiquidPartial.sol` v0.0.40.
   - Reverts on critical failures (execution, liquidity updates, transfers) in `_executeOrderWithFees`, `_prepareLiquidityUpdates` (v0.0.40).
   - Skips orders with insufficient `xLiquid`/`yLiquid` or invalid pricing in `_processSingleOrder` (v0.0.40).
+  - Uses `transactToken` for ERC20, `transactNative` for ETH in `_prepareLiquidityUpdates` (v0.0.40).
+  - Captures current `xVolume`, `yVolume` without incrementing in `_executeOrderWithFees` (v0.0.40).
 
 ## Limitations and Assumptions
 - Relies on `ICCLiquidity` for settlements, not direct Uniswap V2 swaps.
-- No order creation, cancellation, payouts, or liquidity management.
+- Does not initiate partial fills but completes existing ones (status 2) set by other contracts (e.g., `CCListingTemplate`).
 - Uses `balanceOf` for reserves in `_computeSwapImpact`.
 - Zero amounts, failed transfers, or invalid prices return `false` in `_processOrderBatch`.
 - `depositor` set to `address(this)` in `ICCLiquidity` calls.
 - `step` must be <= length of pending orders.
 - `amountSent` accumulates total tokens sent across settlements.
-- Historical data created at start of settlement if orders exist.
+- Historical data created at start of settlement if orders exist, updated with current `xVolume`, `yVolume` in `_executeOrderWithFees`.
