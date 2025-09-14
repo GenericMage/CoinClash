@@ -1,8 +1,10 @@
 /*
  SPDX-License-Identifier: BSL-1.1 - Peng Protocol 2025
 
- // Version: 0.1.18
- // Changes:
+ // Version: 0.1.20
+// Changes:
+// - v0.1.20: Added updateType 8 to subtract fees from xFees/yFees in ccUpdate, ensuring compatibility with CCLiquidPartial.sol v0.0.41 fee deductions.
+// - v0.1.19: Modified transactToken and transactNative to limit withdrawals based on xLiquid/yLiquid.
  // - v0.1.18: Added updateType 6 (xSlot dFeesAcc update) and 7 (ySlot dFeesAcc update) in ccUpdate to update dFeesAcc without modifying allocation or liquidity, for fee claim corrections.
  // - v0.1.17: Removed xLiquid/yLiquid reduction in transactToken and transactNative to prevent double reduction, as ccUpdate handles liquidity adjustments for slot allocation changes. Removed redundant LiquidityUpdated emission, as ccUpdate emits it.
  // - v0.1.16: Added logic for updateType 4 (xSlot depositor change) and 5 (ySlot depositor change) in ccUpdate to update depositor field and userXIndex/userYIndex mappings. Emits SlotDepositorChanged event. Ensured no impact on xLiquid/yLiquid.
@@ -274,33 +276,37 @@ function resetRouters() external {
 }
 
 function transactToken(address depositor, address token, uint256 amount, address recipient) external {
-        // Transfers ERC20 tokens without modifying liquidity, restricted to routers
-        require(routers[msg.sender], "Router only");
-        require(token == tokenA || token == tokenB, "Invalid token");
-        require(token != address(0), "Use transactNative for ETH");
-        require(amount > 0, "Zero amount");
-        require(recipient != address(0), "Invalid recipient");
-        uint8 decimals = IERC20(token).decimals();
-        if (decimals == 0) revert("Invalid token decimals");
-        try IERC20(token).transfer(recipient, amount) returns (bool) {
-        } catch (bytes memory reason) {
-            emit TransactFailed(depositor, token, amount, "Token transfer failed");
-            revert("Token transfer failed");
-        }
+    // Transfers ERC20 tokens, limited by xLiquid/yLiquid, restricted to routers
+    require(routers[msg.sender], "Router only");
+    require(token == tokenA || token == tokenB, "Invalid token");
+    require(token != address(0), "Use transactNative for ETH");
+    require(amount > 0, "Zero amount");
+    require(recipient != address(0), "Invalid recipient");
+    uint8 decimals = IERC20(token).decimals();
+    if (decimals == 0) revert("Invalid token decimals");
+    uint256 normalizedAmount = normalize(amount, decimals);
+    require((token == tokenA ? liquidityDetail.xLiquid : liquidityDetail.yLiquid) >= normalizedAmount, "Insufficient liquidity");
+    try IERC20(token).transfer(recipient, amount) returns (bool) {
+    } catch (bytes memory reason) {
+        emit TransactFailed(depositor, token, amount, "Token transfer failed");
+        revert("Token transfer failed");
     }
+}
 
-    function transactNative(address depositor, uint256 amount, address recipient) external {
-        // Transfers native tokens (ETH) without modifying liquidity, restricted to routers
-        require(routers[msg.sender], "Router only");
-        require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
-        require(amount > 0, "Zero amount");
-        require(recipient != address(0), "Invalid recipient");
-        (bool success, bytes memory reason) = recipient.call{value: amount}("");
-        if (!success) {
-            emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
-            revert("ETH transfer failed");
-        }
+function transactNative(address depositor, uint256 amount, address recipient) external {
+    // Transfers ETH, limited by xLiquid/yLiquid, restricted to routers
+    require(routers[msg.sender], "Router only");
+    require(tokenA == address(0) || tokenB == address(0), "No native token in pair");
+    require(amount > 0, "Zero amount");
+    require(recipient != address(0), "Invalid recipient");
+    uint256 normalizedAmount = normalize(amount, 18);
+    require((tokenA == address(0) ? liquidityDetail.xLiquid : liquidityDetail.yLiquid) >= normalizedAmount, "Insufficient liquidity");
+    (bool success, bytes memory reason) = recipient.call{value: amount}("");
+    if (!success) {
+        emit TransactFailed(depositor, address(0), amount, "ETH transfer failed");
+        revert("ETH transfer failed");
     }
+}
 
 // Added payout creation/management from listing template
 function ssUpdate(PayoutUpdate[] calldata updates) external {
@@ -393,8 +399,9 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
 
 // Renamed from "update"
 // Added changeDepositor update type
+// Added fee deduction update type
     function ccUpdate(address depositor, UpdateType[] memory updates) external {
-    // Updates liquidity and slot details, including dFeesAcc updates for fee claims
+    // Updates liquidity and slot details, including dFeesAcc and fee subtraction
     require(routers[msg.sender], "Router only");
     LiquidityDetails storage details = liquidityDetail;
     for (uint256 i = 0; i < updates.length; i++) {
@@ -407,7 +414,7 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
                 details.yLiquid = u.value;
             } else revert("Invalid balance index");
         } else if (u.updateType == 1) {
-            // Updates xFees or yFees
+            // Updates xFees or yFees (addition)
             if (u.index == 0) {
                 details.xFees += u.value;
                 emit FeesUpdated(listingId, details.xFees, details.yFees);
@@ -517,6 +524,20 @@ function ssUpdate(PayoutUpdate[] calldata updates) external {
             Slot storage slot = yLiquiditySlots[u.index];
             require(slot.depositor == depositor, "Depositor not slot owner");
             slot.dFeesAcc = u.value;
+        } else if (u.updateType == 8) {
+            // Subtracts from xFees
+            if (u.index == 0) {
+                require(details.xFees >= u.value, "Insufficient xFees");
+                details.xFees -= u.value;
+                emit FeesUpdated(listingId, details.xFees, details.yFees);
+            } else revert("Invalid fee index");
+        } else if (u.updateType == 9) {
+            // Subtracts from yFees
+            if (u.index == 1) {
+                require(details.yFees >= u.value, "Insufficient yFees");
+                details.yFees -= u.value;
+                emit FeesUpdated(listingId, details.xFees, details.yFees);
+            } else revert("Invalid fee index");
         } else revert("Invalid update type");
     }
     emit LiquidityUpdated(listingId, details.xLiquid, details.yLiquid);

@@ -2,8 +2,9 @@
 pragma solidity ^0.8.2;
 
 /*
-// Version: 0.1.27
+// Version: 0.1.28
 // Changes:
+// - v0.1.28: Modified _executeFeeClaim to use updateType 8 (xFees subtraction) or 9 (yFees subtraction) for fee reduction.
 // - v0.1.27: Modified _transferWithdrawalAmount to track success of primary and compensation transfers, reverting if compensation transfer fails when compensationAmount > 0. Ensures slot allocation is only updated if both transfers succeed, preventing allocation reduction without full transfer. Preserves existing event emissions and functionality.
 // - v0.1.26: Reordered _executeWithdrawal to call _transferWithdrawalAmount before _updateWithdrawalAllocation to prevent slot allocation reduction if transactNative or transactToken fails.
 // - v0.1.25: Refactored _executeWithdrawal to address stack too deep error by splitting into helper functions (_fetchWithdrawalData, _updateWithdrawalAllocation, _transferWithdrawalAmount). Extended WithdrawalContext to include totalAllocationDeduct and price. Removed redundant local variables, ensured non-reverting behavior, and maintained v0.1.23 functionality (minimal checks, event emission, optional compensationAmount).
@@ -532,77 +533,41 @@ function _validateFeeClaim(address listingAddress, address depositor, uint256 li
 
 
     function _executeFeeClaim(FeeClaimContext memory context) internal {
-
-    // Executes fee claim, updates fees and dFeesAcc to xFeesAcc/yFeesAcc, and transfers fees
-
+    // Executes fee claim, updates fees and dFeesAcc, transfers fees
     if (context.feeShare == 0) {
-
         emit NoFeesToClaim(context.depositor, context.listingAddress, context.isX, context.liquidityIndex);
-
         return;
-
     }
-
     ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
-
     uint256 xFeesAcc;
-
     uint256 yFeesAcc;
-
     try liquidityContract.liquidityDetailsView() returns (uint256, uint256, uint256, uint256, uint256 _xFeesAcc, uint256 _yFeesAcc) {
-
         xFeesAcc = _xFeesAcc;
-
         yFeesAcc = _yFeesAcc;
-
     } catch (bytes memory reason) {
-
         revert(string(abi.encodePacked("Liquidity details fetch failed: ", reason)));
-
     }
-
     ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](2);
-
-    updates[0] = ICCLiquidity.UpdateType(1, context.isX ? 1 : 0, context.fees - context.feeShare, address(0), address(0));
-
+    updates[0] = ICCLiquidity.UpdateType(context.isX ? 8 : 9, context.isX ? 1 : 0, context.feeShare, address(0), address(0)); // Subtract feeShare
     updates[1] = ICCLiquidity.UpdateType(context.isX ? 6 : 7, context.liquidityIndex, context.isX ? yFeesAcc : xFeesAcc, context.depositor, address(0));
-
     try liquidityContract.ccUpdate(context.depositor, updates) {
-
     } catch (bytes memory reason) {
-
         revert(string(abi.encodePacked("Fee claim update failed: ", reason)));
-
     }
-
     uint8 decimals = context.transferToken == address(0) ? 18 : IERC20(context.transferToken).decimals();
-
     uint256 denormalizedFee = denormalize(context.feeShare, decimals);
-
     if (context.transferToken == address(0)) {
-
         try liquidityContract.transactNative(context.depositor, denormalizedFee, context.depositor) {
-
         } catch (bytes memory reason) {
-
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
-
         }
-
     } else {
-
         try liquidityContract.transactToken(context.depositor, context.transferToken, denormalizedFee, context.depositor) {
-
         } catch (bytes memory reason) {
-
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
-
         }
-
     }
-
     emit FeesClaimed(context.listingAddress, context.liquidityIndex, context.isX ? 0 : context.feeShare, context.isX ? context.feeShare : 0);
-
 }
 
 

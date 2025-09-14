@@ -5,10 +5,11 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.19 (Updated 2025-09-03)
+**Version**: 0.1.20 (Updated 2025-09-14)
 
 **Changes**:
-- v0.1.19: Updated documentation to include all functions, clarified internal call trees, and addressed view functions comprehensively.
+- v0.1.20: Added `updateType` 8 (xFees subtraction) and 9 (yFees subtraction) in `ccUpdate` to subtract from `xFees`/`yFees`, ensuring compatibility with `CCLiquidityPartial.sol` (v0.0.41). Updated `transactToken` and `transactNative` to limit withdrawals based on `xLiquid`/`yLiquid`.
+- v0.1.19: Updated documentation to include all functions, clarified internal call trees, and corrected view function returns.
 - v0.1.18: Added `updateType` 6 (xSlot dFeesAcc update) and 7 (ySlot dFeesAcc update) in `ccUpdate` to update `dFeesAcc` without modifying allocation or liquidity. Updated payout documentation.
 - v0.1.17: Removed `xLiquid`/`yLiquid` reduction in `transactToken` and `transactNative` to prevent double reduction, as `ccUpdate` handles liquidity adjustments.
 - v0.1.16: Added `updateType` 4 (xSlot depositor change) and 5 (ySlot depositor change) in `ccUpdate` to update depositor and `userXIndex`/`userYIndex`. Emits `SlotDepositorChanged`.
@@ -21,24 +22,24 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - v0.1.8: Added payout functionality (`ssUpdate`, `PayoutUpdate`, `LongPayoutStruct`, `ShortPayoutStruct`, etc.) from `CCListingTemplate.sol`.
 
 **Compatibility**:
-- CCListingTemplate.sol (v0.3.6)
-- CCLiquidityRouter.sol (v0.1.2)
-- CCMainPartial.sol (v0.1.4)
+- CCListingTemplate.sol (v0.0.10)
+- CCLiquidityRouter.sol (v0.0.25)
+- CCMainPartial.sol (v0.0.10)
 - CCGlobalizer.sol (v0.2.1)
-- ICCLiquidity.sol (v0.0.5)
+- ICCLiquidity.sol (v0.0.4)
 - ICCListing.sol (v0.0.7)
 - CCSEntryPartial.sol (v0.0.18)
 
 ## State Variables
-- `routersSet`: `bool public` - Tracks if routers are set.
+- `routersSet`: `bool private` - Tracks if routers are set.
 - `listingAddress`: `address public` - Listing contract address.
 - `tokenA`: `address public` - Token A address (ETH if zero).
 - `tokenB`: `address public` - Token B address (ETH if zero).
 - `listingId`: `uint256 public` - Listing identifier.
 - `agent`: `address public` - Agent contract address.
-- `liquidityDetail`: `LiquidityDetails public` - Stores `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`.
-- `activeXLiquiditySlots`: `uint256[] public` - Active xSlot indices.
-- `activeYLiquiditySlots`: `uint256[] public` - Active ySlot indices.
+- `liquidityDetail`: `LiquidityDetails private` - Stores `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`.
+- `activeXLiquiditySlots`: `uint256[] private` - Active xSlot indices.
+- `activeYLiquiditySlots`: `uint256[] private` - Active ySlot indices.
 - `routerAddresses`: `address[] private` - Authorized router addresses.
 - `nextPayoutId`: `uint256 private` - Tracks next payout ID.
 
@@ -74,7 +75,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
    - `dFeesAcc`: Cumulative fees at deposit (`yFeesAcc` for xSlots, `xFeesAcc` for ySlots).
    - `timestamp`: Slot creation timestamp.
 3. **UpdateType**:
-   - `updateType`: Update type (0=balance, 1=fees, 2=xSlot, 3=ySlot, 4=xSlot depositor change, 5=ySlot depositor change, 6=xSlot dFeesAcc, 7=ySlot dFeesAcc).
+   - `updateType`: Update type (0=balance, 1=fees addition, 2=xSlot, 3=ySlot, 4=xSlot depositor change, 5=ySlot depositor change, 6=xSlot dFeesAcc, 7=ySlot dFeesAcc, 8=xFees subtraction, 9=yFees subtraction).
    - `index`: Index (0=xFees/xLiquid, 1=yFees/yLiquid, or slot).
    - `value`: Normalized amount/allocation.
    - `addr`: Depositor address.
@@ -169,6 +170,8 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
     - `updateType == 5`: Updates `yLiquiditySlots` depositor, updates `userYIndex`, emits `SlotDepositorChanged`.
     - `updateType == 6`: Updates `xLiquiditySlots.dFeesAcc` for fee claims.
     - `updateType == 7`: Updates `yLiquiditySlots.dFeesAcc` for fee claims.
+    - `updateType == 8`: Subtracts from `xFees` (`index == 0`), emits `FeesUpdated`.
+    - `updateType == 9`: Subtracts from `yFees` (`index == 1`), emits `FeesUpdated`.
   - Calls `globalizeUpdate`: Invokes `ICCGlobalizer.globalizeLiquidity` and `ITokenRegistry.initializeBalances`.
 - **Internal Call Tree**: `globalizeUpdate` (`ICCAgent.globalizerAddress`, `ICCGlobalizer.globalizeLiquidity`, `ICCAgent.registryAddress`, `ITokenRegistry.initializeBalances`).
 - **Gas**: Loop over `updates`, array operations, `globalizeUpdate` calls.
@@ -193,9 +196,9 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Purpose**: Transfers ERC20 tokens, checks `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
 - **Parameters**: `depositor`, `token` (tokenA or tokenB), `amount` (denormalized), `recipient`.
 - **Restrictions**: Router-only, valid token, non-zero amount, sufficient `xLiquid`/`yLiquid`.
-- **Internal Call Tree**: `normalize`, `IERC20.decimals`, `IERC20.transfer`, `IERC20.balanceOf`.
+- **Internal Call Tree**: `normalize`, `IERC20.decimals`, `IERC20.transfer`.
 - **Gas**: Single transfer, balance check.
-- **Callers**: `CCLiquidityPartial.sol` (`_transferPrimaryToken`, `_transferCompensationToken`, `_executeFeeClaim`).
+- **Callers**: `CCLiquidityPartial.sol` (`_transferWithdrawalAmount`, `_executeFeeClaim`).
 
 ### transactNative(address depositor, uint256 amount, address recipient)
 - **Purpose**: Transfers ETH, checks `xLiquid`/`yLiquid`, emits `TransactFailed` on failure.
@@ -203,7 +206,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - **Restrictions**: Router-only, non-zero amount, sufficient `xLiquid`/`yLiquid`.
 - **Internal Call Tree**: `normalize`.
 - **Gas**: Single transfer, balance check.
-- **Callers**: `CCLiquidityPartial.sol` (`_transferPrimaryToken`, `_transferCompensationToken`, `_executeFeeClaim`).
+- **Callers**: `CCLiquidityPartial.sol` (`_transferWithdrawalAmount`, `_executeFeeClaim`).
 
 ### getNextPayoutID() view returns (uint256 payoutId)
 - **Purpose**: Returns `nextPayoutId`.
@@ -222,7 +225,7 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 ## View Functions
 - `getListingAddress(uint256)`: Returns `listingAddress`.
 - `liquidityAmounts()`: Returns `xLiquid`, `yLiquid`.
-- `liquidityDetailsView()`: Returns `xLiquid`, `yLiquid`, `xFees`, `yFees`, `xFeesAcc`, `yFeesAcc`.
+- `liquidityDetailsView()`: Returns `xLiquid`, `yLiquid`, `xFees`, `yFees`.
 - `userXIndexView(address)`: Returns `userXIndex[user]`.
 - `userYIndexView(address)`: Returns `userYIndex[user]`.
 - `getActiveXLiquiditySlots()`: Returns `activeXLiquiditySlots`.
@@ -230,8 +233,6 @@ The `CCLiquidityTemplate`, implemented in Solidity (^0.8.2), manages liquidity p
 - `getXSlotView(uint256)`: Returns xSlot details.
 - `getYSlotView(uint256)`: Returns ySlot details.
 - `routerAddressesView()`: Returns `routerAddresses`.
-- `longPayoutByIndexView()`: Returns `longPayoutByIndex`.
-- `shortPayoutByIndexView()`: Returns `shortPayoutByIndex`.
 - `userPayoutIDsView(address)`: Returns `userPayoutIDs[user]`.
 - `activeLongPayoutsView()`: Returns `activeLongPayouts`.
 - `activeShortPayoutsView()`: Returns `activeShortPayouts`.
