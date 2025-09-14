@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.6
+// Version: 0.1.8
 // Changes:
+// - v0.1.8: Addresses Redundant amountReceived in BuyOrderUpdateContext and SellOrderUpdateContext
+// - v0.1.7: Addresses Incorrect status logic in _createBuyOrderUpdates and _createSellOrderUpdates
 // - v0.1.6: Modified _createBuyOrderUpdates and _createSellOrderUpdates to return BuyOrderUpdate and SellOrderUpdate structs directly, removing encoding/decoding. Updated _executePartialBuySwap and _executePartialSellSwap to return correct struct types.
 // - v0.1.5: Fixed TypeError in _finalizeTokenSwap and _finalizeSellTokenSwap by adding `amountIn` to BuyOrderUpdateContext and SellOrderUpdateContext constructors, using SwapContext.denormAmountIn. Ensured pending/filled use pre-transfer amount (tokenB for buys, tokenA for sells), and amountSent uses post-transfer amount (tokenA for buys, tokenB for sells) with pre/post balance checks.
 // - v0.1.4: Fixed TypeError in _executeBuyTokenSwap, _executeSellTokenSwap, _executeBuyETHSwap, and _executeSellETHSwapInternal by adding `amountIn` to constructors.
@@ -84,7 +86,6 @@ contract CCUniPartial is CCMainPartial {
         address makerAddress;
         address recipient;
         uint8 status;
-        uint256 amountReceived; // Post-transfer received amount
         uint256 normalizedReceived; // Normalized post-transfer amount
         uint256 amountSent; // Post-transfer amount received by recipient
         uint256 amountIn; // Pre-transfer amount for pending/filled
@@ -94,7 +95,6 @@ contract CCUniPartial is CCMainPartial {
         address makerAddress;
         address recipient;
         uint8 status;
-        uint256 amountReceived; // Post-transfer received amount
         uint256 normalizedReceived; // Normalized post-transfer amount
         uint256 amountSent; // Post-transfer amount received by recipient
         uint256 amountIn; // Pre-transfer amount for pending/filled
@@ -313,20 +313,17 @@ contract CCUniPartial is CCMainPartial {
         data.amountOut = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
     }
 
-    // Updated _finalizeTokenSwap to return BuyOrderUpdate[]
-    function _finalizeTokenSwap(
+function _finalizeTokenSwap(
         TokenSwapData memory data,
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
     ) internal pure returns (ICCListing.BuyOrderUpdate[] memory) {
-        // Prepares BuyOrderUpdate structs for buy order swap; updates are prepared here, refined in CCSettlementPartial.sol, and applied once in CCSettlementRouter.sol via ccUpdate
         require(data.amountReceived > 0, "No tokens received in swap");
         BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
             status: context.status,
-            amountReceived: data.amountReceived,
             normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
             amountSent: data.amountInReceived,
             amountIn: context.denormAmountIn
@@ -334,20 +331,17 @@ contract CCUniPartial is CCMainPartial {
         return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
     }
 
-    // Updated _finalizeSellTokenSwap to return SellOrderUpdate[]
-    function _finalizeSellTokenSwap(
+function _finalizeSellTokenSwap(
         TokenSwapData memory data,
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
     ) internal pure returns (ICCListing.SellOrderUpdate[] memory) {
-        // Prepares SellOrderUpdate structs for sell order swap; updates are prepared here, refined in CCSettlementPartial.sol, and applied once in CCSettlementRouter.sol via ccUpdate
         require(data.amountReceived > 0, "No tokens received in swap");
         SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
             status: context.status,
-            amountReceived: data.amountReceived,
             normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
             amountSent: data.amountInReceived,
             amountIn: context.denormAmountIn
@@ -355,13 +349,11 @@ contract CCUniPartial is CCMainPartial {
         return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount);
     }
 
-    // Updated _executeBuyETHSwap to return BuyOrderUpdate[]
-    function _executeBuyETHSwap(
+function _executeBuyETHSwap(
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
     ) internal returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
-        // Executes ETH-to-token swap for buy order; updates prepared here are refined in CCSettlementPartial.sol and applied once in CCSettlementRouter.sol via ccUpdate
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
@@ -371,7 +363,6 @@ contract CCUniPartial is CCMainPartial {
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
             status: context.status,
-            amountReceived: data.amountReceived,
             normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
             amountSent: data.amountInReceived,
             amountIn: context.denormAmountIn
@@ -379,13 +370,11 @@ contract CCUniPartial is CCMainPartial {
         return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount);
     }
 
-    // Updated _executeSellETHSwapInternal to return SellOrderUpdate[]
-    function _executeSellETHSwapInternal(
+function _executeSellETHSwapInternal(
         SwapContext memory context,
         uint256 orderIdentifier,
         uint256 pendingAmount
     ) internal returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
-        // Executes token-to-ETH swap for sell order; updates prepared here are refined in CCSettlementPartial.sol and applied once in CCSettlementRouter.sol via ccUpdate
         address[] memory path = new address[](2);
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
@@ -395,7 +384,6 @@ contract CCUniPartial is CCMainPartial {
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
             status: context.status,
-            amountReceived: data.amountReceived,
             normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
             amountSent: data.amountInReceived,
             amountIn: context.denormAmountIn
@@ -473,13 +461,23 @@ contract CCUniPartial is CCMainPartial {
         }
     }
 
-    // Updated _createBuyOrderUpdates to use BuyOrderUpdate struct
+    // Helper: Computes status for buy/sell updates
+    function _computeOrderStatus(
+        uint256 normalizedReceived,
+        uint256 filled,
+        uint256 pendingAmount,
+        uint8 currentStatus
+    ) internal pure returns (uint8 status) {
+        uint256 totalFilled = normalizedReceived + filled;
+        status = currentStatus == 1 && totalFilled >= pendingAmount ? 3 : 2;
+    }
+
+    // Creates BuyOrderUpdate structs with correct status
     function _createBuyOrderUpdates(
         uint256 orderIdentifier,
         BuyOrderUpdateContext memory updateContext,
         uint256 pendingAmount
     ) internal pure returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
-        // Creates BuyOrderUpdate structs directly without encoding
         buyUpdates = new ICCListing.BuyOrderUpdate[](2);
         buyUpdates[0] = ICCListing.BuyOrderUpdate({
             structId: 2, // Amounts
@@ -498,7 +496,7 @@ contract CCUniPartial is CCMainPartial {
             orderId: orderIdentifier,
             makerAddress: updateContext.makerAddress,
             recipientAddress: updateContext.recipient,
-            status: updateContext.status == 1 && updateContext.amountIn >= pendingAmount ? 3 : 2,
+            status: _computeOrderStatus(updateContext.normalizedReceived, updateContext.normalizedReceived, pendingAmount, updateContext.status),
             maxPrice: 0,
             minPrice: 0,
             pending: 0,
@@ -507,13 +505,12 @@ contract CCUniPartial is CCMainPartial {
         });
     }
 
-    // Updated _createSellOrderUpdates to use SellOrderUpdate struct
+    // Creates SellOrderUpdate structs with correct status
     function _createSellOrderUpdates(
         uint256 orderIdentifier,
         SellOrderUpdateContext memory updateContext,
         uint256 pendingAmount
     ) internal pure returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
-        // Creates SellOrderUpdate structs directly without encoding
         sellUpdates = new ICCListing.SellOrderUpdate[](2);
         sellUpdates[0] = ICCListing.SellOrderUpdate({
             structId: 2, // Amounts
@@ -532,7 +529,7 @@ contract CCUniPartial is CCMainPartial {
             orderId: orderIdentifier,
             makerAddress: updateContext.makerAddress,
             recipientAddress: updateContext.recipient,
-            status: updateContext.status == 1 && updateContext.amountIn >= pendingAmount ? 3 : 2,
+            status: _computeOrderStatus(updateContext.normalizedReceived, updateContext.normalizedReceived, pendingAmount, updateContext.status),
             maxPrice: 0,
             minPrice: 0,
             pending: 0,

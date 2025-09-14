@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.7
+// Version: 0.1.8
 // Changes:
+// - v0.1.8: addresses Incorrect pending amount updates in _prepareUpdateData. 
 // - v0.1.7: Patched _prepareUpdateData to use swap results from context.buyUpdates or context.sellUpdates for pending and amountSent. Updated pending to subtract swapAmount from prior pending amount. Ensured amountSent reflects actual swap amount. Streamlined _applyOrderUpdate to pass through swap results directly.
 // - v0.1.6: Modified _applyOrderUpdate and _prepareUpdateData to use ICCListing.BuyOrderUpdate and SellOrderUpdate structs directly, removing encoding/decoding. Updated OrderProcessContext to hold BuyOrderUpdate[] or SellOrderUpdate[]. Fixed return types for _processBuyOrder and _processSellOrder.
 // - v0.1.5: Modified _applyOrderUpdate to call ccUpdate for each UpdateType struct individually, ensuring compliance with requirement for separate updates.
@@ -272,9 +273,45 @@ function _computeSwapAmount(
     }
 
 
-    // Updated _prepareUpdateData to create new structs directly
-        // Uses swap results from context.buyUpdates or context.sellUpdates
-    // Updates pending by subtracting swapAmount and uses actual amountSent
+    // Helper: Extracts pending amount from swap results
+    function _extractPendingAmount(
+        OrderProcessContext memory context,
+        bool isBuyOrder
+    ) internal pure returns (uint256 pending) {
+        if (isBuyOrder && context.buyUpdates.length > 0) {
+            return context.buyUpdates[0].pending;
+        } else if (!isBuyOrder && context.sellUpdates.length > 0) {
+            return context.sellUpdates[0].pending;
+        }
+        return 0;
+    }
+
+    // Helper: Updates filled and status in updates
+    function _updateFilledAndStatus(
+        OrderProcessContext memory context,
+        bool isBuyOrder,
+        uint256 pendingAmount
+    ) internal pure returns (
+        ICCListing.BuyOrderUpdate[] memory buyUpdates,
+        ICCListing.SellOrderUpdate[] memory sellUpdates
+    ) {
+        if (isBuyOrder && context.buyUpdates.length > 0) {
+            buyUpdates = context.buyUpdates;
+            buyUpdates[0].filled = context.filled + context.swapAmount;
+            buyUpdates[1].status = context.status == 1 && context.swapAmount >= pendingAmount ? 3 : 2;
+            sellUpdates = new ICCListing.SellOrderUpdate[](0);
+        } else if (!isBuyOrder && context.sellUpdates.length > 0) {
+            sellUpdates = context.sellUpdates;
+            sellUpdates[0].filled = context.filled + context.swapAmount;
+            sellUpdates[1].status = context.status == 1 && context.swapAmount >= pendingAmount ? 3 : 2;
+            buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+        } else {
+            buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+            sellUpdates = new ICCListing.SellOrderUpdate[](0);
+        }
+    }
+
+    // Prepares update data using swap results directly
     function _prepareUpdateData(
         OrderProcessContext memory context,
         bool isBuyOrder
@@ -282,27 +319,8 @@ function _computeSwapAmount(
         ICCListing.BuyOrderUpdate[] memory buyUpdates,
         ICCListing.SellOrderUpdate[] memory sellUpdates
     ) {
-        if (isBuyOrder) {
-            buyUpdates = context.buyUpdates; // Use swap results directly
-            if (buyUpdates.length > 0) {
-                buyUpdates[0].pending = context.pendingAmount > context.swapAmount ? context.pendingAmount - context.swapAmount : 0; // Subtract swapAmount
-                buyUpdates[0].filled = context.filled + context.swapAmount; // Retain correct filled logic
-                buyUpdates[1].status = context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2; // Retain status logic
-            } else {
-                buyUpdates = new ICCListing.BuyOrderUpdate[](0);
-            }
-            sellUpdates = new ICCListing.SellOrderUpdate[](0);
-        } else {
-            sellUpdates = context.sellUpdates; // Use swap results directly
-            if (sellUpdates.length > 0) {
-                sellUpdates[0].pending = context.pendingAmount > context.swapAmount ? context.pendingAmount - context.swapAmount : 0; // Subtract swapAmount
-                sellUpdates[0].filled = context.filled + context.swapAmount; // Retain correct filled logic
-                sellUpdates[1].status = context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2; // Retain status logic
-            } else {
-                sellUpdates = new ICCListing.SellOrderUpdate[](0);
-            }
-            buyUpdates = new ICCListing.BuyOrderUpdate[](0);
-        }
+        uint256 pendingAmount = _extractPendingAmount(context, isBuyOrder);
+        return _updateFilledAndStatus(context, isBuyOrder, pendingAmount);
     }
 
     // Updated _applyOrderUpdate to use new structs
