@@ -5,9 +5,10 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
 
 **SPDX License**: BSL 1.1 - Peng Protocol 2025
 
-**Version**: 0.1.13 (Updated 2025-09-14)
+**Version**: 0.1.14 (Updated 2025-09-14)
 
 **Changes**:
+- v0.1.14: Updated to reflect `CCLiquidityPartial.sol` (v0.1.29)  with  inverted `updateType` in `_executeFeeClaim` for fee subtraction.
 - v0.1.13: Updated to reflect `CCLiquidityPartial.sol` (v0.1.28) with `_executeFeeClaim` using `updateType` 8/9 for fee subtraction. Updated `_transferWithdrawalAmount` to revert if compensation transfer fails when `compensationAmount > 0` (v0.1.27). Corrected compatibility versions.
 - v0.1.12: Updated to reflect `CCLiquidityPartial.sol` (v0.1.26) with `_executeWithdrawal` reordered to call `_transferWithdrawalAmount` before `_updateWithdrawalAllocation`.
 - v0.1.11: Updated to reflect `CCLiquidityPartial.sol` (v0.1.25) with fixed `listingContract` declarations in `_fetchWithdrawalData` and `_updateWithdrawalAllocation`.
@@ -188,7 +189,7 @@ The `CCLiquidityRouter` contract, written in Solidity (^0.8.2), facilitates liqu
   - `_processFeeShare` (CCLiquidityPartial):
     - Calls `_validateFeeClaim`: Checks slot ownership, liquidity, and fees via `ICCListing.liquidityAddressView`, `ICCLiquidity.liquidityDetailsView`, `getXSlotView` or `getYSlotView`. Creates `FeeClaimContext`.
     - Calls `_calculateFeeShare`: Computes `feeShare` using fee share formula.
-    - Calls `_executeFeeClaim`: Creates `UpdateType` array (updateType=8 for xFees subtraction, 9 for yFees subtraction, 6 for xSlot dFeesAcc, 7 for ySlot dFeesAcc), calls `ICCLiquidity.ccUpdate`, transfers fees via `transactToken` or `transactNative`, emits `FeesClaimed`.
+    - Calls `_executeFeeClaim`: Creates `UpdateType` array (updateType=9 for xFees subtraction, 8 for yFees subtraction, 6 for xSlot dFeesAcc, 7 for ySlot dFeesAcc), calls `ICCLiquidity.ccUpdate`, transfers fees via `transactToken` or `transactNative`, emits `FeesClaimed`.
 - **Balance Checks**: `xLiquid`/`yLiquid`, `allocation`, and `fees` in `_validateFeeClaim`.
 - **Restrictions**: `nonReentrant`, `onlyValidListing`.
 - **Gas**: Two `ccUpdate` calls, one transfer.

@@ -2,8 +2,9 @@
 pragma solidity ^0.8.2;
 
 /*
-// Version: 0.1.28
+// Version: 0.1.29
 // Changes:
+// - v0.1.29: Corrected inverted updateType in _executeFeeClaim for fee subtraction
 // - v0.1.28: Modified _executeFeeClaim to use updateType 8 (xFees subtraction) or 9 (yFees subtraction) for fee reduction.
 // - v0.1.27: Modified _transferWithdrawalAmount to track success of primary and compensation transfers, reverting if compensation transfer fails when compensationAmount > 0. Ensures slot allocation is only updated if both transfers succeed, preventing allocation reduction without full transfer. Preserves existing event emissions and functionality.
 // - v0.1.26: Reordered _executeWithdrawal to call _transferWithdrawalAmount before _updateWithdrawalAllocation to prevent slot allocation reduction if transactNative or transactToken fails.
@@ -548,7 +549,7 @@ function _validateFeeClaim(address listingAddress, address depositor, uint256 li
         revert(string(abi.encodePacked("Liquidity details fetch failed: ", reason)));
     }
     ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](2);
-    updates[0] = ICCLiquidity.UpdateType(context.isX ? 8 : 9, context.isX ? 1 : 0, context.feeShare, address(0), address(0)); // Subtract feeShare
+    updates[0] = ICCLiquidity.UpdateType(context.isX ? 9 : 8, context.isX ? 1 : 0, context.feeShare, address(0), address(0)); // Subtract feeShare
     updates[1] = ICCLiquidity.UpdateType(context.isX ? 6 : 7, context.liquidityIndex, context.isX ? yFeesAcc : xFeesAcc, context.depositor, address(0));
     try liquidityContract.ccUpdate(context.depositor, updates) {
     } catch (bytes memory reason) {
