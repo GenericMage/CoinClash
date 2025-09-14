@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-Version: 0.0.40
-Changes:
+ Version: 0.0.41
+ Changes:
+ - v0.0.41: Removed redundant liquidity updates in _prepBuyOrderUpdate and _prepSellOrderUpdate to prevent double-counting. Consolidated token transfers to _prepareLiquidityUpdates, ensuring single execution of transactToken/transactNative. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.40: Fixed _prepareLiquidityUpdates to correctly update yLiquid (index 1) for buy orders and xLiquid (index 0) for sell orders. Updated _createBuyOrderUpdates and _createSellOrderUpdates to use transactToken for ERC20 and transactNative for ETH. Fixed status calculation to check pendingAmount - preTransferWithdrawn > 0 for partial fills. Updated _executeOrderWithFees to capture current historical volume from listingContract without incrementing, preventing double-counting with CCListingTemplate.sol. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.39: Added reverts for critical errors in _executeOrderWithFees and _prepareLiquidityUpdates. Added pre-settlement validation in _processSingleOrder to skip orders with invalid pricing or insufficient x/yLiquid. Ensured transactToken/transactNative only use available x/yLiquid. Non-critical errors (e.g., no orders) remain non-reverting. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.38: Updated _createBuyOrderUpdates, _createSellOrderUpdates, _prepBuyLiquidUpdates, and _prepSellLiquidUpdates to use CCListingTemplate.sol v0.3.9 ccUpdate with BuyOrderUpdate, SellOrderUpdate structs. Ensured compatibility with CCLiquidRouter.sol v0.0.25.
@@ -288,59 +289,33 @@ function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext
     });
 }
 
-    function _prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal returns (PrepOrderUpdateResult memory result) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pending, uint256 filled,) = listingContract.getBuyOrderAmounts(orderIdentifier);
-        require(amountReceived <= pending, "Amount exceeds pending");
-        (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
-        (result.makerAddress, result.recipientAddress,) = listingContract.getBuyOrderCore(orderIdentifier);
-        (uint256 amountOut, , address tokenOut) = _prepareLiquidityTransaction(listingAddress, amountReceived, true);
-        uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
-        uint256 denormalizedAmountOut = denormalize(amountOut, listingContract.decimalsA());
-        result.preTransferWithdrawn = denormalizedAmount;
-        result.amountReceived = amountReceived;
-        result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
-        result.amountSent = _computeAmountSent(tokenOut, result.recipientAddress, denormalizedAmountOut);
-        if (uniswapV2Router == address(0)) {
-            emit MissingUniswapRouter(listingAddress, orderIdentifier, "Uniswap router not set");
-            return result;
-        }
-        if (result.tokenAddress != address(0)) {
-            try IERC20(result.tokenAddress).approve(uniswapV2Router, denormalizedAmount) {} catch Error(string memory reason) {
-                emit ApprovalFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
-            }
-        }
-        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
-            emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
-        }
-    }
+    function _prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal view returns (PrepOrderUpdateResult memory result) {
+    // Prepares buy order update without token transfers or liquidity updates
+    ICCListing listingContract = ICCListing(listingAddress);
+    (uint256 pending, uint256 filled,) = listingContract.getBuyOrderAmounts(orderIdentifier);
+    require(amountReceived <= pending, "Amount exceeds pending");
+    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
+    (result.makerAddress, result.recipientAddress,) = listingContract.getBuyOrderCore(orderIdentifier);
+    (uint256 amountOut,, address tokenOut) = _prepareLiquidityTransaction(listingAddress, amountReceived, true);
+    result.preTransferWithdrawn = denormalize(amountReceived, result.tokenDecimals);
+    result.amountReceived = amountReceived;
+    result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
+    result.amountSent = _computeAmountSent(tokenOut, result.recipientAddress, denormalize(amountOut, listingContract.decimalsA()));
+}
 
-    function _prepSellOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal returns (PrepOrderUpdateResult memory result) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pending, uint256 filled,) = listingContract.getSellOrderAmounts(orderIdentifier);
-        require(amountReceived <= pending, "Amount exceeds pending");
-        (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
-        (result.makerAddress, result.recipientAddress,) = listingContract.getSellOrderCore(orderIdentifier);
-        (uint256 amountOut, , address tokenOut) = _prepareLiquidityTransaction(listingAddress, amountReceived, false);
-        uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
-        uint256 denormalizedAmountOut = denormalize(amountOut, listingContract.decimalsB());
-        result.preTransferWithdrawn = denormalizedAmount;
-        result.amountReceived = amountReceived;
-        result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
-        result.amountSent = _computeAmountSent(tokenOut, result.recipientAddress, denormalizedAmountOut);
-        if (uniswapV2Router == address(0)) {
-            emit MissingUniswapRouter(listingAddress, orderIdentifier, "Uniswap router not set");
-            return result;
-        }
-        if (result.tokenAddress != address(0)) {
-            try IERC20(result.tokenAddress).approve(uniswapV2Router, denormalizedAmount) {} catch Error(string memory reason) {
-                emit ApprovalFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
-            }
-        }
-        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
-            emit TokenTransferFailed(listingAddress, orderIdentifier, result.tokenAddress, reason);
-        }
-    }
+    function _prepSellOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal view returns (PrepOrderUpdateResult memory result) {
+    // Prepares sell order update without token transfers or liquidity updates
+    ICCListing listingContract = ICCListing(listingAddress);
+    (uint256 pending, uint256 filled,) = listingContract.getSellOrderAmounts(orderIdentifier);
+    require(amountReceived <= pending, "Amount exceeds pending");
+    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
+    (result.makerAddress, result.recipientAddress,) = listingContract.getSellOrderCore(orderIdentifier);
+    (uint256 amountOut,, address tokenOut) = _prepareLiquidityTransaction(listingAddress, amountReceived, false);
+    result.preTransferWithdrawn = denormalize(amountReceived, result.tokenDecimals);
+    result.amountReceived = amountReceived;
+    result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
+    result.amountSent = _computeAmountSent(tokenOut, result.recipientAddress, denormalize(amountOut, listingContract.decimalsB()));
+}
 
     function _prepBuyLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) private returns (bool success) {
     // Prepares and executes buy order updates, returns success status
