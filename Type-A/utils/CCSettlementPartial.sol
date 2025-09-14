@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.6
+// Version: 0.1.7
 // Changes:
+// - v0.1.7: Patched _prepareUpdateData to use swap results from context.buyUpdates or context.sellUpdates for pending and amountSent. Updated pending to subtract swapAmount from prior pending amount. Ensured amountSent reflects actual swap amount. Streamlined _applyOrderUpdate to pass through swap results directly.
 // - v0.1.6: Modified _applyOrderUpdate and _prepareUpdateData to use ICCListing.BuyOrderUpdate and SellOrderUpdate structs directly, removing encoding/decoding. Updated OrderProcessContext to hold BuyOrderUpdate[] or SellOrderUpdate[]. Fixed return types for _processBuyOrder and _processSellOrder.
 // - v0.1.5: Modified _applyOrderUpdate to call ccUpdate for each UpdateType struct individually, ensuring compliance with requirement for separate updates.
 // - v0.1.4: Refactored _processBuyOrder and _processSellOrder to resolve stack-too-deep error. Split into helper functions (_validateOrderParams, _computeSwapAmount, _executeOrderSwap, _prepareUpdateData, _applyOrderUpdate) based on param groups (validation, swap calculation, execution, update prep, update application). Each helper handles at most 4 variables using OrderProcessContext struct. Ensured incremental updates to Core, Pricing, and Amounts structs via listingContract.ccUpdate.
@@ -272,6 +273,8 @@ function _computeSwapAmount(
 
 
     // Updated _prepareUpdateData to create new structs directly
+        // Uses swap results from context.buyUpdates or context.sellUpdates
+    // Updates pending by subtracting swapAmount and uses actual amountSent
     function _prepareUpdateData(
         OrderProcessContext memory context,
         bool isBuyOrder
@@ -279,65 +282,31 @@ function _computeSwapAmount(
         ICCListing.BuyOrderUpdate[] memory buyUpdates,
         ICCListing.SellOrderUpdate[] memory sellUpdates
     ) {
-        // Prepares BuyOrderUpdate or SellOrderUpdate structs without encoding
         if (isBuyOrder) {
-            buyUpdates = new ICCListing.BuyOrderUpdate[](2);
-            buyUpdates[0] = ICCListing.BuyOrderUpdate({
-                structId: 2, // Amounts
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: context.status,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: context.swapAmount,
-                filled: context.filled + context.swapAmount,
-                amountSent: context.amountSent
-            });
-            buyUpdates[1] = ICCListing.BuyOrderUpdate({
-                structId: 0, // Core
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: 0,
-                filled: 0,
-                amountSent: 0
-            });
+            buyUpdates = context.buyUpdates; // Use swap results directly
+            if (buyUpdates.length > 0) {
+                buyUpdates[0].pending = context.pendingAmount > context.swapAmount ? context.pendingAmount - context.swapAmount : 0; // Subtract swapAmount
+                buyUpdates[0].filled = context.filled + context.swapAmount; // Retain correct filled logic
+                buyUpdates[1].status = context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2; // Retain status logic
+            } else {
+                buyUpdates = new ICCListing.BuyOrderUpdate[](0);
+            }
             sellUpdates = new ICCListing.SellOrderUpdate[](0);
         } else {
-            sellUpdates = new ICCListing.SellOrderUpdate[](2);
-            sellUpdates[0] = ICCListing.SellOrderUpdate({
-                structId: 2, // Amounts
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: context.status,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: context.swapAmount,
-                filled: context.filled + context.swapAmount,
-                amountSent: context.amountSent
-            });
-            sellUpdates[1] = ICCListing.SellOrderUpdate({
-                structId: 0, // Core
-                orderId: context.orderId,
-                makerAddress: context.makerAddress,
-                recipientAddress: context.recipientAddress,
-                status: context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2,
-                maxPrice: 0,
-                minPrice: 0,
-                pending: 0,
-                filled: 0,
-                amountSent: 0
-            });
+            sellUpdates = context.sellUpdates; // Use swap results directly
+            if (sellUpdates.length > 0) {
+                sellUpdates[0].pending = context.pendingAmount > context.swapAmount ? context.pendingAmount - context.swapAmount : 0; // Subtract swapAmount
+                sellUpdates[0].filled = context.filled + context.swapAmount; // Retain correct filled logic
+                sellUpdates[1].status = context.status == 1 && context.swapAmount >= context.pendingAmount ? 3 : 2; // Retain status logic
+            } else {
+                sellUpdates = new ICCListing.SellOrderUpdate[](0);
+            }
             buyUpdates = new ICCListing.BuyOrderUpdate[](0);
         }
     }
 
     // Updated _applyOrderUpdate to use new structs
+        // Passes through swap results, applies updates via ccUpdate
     function _applyOrderUpdate(
         address listingAddress,
         ICCListing listingContract,
@@ -347,7 +316,6 @@ function _computeSwapAmount(
         ICCListing.BuyOrderUpdate[] memory buyUpdates,
         ICCListing.SellOrderUpdate[] memory sellUpdates
     ) {
-        // Applies updates using BuyOrderUpdate or SellOrderUpdate structs
         (buyUpdates, sellUpdates) = _prepareUpdateData(context, isBuyOrder);
         if (buyUpdates.length == 0 && sellUpdates.length == 0) {
             return (buyUpdates, sellUpdates);
