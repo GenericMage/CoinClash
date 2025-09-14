@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.8
+// Version: 0.1.9
 // Changes:
+// - v0.1.9: Adjusted pending amount in _createBuyOrderUpdates and _createSellOrderUpdates to use pendingAmount - updateContext.amountIn
 // - v0.1.8: Addresses Redundant amountReceived in BuyOrderUpdateContext and SellOrderUpdateContext
 // - v0.1.7: Addresses Incorrect status logic in _createBuyOrderUpdates and _createSellOrderUpdates
 // - v0.1.6: Modified _createBuyOrderUpdates and _createSellOrderUpdates to return BuyOrderUpdate and SellOrderUpdate structs directly, removing encoding/decoding. Updated _executePartialBuySwap and _executePartialSellSwap to return correct struct types.
@@ -472,69 +473,69 @@ function _executeSellETHSwapInternal(
         status = currentStatus == 1 && totalFilled >= pendingAmount ? 3 : 2;
     }
 
-    // Creates BuyOrderUpdate structs with correct status
-    function _createBuyOrderUpdates(
-        uint256 orderIdentifier,
-        BuyOrderUpdateContext memory updateContext,
-        uint256 pendingAmount
-    ) internal pure returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
-        buyUpdates = new ICCListing.BuyOrderUpdate[](2);
-        buyUpdates[0] = ICCListing.BuyOrderUpdate({
-            structId: 2, // Amounts
-            orderId: orderIdentifier,
-            makerAddress: updateContext.makerAddress,
-            recipientAddress: updateContext.recipient,
-            status: updateContext.status,
-            maxPrice: 0,
-            minPrice: 0,
-            pending: updateContext.amountIn,
-            filled: updateContext.normalizedReceived,
-            amountSent: updateContext.amountSent
-        });
-        buyUpdates[1] = ICCListing.BuyOrderUpdate({
-            structId: 0, // Core
-            orderId: orderIdentifier,
-            makerAddress: updateContext.makerAddress,
-            recipientAddress: updateContext.recipient,
-            status: _computeOrderStatus(updateContext.normalizedReceived, updateContext.normalizedReceived, pendingAmount, updateContext.status),
-            maxPrice: 0,
-            minPrice: 0,
-            pending: 0,
-            filled: 0,
-            amountSent: 0
-        });
-    }
+// Creates BuyOrderUpdate structs with correct pending amount
+function _createBuyOrderUpdates(
+    uint256 orderIdentifier,
+    BuyOrderUpdateContext memory updateContext,
+    uint256 pendingAmount
+) internal pure returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
+    buyUpdates = new ICCListing.BuyOrderUpdate[](2);
+    buyUpdates[0] = ICCListing.BuyOrderUpdate({
+        structId: 2, // Amounts
+        orderId: orderIdentifier,
+        makerAddress: updateContext.makerAddress,
+        recipientAddress: updateContext.recipient,
+        status: updateContext.status,
+        maxPrice: 0,
+        minPrice: 0,
+        pending: pendingAmount - updateContext.amountIn, // Fixed: remaining pending amount
+        filled: updateContext.normalizedReceived,
+        amountSent: updateContext.amountSent
+    });
+    buyUpdates[1] = ICCListing.BuyOrderUpdate({
+        structId: 0, // Core
+        orderId: orderIdentifier,
+        makerAddress: updateContext.makerAddress,
+        recipientAddress: updateContext.recipient,
+        status: _computeOrderStatus(updateContext.normalizedReceived, updateContext.normalizedReceived, pendingAmount, updateContext.status),
+        maxPrice: 0,
+        minPrice: 0,
+        pending: 0,
+        filled: 0,
+        amountSent: 0
+    });
+}
 
-    // Creates SellOrderUpdate structs with correct status
-    function _createSellOrderUpdates(
-        uint256 orderIdentifier,
-        SellOrderUpdateContext memory updateContext,
-        uint256 pendingAmount
-    ) internal pure returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
-        sellUpdates = new ICCListing.SellOrderUpdate[](2);
-        sellUpdates[0] = ICCListing.SellOrderUpdate({
-            structId: 2, // Amounts
-            orderId: orderIdentifier,
-            makerAddress: updateContext.makerAddress,
-            recipientAddress: updateContext.recipient,
-            status: updateContext.status,
-            maxPrice: 0,
-            minPrice: 0,
-            pending: updateContext.amountIn,
-            filled: updateContext.normalizedReceived,
-            amountSent: updateContext.amountSent
-        });
-        sellUpdates[1] = ICCListing.SellOrderUpdate({
-            structId: 0, // Core
-            orderId: orderIdentifier,
-            makerAddress: updateContext.makerAddress,
-            recipientAddress: updateContext.recipient,
-            status: _computeOrderStatus(updateContext.normalizedReceived, updateContext.normalizedReceived, pendingAmount, updateContext.status),
-            maxPrice: 0,
-            minPrice: 0,
-            pending: 0,
-            filled: 0,
-            amountSent: 0
-        });
-    }
+// Creates SellOrderUpdate structs with correct pending amount
+function _createSellOrderUpdates(
+    uint256 orderIdentifier,
+    SellOrderUpdateContext memory updateContext,
+    uint256 pendingAmount
+) internal pure returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
+    sellUpdates = new ICCListing.SellOrderUpdate[](2);
+    sellUpdates[0] = ICCListing.SellOrderUpdate({
+        structId: 2, // Amounts
+        orderId: orderIdentifier,
+        makerAddress: updateContext.makerAddress,
+        recipientAddress: updateContext.recipient,
+        status: updateContext.status,
+        maxPrice: 0,
+        minPrice: 0,
+        pending: pendingAmount - updateContext.amountIn, // Fixed: remaining pending amount
+        filled: updateContext.normalizedReceived,
+        amountSent: updateContext.amountSent
+    });
+    sellUpdates[1] = ICCListing.SellOrderUpdate({
+        structId: 0, // Core
+        orderId: orderIdentifier,
+        makerAddress: updateContext.makerAddress,
+        recipientAddress: updateContext.recipient,
+        status: _computeOrderStatus(updateContext.normalizedReceived, updateContext.normalizedReceived, pendingAmount, updateContext.status),
+        maxPrice: 0,
+        minPrice: 0,
+        pending: 0,
+        filled: 0,
+        amountSent: 0
+    });
+}
 }
