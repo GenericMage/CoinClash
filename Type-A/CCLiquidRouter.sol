@@ -36,7 +36,6 @@ import "./utils/CCLiquidPartial.sol";
 
 contract CCLiquidRouter is CCLiquidPartial {
     event NoPendingOrders(address indexed listingAddress, bool isBuyOrder);
-    event InsufficientBalance(address indexed listingAddress, uint256 required, uint256 available);
 
     struct HistoricalUpdateContext {
     uint256 xBalance;

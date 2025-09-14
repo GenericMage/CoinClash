@@ -1,7 +1,8 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-Version: 0.0.38
+Version: 0.0.39
 Changes: 
+- v0.0.39: Added reverts for critical errors in _executeOrderWithFees and _prepareLiquidityUpdates. Added pre-settlement validation in _processSingleOrder to skip orders with invalid pricing or insufficient x/yLiquid. Ensured transactToken/transactNative only use available x/yLiquid. Non-critical errors (e.g., no orders) remain non-reverting. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.38: Updated _createBuyOrderUpdates, _createSellOrderUpdates, _prepBuyLiquidUpdates, and _prepSellLiquidUpdates to use CCListingTemplate.sol v0.3.9 ccUpdate with BuyOrderUpdate, SellOrderUpdate structs. Ensured compatibility with CCLiquidRouter.sol v0.0.25.
  - v0.0.37: Optimized CCLiquidPartial.sol by removing unused params and local variables, streamlined structs (removed unused fields in OrderContext, PrepOrderUpdateResult), consolidated repetitive logic in _prepareLiquidityUpdates and _executeOrderWithFees, reduced file size by ~6KB. Maintained compatibility with CCListingTemplate.sol v0.3.2, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.24.
  - v0.0.36: Updated _prepareLiquidityUpdates, _executeOrderWithFees, _processOrderBatch to call ccUpdate individually for each update type.
@@ -122,7 +123,8 @@ contract CCLiquidPartial is CCMainPartial {
     event SwapFailed(address indexed listingAddress, uint256 orderId, uint256 amountIn, string reason);
     event ApprovalFailed(address indexed listingAddress, uint256 orderId, address token, string reason);
     event UpdateFailed(address indexed listingAddress, string reason);
-
+    event InsufficientBalance(address indexed listingAddress, uint256 required, uint256 available);
+    
     function _getSwapReserves(address listingAddress, bool isBuyOrder) private view returns (SwapImpactContext memory context) {
         ICCListing listingContract = ICCListing(listingAddress);
         address pairAddress = listingContract.uniswapV2PairView();
@@ -534,56 +536,62 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
     }
 
     function _prepareLiquidityUpdates(address listingAddress, uint256 orderIdentifier, LiquidityUpdateContext memory context) private {
-        ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
-        (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
-        (address tokenAddress,) = _getTokenAndDecimals(listingAddress, context.isBuyOrder);
-        uint256 normalizedPending = normalize(context.pendingAmount, context.tokenDecimals);
-        uint256 normalizedSettle = normalize(context.amountOut, context.isBuyOrder ? ICCListing(listingAddress).decimalsA() : ICCListing(listingAddress).decimalsB());
-        FeeContext memory feeContext = _computeFee(listingAddress, context.pendingAmount, context.isBuyOrder);
-        uint256 normalizedFee = normalize(feeContext.feeAmount, context.tokenDecimals);
+    // Prepares liquidity updates, reverts on critical failures
+    ICCListing listingContract = ICCListing(listingAddress);
+    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
+    (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
+    (address tokenAddress, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, context.isBuyOrder);
+    uint256 normalizedPending = normalize(context.pendingAmount, context.tokenDecimals);
+    uint256 normalizedSettle = normalize(context.amountOut, context.isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
+    FeeContext memory feeContext = _computeFee(listingAddress, context.pendingAmount, context.isBuyOrder);
+    uint256 normalizedFee = normalize(feeContext.feeAmount, context.tokenDecimals);
 
-        ICCLiquidity.UpdateType memory update;
+    // Validate liquidity before updates
+    require(context.isBuyOrder ? yLiquid >= normalizedPending : xLiquid >= normalizedPending, "Insufficient input liquidity");
+    require(context.isBuyOrder ? xLiquid >= normalizedSettle : yLiquid >= normalizedSettle, "Insufficient output liquidity");
 
-        update = ICCLiquidity.UpdateType({
-            updateType: 0,
-            index: context.isBuyOrder ? 0 : 1,
-            value: context.isBuyOrder ? xLiquid + normalizedPending : yLiquid + normalizedPending,
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
-            emit SwapFailed(listingAddress, orderIdentifier, context.pendingAmount, string(abi.encodePacked("Incoming liquidity update failed: ", reason)));
-        }
+    ICCLiquidity.UpdateType memory update;
 
-        update = ICCLiquidity.UpdateType({
-            updateType: 0,
-            index: context.isBuyOrder ? 1 : 0,
-            value: context.isBuyOrder ? yLiquid - normalizedSettle : xLiquid - normalizedSettle,
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
-            emit SwapFailed(listingAddress, orderIdentifier, context.pendingAmount, string(abi.encodePacked("Outgoing liquidity update failed: ", reason)));
-        }
-
-        update = ICCLiquidity.UpdateType({
-            updateType: 1,
-            index: context.isBuyOrder ? 1 : 0,
-            value: normalizedFee,
-            addr: address(this),
-            recipient: address(0)
-        });
-        try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
-            emit SwapFailed(listingAddress, orderIdentifier, context.pendingAmount, string(abi.encodePacked("Fee update failed: ", reason)));
-        }
-
-        try ICCListing(listingAddress).transactToken(tokenAddress, context.pendingAmount, ICCListing(listingAddress).liquidityAddressView()) {} catch Error(string memory reason) {
-            emit TokenTransferFailed(listingAddress, orderIdentifier, tokenAddress, reason);
-        }
+    update = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: context.isBuyOrder ? 0 : 1,
+        value: context.isBuyOrder ? xLiquid + normalizedPending : yLiquid + normalizedPending,
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Incoming liquidity update failed: ", reason)));
     }
 
-    function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount, FeeContext memory feeContext) private returns (bool success) {
-    // Executes order with fees, returns success status
+    update = ICCLiquidity.UpdateType({
+        updateType: 0,
+        index: context.isBuyOrder ? 1 : 0,
+        value: context.isBuyOrder ? yLiquid - normalizedSettle : xLiquid - normalizedSettle,
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Outgoing liquidity update failed: ", reason)));
+    }
+
+    update = ICCLiquidity.UpdateType({
+        updateType: 1,
+        index: context.isBuyOrder ? 1 : 0,
+        value: normalizedFee,
+        addr: address(this),
+        recipient: address(0)
+    });
+    try liquidityContract.ccUpdate(address(this), _toSingleUpdateArray(update)) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Fee update failed: ", reason)));
+    }
+
+    try listingContract.transactToken(tokenAddress, context.pendingAmount, listingContract.liquidityAddressView()) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+    }
+}
+
+function _executeOrderWithFees(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount, FeeContext memory feeContext) private returns (bool success) {
+    // Executes order with fees, reverts on critical failures
     ICCListing listingContract = ICCListing(listingAddress);
     emit FeeDeducted(listingAddress, orderIdentifier, isBuyOrder, feeContext.feeAmount, feeContext.netAmount);
     LiquidityUpdateContext memory liquidityContext = _computeSwapAmount(listingAddress, feeContext, isBuyOrder);
@@ -591,12 +599,35 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
     success = isBuyOrder
         ? executeSingleBuyLiquid(listingAddress, orderIdentifier)
         : executeSingleSellLiquid(listingAddress, orderIdentifier);
+    require(success, string(abi.encodePacked("Order execution failed for orderId: ", uint2str(orderIdentifier))));
 }
 
-    function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (bool success) {
-    // Processes single order, returns success status
+function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) internal returns (bool success) {
+    // Processes single order, skips if invalid pricing or insufficient liquidity
+    ICCListing listingContract = ICCListing(listingAddress);
+    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
+    (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
     OrderProcessingContext memory context = _validateOrderPricing(listingAddress, orderIdentifier, isBuyOrder, pendingAmount);
-    if (context.impactPrice == 0) return false;
+    
+    // Skip order if pricing is out of bounds
+    if (context.impactPrice == 0) {
+        emit PriceOutOfBounds(listingAddress, orderIdentifier, context.impactPrice, context.maxPrice, context.minPrice);
+        return false;
+    }
+    
+    // Skip order if insufficient liquidity
+    uint256 normalizedPending = normalize(pendingAmount, isBuyOrder ? listingContract.decimalsB() : listingContract.decimalsA());
+    (, uint256 amountOut) = _computeSwapImpact(listingAddress, pendingAmount, isBuyOrder);
+    uint256 normalizedSettle = normalize(amountOut, isBuyOrder ? listingContract.decimalsA() : listingContract.decimalsB());
+    if (isBuyOrder ? yLiquid < normalizedPending : xLiquid < normalizedPending) {
+        emit InsufficientBalance(listingAddress, normalizedPending, isBuyOrder ? yLiquid : xLiquid);
+        return false;
+    }
+    if (isBuyOrder ? xLiquid < normalizedSettle : yLiquid < normalizedSettle) {
+        emit InsufficientBalance(listingAddress, normalizedSettle, isBuyOrder ? xLiquid : yLiquid);
+        return false;
+    }
+    
     FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
     success = _executeOrderWithFees(listingAddress, orderIdentifier, isBuyOrder, pendingAmount, feeContext);
 }
