@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.7
+// Version: 0.1.9
 // Changes:
+// - v0.1.9: Added validation in _executeSingleOrder to ensure normalizedReceived > 0.
 // - v0.1.8: Refactored _executeSingleOrder to use BuyOrderUpdate/SellOrderUpdate structs for ccUpdate calls, ensuring compatibility with CCListingTemplate.sol v0.3.10.
 // - v0.1.7: Refactored _executeSingleOrder to split ccUpdate into three separate calls for Core, Pricing, and Amounts structs, ensuring correct UpdateType encoding per CCListingTemplate.sol v0.3.8 requirements.
 // - v0.1.6: Replaced updateLiquidity with ccUpdate in settleSingleLongLiquid and settleSingleShortLiquid to align with ICCLiquidity interface update removing updateLiquidity.
@@ -71,26 +72,25 @@ contract CCOrderPartial is CCMainPartial {
     bool isBuy
 ) internal {
     // Executes single order creation, initializes amountSent and filled to 0
+    require(prep.normalizedReceived > 0, "No tokens received");
     ICCListing listingContract = ICCListing(listing);
     uint256 orderId = listingContract.getNextOrderId();
 
     // Prepare updates
     if (isBuy) {
         ICCListing.BuyOrderUpdate[] memory buyUpdates = new ICCListing.BuyOrderUpdate[](3);
-        // Core struct update
         buyUpdates[0] = ICCListing.BuyOrderUpdate({
             structId: 0,
             orderId: orderId,
             makerAddress: prep.maker,
             recipientAddress: prep.recipient,
-            status: 1, // pending
+            status: 1,
             maxPrice: 0,
             minPrice: 0,
             pending: 0,
             filled: 0,
             amountSent: 0
         });
-        // Pricing struct update
         buyUpdates[1] = ICCListing.BuyOrderUpdate({
             structId: 1,
             orderId: orderId,
@@ -103,7 +103,6 @@ contract CCOrderPartial is CCMainPartial {
             filled: 0,
             amountSent: 0
         });
-        // Amounts struct update
         buyUpdates[2] = ICCListing.BuyOrderUpdate({
             structId: 2,
             orderId: orderId,
@@ -119,20 +118,18 @@ contract CCOrderPartial is CCMainPartial {
         listingContract.ccUpdate(buyUpdates, new ICCListing.SellOrderUpdate[](0), new ICCListing.BalanceUpdate[](0), new ICCListing.HistoricalUpdate[](0));
     } else {
         ICCListing.SellOrderUpdate[] memory sellUpdates = new ICCListing.SellOrderUpdate[](3);
-        // Core struct update
         sellUpdates[0] = ICCListing.SellOrderUpdate({
             structId: 0,
             orderId: orderId,
             makerAddress: prep.maker,
             recipientAddress: prep.recipient,
-            status: 1, // pending
+            status: 1,
             maxPrice: 0,
             minPrice: 0,
             pending: 0,
             filled: 0,
             amountSent: 0
         });
-        // Pricing struct update
         sellUpdates[1] = ICCListing.SellOrderUpdate({
             structId: 1,
             orderId: orderId,
@@ -145,7 +142,6 @@ contract CCOrderPartial is CCMainPartial {
             filled: 0,
             amountSent: 0
         });
-        // Amounts struct update
         sellUpdates[2] = ICCListing.SellOrderUpdate({
             structId: 2,
             orderId: orderId,

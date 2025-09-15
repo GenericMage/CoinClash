@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.3
+// Version: 0.1.4
 // Changes:
+// - v0.1.4: Patched _checkTransferAmountNative to remove circular ETH transfer, directly track msg.value. 
 // - v0.1.3: Updated settleLongLiquid and settleShortLiquid to use ICCLiquidity.activeLongPayoutsView and ICCLiquidity.activeShortPayoutsView instead of ICCListing for fetching active payout IDs, aligning with payout functionality move to CCLiquidityTemplate.sol v0.1.9.
 // - v0.1.2: Updated settleLongLiquid and settleShortLiquid to use activeLongPayoutsView and activeShortPayoutsView for fetching active payout IDs, integrating with updated settleSingleLongLiquid and settleSingleShortLiquid from CCOrderPartial.sol v0.1.4.
 // - v0.1.1: Removed settleLong/ShortPayout.
@@ -127,21 +128,16 @@ contract CCOrderRouter is CCOrderPartial {
     }
 
     function _checkTransferAmountNative(
-        address to,
-        address from,
-        uint256 inputAmount
-    ) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
-        // Transfers ETH, normalizes received amount
-        ICCListing listingContract = ICCListing(to);
-        uint8 tokenDecimals = 18;
-        uint256 preBalance = to.balance;
-        require(msg.value == inputAmount, "Incorrect ETH amount");
-        listingContract.transactNative{value: inputAmount}(inputAmount, to);
-        uint256 postBalance = to.balance;
-        amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
-        require(amountReceived > 0, "No ETH received");
-    }
+    address to,
+    address from,
+    uint256 inputAmount
+) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
+    // Transfers ETH, normalizes received amount
+    require(msg.value == inputAmount, "Incorrect ETH amount");
+    amountReceived = inputAmount;
+    normalizedReceived = normalize(amountReceived, 18);
+    require(amountReceived > 0, "No ETH received");
+}
 
     function clearSingleOrder(address listingAddress, uint256 orderIdentifier, bool isBuyOrder) external onlyValidListing(listingAddress) nonReentrant {
         // Clears a single order, maker check in _clearOrderData
