@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.4
+// Version: 0.1.5
 // Changes:
+// - v0.1.5: Added allowance check in _checkTransferAmountToken with explicit error.
 // - v0.1.4: Patched _checkTransferAmountNative to remove circular ETH transfer, directly track msg.value. 
 // - v0.1.3: Updated settleLongLiquid and settleShortLiquid to use ICCLiquidity.activeLongPayoutsView and ICCLiquidity.activeShortPayoutsView instead of ICCListing for fetching active payout IDs, aligning with payout functionality move to CCLiquidityTemplate.sol v0.1.9.
 // - v0.1.2: Updated settleLongLiquid and settleShortLiquid to use activeLongPayoutsView and activeShortPayoutsView for fetching active payout IDs, integrating with updated settleSingleLongLiquid and settleSingleShortLiquid from CCOrderPartial.sol v0.1.4.
@@ -111,21 +112,23 @@ contract CCOrderRouter is CCOrderPartial {
     }
 
     function _checkTransferAmountToken(
-        address tokenAddress,
-        address from,
-        address to,
-        uint256 inputAmount
-    ) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
-        // Transfers ERC20 tokens, normalizes received amount
-        ICCListing listingContract = ICCListing(to);
-        uint8 tokenDecimals = IERC20(tokenAddress).decimals();
-        uint256 preBalance = IERC20(tokenAddress).balanceOf(to);
-        IERC20(tokenAddress).transferFrom(from, to, inputAmount);
-        uint256 postBalance = IERC20(tokenAddress).balanceOf(to);
-        amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-        normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
-        require(amountReceived > 0, "No tokens received");
-    }
+    address tokenAddress,
+    address from,
+    address to,
+    uint256 inputAmount
+) internal returns (uint256 amountReceived, uint256 normalizedReceived) {
+    // Transfers ERC20 tokens, normalizes received amount
+    ICCListing listingContract = ICCListing(to);
+    uint8 tokenDecimals = IERC20(tokenAddress).decimals();
+    uint256 allowance = IERC20(tokenAddress).allowance(from, address(this));
+    require(allowance >= inputAmount, "Insufficient token allowance");
+    uint256 preBalance = IERC20(tokenAddress).balanceOf(to);
+    IERC20(tokenAddress).transferFrom(from, to, inputAmount);
+    uint256 postBalance = IERC20(tokenAddress).balanceOf(to);
+    amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
+    normalizedReceived = amountReceived > 0 ? normalize(amountReceived, tokenDecimals) : 0;
+    require(amountReceived > 0, "No tokens received");
+}
 
     function _checkTransferAmountNative(
     address to,

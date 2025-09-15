@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.9
+// Version: 0.1.10
 // Changes:
+// - v0.1.10: Added comment clarifying normalizedReceived validation in _executeSingleOrder is before ETH transfer to prevent stuck funds. Added comment in _executeSingleOrder clarifying no race condition for nextOrderId due to EVM sequential execution.
 // - v0.1.9: Added validation in _executeSingleOrder to ensure normalizedReceived > 0.
 // - v0.1.8: Refactored _executeSingleOrder to use BuyOrderUpdate/SellOrderUpdate structs for ccUpdate calls, ensuring compatibility with CCListingTemplate.sol v0.3.10.
 // - v0.1.7: Refactored _executeSingleOrder to split ccUpdate into three separate calls for Core, Pricing, and Amounts structs, ensuring correct UpdateType encoding per CCListingTemplate.sol v0.3.8 requirements.
@@ -72,6 +73,8 @@ contract CCOrderPartial is CCMainPartial {
     bool isBuy
 ) internal {
     // Executes single order creation, initializes amountSent and filled to 0
+    // No race condition for nextOrderId as EVM processes transactions sequentially
+    // Ensures normalizedReceived to listing address is validated before ccUpdate call
     require(prep.normalizedReceived > 0, "No tokens received");
     ICCListing listingContract = ICCListing(listing);
     uint256 orderId = listingContract.getNextOrderId();
