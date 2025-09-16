@@ -1,7 +1,11 @@
 /*
  SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
- Version: 0.0.41
- Changes:
+ Version: 0.0.45
+- v0.0.45: Updated _prepBuyLiquidUpdates and _prepSellLiquidUpdates to pass amountOut to _prepBuyOrderUpdate and _prepSellOrderUpdate, resolving parameter mismatch.
+ - v0.0.45: Fixed TypeError in _processSingleOrder by passing amountOut to _prepBuyOrderUpdate and _prepSellOrderUpdate. Ensured amountSent uses pre/post balance checks.
+ - v0.0.44: Added status field to PrepOrderUpdateResult struct. Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to handle status correctly, fixing TypeError. Ensured amountSent uses pre/post balance checks. 
+ - v0.0.43: Fixed TypeError by updating _prepBuyOrderUpdate and _prepSellOrderUpdate to return PrepOrderUpdateResult, added amountOut parameter, aligned with CCLiquidPartial.sol v0.0.41. Fixed amountSent with pre/post balance checks.
+ - v0.0.42: Fixed amountSent in _prepBuyOrderUpdate and _prepSellOrderUpdate to use pre/post balance checks for accurate settlement tracking. Commented in _prepLiquidityUpdates about token usage. (Sept 16 '24)
  - v0.0.41: Removed redundant liquidity updates in _prepBuyOrderUpdate and _prepSellOrderUpdate to prevent double-counting. Consolidated token transfers to _prepareLiquidityUpdates, ensuring single execution of transactToken/transactNative. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.40: Fixed _prepareLiquidityUpdates to correctly update yLiquid (index 1) for buy orders and xLiquid (index 0) for sell orders. Updated _createBuyOrderUpdates and _createSellOrderUpdates to use transactToken for ERC20 and transactNative for ETH. Fixed status calculation to check pendingAmount - preTransferWithdrawn > 0 for partial fills. Updated _executeOrderWithFees to capture current historical volume from listingContract without incrementing, preventing double-counting with CCListingTemplate.sol. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
 - v0.0.39: Added reverts for critical errors in _executeOrderWithFees and _prepareLiquidityUpdates. Added pre-settlement validation in _processSingleOrder to skip orders with invalid pricing or insufficient x/yLiquid. Ensured transactToken/transactNative only use available x/yLiquid. Non-critical errors (e.g., no orders) remain non-reverting. Compatible with CCListingTemplate.sol v0.3.9, CCMainPartial.sol v0.1.5, CCLiquidityTemplate.sol v0.1.18, CCLiquidRouter.sol v0.0.25.
@@ -51,15 +55,16 @@ contract CCLiquidPartial is CCMainPartial {
     }
 
     struct PrepOrderUpdateResult {
-        address tokenAddress;
-        uint8 tokenDecimals;
-        address makerAddress;
-        address recipientAddress;
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        uint256 amountSent;
-        uint256 preTransferWithdrawn;
-    }
+    address tokenAddress;
+    uint8 tokenDecimals;
+    address makerAddress;
+    address recipientAddress;
+    uint256 amountReceived;
+    uint256 normalizedReceived;
+    uint256 amountSent;
+    uint256 preTransferWithdrawn;
+    uint8 status; // Added to store order status
+}
 
     struct BuyOrderUpdateContext {
         address makerAddress;
@@ -289,32 +294,62 @@ function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext
     });
 }
 
-    function _prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal view returns (PrepOrderUpdateResult memory result) {
-    // Prepares buy order update without token transfers or liquidity updates
+    function _prepBuyOrderUpdate(
+    address listingAddress,
+    uint256 orderId,
+    uint256 pendingAmount,
+    uint256 amountOut
+) private returns (PrepOrderUpdateResult memory result) {
+    // Prepares buy order update with accurate amountSent and status
     ICCListing listingContract = ICCListing(listingAddress);
-    (uint256 pending, uint256 filled,) = listingContract.getBuyOrderAmounts(orderIdentifier);
-    require(amountReceived <= pending, "Amount exceeds pending");
-    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
-    (result.makerAddress, result.recipientAddress,) = listingContract.getBuyOrderCore(orderIdentifier);
-    (uint256 amountOut,, address tokenOut) = _prepareLiquidityTransaction(listingAddress, amountReceived, true);
-    result.preTransferWithdrawn = denormalize(amountReceived, result.tokenDecimals);
-    result.amountReceived = amountReceived;
-    result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
-    result.amountSent = _computeAmountSent(tokenOut, result.recipientAddress, denormalize(amountOut, listingContract.decimalsA()));
+    (result.makerAddress, result.recipientAddress, result.status) = listingContract.getBuyOrderCore(orderId);
+    result.tokenAddress = listingContract.tokenA();
+    result.tokenDecimals = listingContract.decimalsA();
+    result.amountReceived = amountOut;
+    result.normalizedReceived = normalize(amountOut, result.tokenDecimals);
+    
+    // Pre/post balance check for amountSent
+    uint256 balanceBefore = result.tokenAddress == address(0) 
+        ? result.recipientAddress.balance 
+        : IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+    try listingContract.transactToken(result.tokenAddress, amountOut, result.recipientAddress) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+    }
+    uint256 balanceAfter = result.tokenAddress == address(0) 
+        ? result.recipientAddress.balance 
+        : IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+    result.amountSent = balanceBefore > balanceAfter ? 0 : balanceAfter - balanceBefore;
+    result.preTransferWithdrawn = result.amountSent >= result.amountReceived ? result.amountReceived : result.amountSent;
+    result.status = result.status == 3 ? 3 : (pendingAmount - result.preTransferWithdrawn > 0 ? 2 : 3);
 }
 
-    function _prepSellOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived) internal view returns (PrepOrderUpdateResult memory result) {
-    // Prepares sell order update without token transfers or liquidity updates
+function _prepSellOrderUpdate(
+    address listingAddress,
+    uint256 orderId,
+    uint256 pendingAmount,
+    uint256 amountOut
+) private returns (PrepOrderUpdateResult memory result) {
+    // Prepares sell order update with accurate amountSent and status
     ICCListing listingContract = ICCListing(listingAddress);
-    (uint256 pending, uint256 filled,) = listingContract.getSellOrderAmounts(orderIdentifier);
-    require(amountReceived <= pending, "Amount exceeds pending");
-    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
-    (result.makerAddress, result.recipientAddress,) = listingContract.getSellOrderCore(orderIdentifier);
-    (uint256 amountOut,, address tokenOut) = _prepareLiquidityTransaction(listingAddress, amountReceived, false);
-    result.preTransferWithdrawn = denormalize(amountReceived, result.tokenDecimals);
-    result.amountReceived = amountReceived;
-    result.normalizedReceived = normalize(amountReceived, result.tokenDecimals);
-    result.amountSent = _computeAmountSent(tokenOut, result.recipientAddress, denormalize(amountOut, listingContract.decimalsB()));
+    (result.makerAddress, result.recipientAddress, result.status) = listingContract.getSellOrderCore(orderId);
+    result.tokenAddress = listingContract.tokenB();
+    result.tokenDecimals = listingContract.decimalsB();
+    result.amountReceived = amountOut;
+    result.normalizedReceived = normalize(amountOut, result.tokenDecimals);
+    
+    // Pre/post balance check for amountSent
+    uint256 balanceBefore = result.tokenAddress == address(0) 
+        ? result.recipientAddress.balance 
+        : IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+    try listingContract.transactToken(result.tokenAddress, amountOut, result.recipientAddress) {} catch Error(string memory reason) {
+        revert(string(abi.encodePacked("Token transfer failed: ", reason)));
+    }
+    uint256 balanceAfter = result.tokenAddress == address(0) 
+        ? result.recipientAddress.balance 
+        : IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+    result.amountSent = balanceBefore > balanceAfter ? 0 : balanceAfter - balanceBefore;
+    result.preTransferWithdrawn = result.amountSent >= result.amountReceived ? result.amountReceived : result.amountSent;
+    result.status = result.status == 3 ? 3 : (pendingAmount - result.preTransferWithdrawn > 0 ? 2 : 3);
 }
 
     function _prepBuyLiquidUpdates(OrderContext memory context, uint256 orderIdentifier, uint256 pendingAmount) private returns (bool success) {
@@ -323,7 +358,8 @@ function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext
         emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
         return false;
     }
-    PrepOrderUpdateResult memory result = _prepBuyOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount);
+    (, uint256 amountOut) = _computeSwapImpact(address(context.listingContract), pendingAmount, true);
+    PrepOrderUpdateResult memory result = _prepBuyOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount, amountOut);
     if (result.normalizedReceived == 0) {
         emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received");
         return false;
@@ -331,7 +367,7 @@ function _createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext
     BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
         makerAddress: result.makerAddress,
         recipient: result.recipientAddress,
-        status: 0,
+        status: result.status,
         amountReceived: result.amountReceived,
         normalizedReceived: result.normalizedReceived,
         amountSent: result.amountSent,
@@ -355,7 +391,8 @@ function _prepSellLiquidUpdates(OrderContext memory context, uint256 orderIdenti
         emit MissingUniswapRouter(address(context.listingContract), orderIdentifier, "Uniswap router not set");
         return false;
     }
-    PrepOrderUpdateResult memory result = _prepSellOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount);
+    (, uint256 amountOut) = _computeSwapImpact(address(context.listingContract), pendingAmount, false);
+    PrepOrderUpdateResult memory result = _prepSellOrderUpdate(address(context.listingContract), orderIdentifier, pendingAmount, amountOut);
     if (result.normalizedReceived == 0) {
         emit SwapFailed(address(context.listingContract), orderIdentifier, pendingAmount, "No tokens received");
         return false;
@@ -363,7 +400,7 @@ function _prepSellLiquidUpdates(OrderContext memory context, uint256 orderIdenti
     SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
         makerAddress: result.makerAddress,
         recipient: result.recipientAddress,
-        status: 0,
+        status: result.status,
         amountReceived: result.amountReceived,
         normalizedReceived: result.normalizedReceived,
         amountSent: result.amountSent,
@@ -531,6 +568,7 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
     ICCLiquidity.UpdateType memory update;
 
     // Update incoming liquidity (buy: yLiquid, sell: xLiquid)
+    // Buys use TokenB (yLiquid) as principal, while expecting TokenA (xLiquid) as settlement. Vice Versa for sells. 
     update = ICCLiquidity.UpdateType({
         updateType: 0,
         index: context.isBuyOrder ? 1 : 0,
@@ -646,6 +684,9 @@ function _processSingleOrder(address listingAddress, uint256 orderIdentifier, bo
     }
     
     FeeContext memory feeContext = _computeFee(listingAddress, pendingAmount, isBuyOrder);
+    PrepOrderUpdateResult memory result = isBuyOrder
+        ? _prepBuyOrderUpdate(listingAddress, orderIdentifier, pendingAmount, amountOut)
+        : _prepSellOrderUpdate(listingAddress, orderIdentifier, pendingAmount, amountOut);
     success = _executeOrderWithFees(listingAddress, orderIdentifier, isBuyOrder, pendingAmount, feeContext);
 }
 
