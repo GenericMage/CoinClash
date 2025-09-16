@@ -5,27 +5,28 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.10 (updated 2025-09-16)
+**Version:** 0.1.11 (updated 2025-09-16)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.3.9)
 - `CCMainPartial.sol` (v0.1.5)
-- `CCUniPartial.sol` (v0.1.13)
-- `CCSettlementPartial.sol` (v0.1.10)
+- `CCUniPartial.sol` (v0.1.12)
+- `CCSettlementPartial.sol` (v0.1.11)
 
 ### Changes
+- **v0.1.11**: Updated to reflect `CCSettlementPartial.sol` v0.1.11 (removed `ccUpdate` from `_applyOrderUpdate`, made it pure, ensuring single `ccUpdate` in `CCSettlementRouter.sol`'s `_updateOrder`, fixing redundant updates to `pending`, `filled`, `amountSent`). Compatible with `CCSettlementRouter.sol` v0.1.6, `CCUniPartial.sol` v0.1.12, `CCListingTemplate.sol` v0.3.9.
 - **v0.1.10**: Updated to reflect `CCSettlementRouter.sol` v0.1.6 (updated `_updateOrder` to use `BuyOrderUpdate`/`SellOrderUpdate` structs directly in `ccUpdate`, updated `OrderContext` to hold `BuyOrderUpdate[]`/`SellOrderUpdate[]`, modified `settleOrders` to use live balances/prices via `volumeBalances` and `prices`), `CCSettlementPartial.sol` v0.1.10 (added `amountIn` to `PrepOrderUpdateResult`, fixing TypeError in `_prepBuyOrderUpdate` and `_prepSellOrderUpdate`), and `CCUniPartial.sol` v0.1.13 (fixed TypeError in `_finalizeTokenSwap`, `_executeBuyETHSwap`, `_finalizeSellTokenSwap`, and `_executeSellETHSwapInternal` by destructuring tuples from `getBuyOrderAmounts` and `getSellOrderAmounts` to access `filled`). Ensured `filled` uses `amountIn` (principal token: tokenB for buys, tokenA for sells) and `amountSent` uses `amountInReceived` (settlement token: tokenA for buys, tokenB for sells).
-- **v0.1.9**: Updated to reflect `CCSettlementPartial.sol` v0.1.10 (added `amountIn` to `PrepOrderUpdateResult`, fixing TypeError in `_prepBuyOrderUpdate` and `_prepSellOrderUpdate`) and `CCUniPartial.sol` v0.1.13 (fixed TypeError in `_finalizeTokenSwap`, `_executeBuyETHSwap`, `_finalizeSellTokenSwap`, and `_executeSellETHSwapInternal` by destructuring tuples from `getBuyOrderAmounts` and `getSellOrderAmounts` to access `filled`). Ensured `filled` uses `amountIn` (principal token: tokenB for buys, tokenA for sells) and `amountSent` uses `amountInReceived` (settlement token: tokenA for buys, tokenB for sells).
-- **v0.1.8**: Fixed `TypeError` in `settleOrders` by adding `isBuyOrder` to `_updateOrder` call and updating `ccUpdate` to use four arguments (`buyUpdates`, `sellUpdates`, `balanceUpdates`, `historicalUpdates`) per `CCListingTemplate.sol` v0.3.9. Fixed `TypeError` in `_processOrder` by replacing `context.updates` with `context.buyUpdates` or `context.sellUpdates`. Fixed `TypeError` in `_executeOrderSwap` (`CCSettlementPartial.sol`) and `_executeBuyETHSwap`, `_executeSellETHSwapInternal`, `_executeBuyTokenSwap`, `_executeSellTokenSwap` (`CCUniPartial.sol`) by updating return types to `BuyOrderUpdate[]` or `SellOrderUpdate[]`. Added `uint2str` to resolve `DeclarationError`. Updated comments to clarify order updates are prepared in `CCUniPartial.sol`, refined in `CCSettlementPartial.sol`, and applied in `CCSettlementRouter.sol` via `ccUpdate`.
+- **v0.1.9**: Updated to reflect `CCSettlementPartial.sol` v0.1.10 and `CCUniPartial.sol` v0.1.13. Ensured `filled` uses `amountIn` and `amountSent` uses `amountInReceived`.
+- **v0.1.8**: Fixed `TypeError` in `settleOrders` by adding `isBuyOrder` to `_updateOrder` call and updating `ccUpdate` to use four arguments (`buyUpdates`, `sellUpdates`, `balanceUpdates`, `historicalUpdates`) per `CCListingTemplate.sol` v0.3.9. Fixed `TypeError` in `_processOrder` by replacing `context.updates` with `context.buyUpdates` or `context.sellUpdates`. Fixed `TypeError` in `_executeOrderSwap`, `_executeBuyETHSwap`, `_executeSellETHSwapInternal`, `_executeBuyTokenSwap`, `_executeSellTokenSwap` by updating return types to `BuyOrderUpdate[]` or `SellOrderUpdate[]`. Added `uint2str` to resolve `DeclarationError`. Updated comments to clarify order updates are prepared in `CCUniPartial.sol`, refined in `CCSettlementPartial.sol`, and applied in `CCSettlementRouter.sol` via `ccUpdate`.
 - **v0.1.7**: Fixed `TypeError` in `_applyOrderUpdate` and `_updateOrder` by using `BuyOrderUpdate` and `SellOrderUpdate` structs directly in `ccUpdate`, removing encoding/decoding. Updated `OrderContext` and `OrderProcessContext` to hold `BuyOrderUpdate[]` or `SellOrderUpdate[]`. Updated compatibility to `CCListingTemplate.sol` v0.3.8.
 - **v0.1.6**: Modified `settleOrders` to fetch live balances, price, and current historical volumes instead of using latest historical data entry for new historical data creation. Uses `volumeBalances` and `prices` functions from `listingContract` for live data.
 - **v0.1.5**: Updated to reflect `CCSettlementRouter.sol` v0.1.2, where `settleOrders` handles `HistoricalData` struct from `getHistoricalDataView`. Assigned struct to a variable and accessed fields explicitly for `ccUpdate`. Ensured compatibility with `CCListingTemplate.sol` v0.3.6, `CCMainPartial.sol` v0.1.5, `CCUniPartial.sol` v0.1.5, `CCSettlementPartial.sol` v0.1.3.
-- **v0.1.4**: Updated to reflect `CCSettlementPartial.sol` v0.1.4, where `_processBuyOrder` and `_processSellOrder` were refactored to resolve stack-too-deep errors. Split into helper functions (`_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`) using `OrderProcessContext` struct, each handling at most 4 variables. Corrected `_computeSwapAmount` to `internal` due to event emissions (`NonCriticalNoPendingOrder`, `NonCriticalPriceOutOfBounds`, `NonCriticalZeroSwapAmount`). Compatible with `CCListingTemplate.sol` v0.2.26, `CCMainPartial.sol` v0.1.1, `CCUniPartial.sol` v0.1.5.
-- **v0.1.3**: Added events `NonCriticalPriceOutOfBounds`, `NonCriticalNoPendingOrder`, `NonCriticalZeroSwapAmount` to log non-critical issues. Emitted in `_processBuyOrder` and `_processSellOrder` for price out of bounds, no pending orders, and zero swap amount cases to ensure non-reverting behavior with logging.
-- **v0.1.2**: Updated to reflect `CCSettlementRouter.sol` v0.1.0 (refactored `settleOrders` with `OrderContext`), `CCSettlementPartial.sol` v0.1.2 (added `_computeMaxAmountIn`, uses `ccUpdate`), and `CCUniPartial.sol` v0.1.5 (fixed `TypeError` for `BuyOrderUpdateContext`/`SellOrderUpdateContext` with `amountIn`). Corrected `listingContract.update` to `ccUpdate`.
-- **v0.0.13**: Refactored `settleOrders` into `_validateOrder`, `_processOrder`, `_updateOrder` with `OrderContext` to resolve stack-too-deep error.
+- **v0.1.4**: Updated to reflect `CCSettlementPartial.sol` v0.1.4, where `_processBuyOrder` and `_processSellOrder` were refactored to resolve stack-too-deep errors. Split into helper functions (`_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`) using `OrderProcessContext` struct, each handling at most 4 variables. Corrected `_computeSwapAmount` to `internal` due to event emissions. Compatible with `CCListingTemplate.sol` v0.2.26, `CCMainPartial.sol` v0.1.1, `CCUniPartial.sol` v0.1.5.
+- **v0.1.3**: Added events `NonCriticalPriceOutOfBounds`, `NonCriticalNoPendingOrder`, `NonCriticalZeroSwapAmount` to log non-critical issues in `_processBuyOrder` and `_processSellOrder`.
+- **v0.1.2**: Updated to reflect `CCSettlementRouter.sol` v0.1.0, `CCSettlementPartial.sol` v0.1.2, and `CCUniPartial.sol` v0.1.5. Corrected `listingContract.update` to `ccUpdate`.
+- **v0.0.13**: Refactored `settleOrders` into `_validateOrder`, `_processOrder`, `_updateOrder` with `OrderContext`.
 - **v0.0.12**: Removed `this.` from `_processBuyOrder` and `_processSellOrder` calls.
 - **v0.0.11**: Enhanced error logging for token transfers, Uniswap swaps, and approvals.
 
@@ -36,51 +37,34 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **OrderContext** (`CCSettlementRouter`): Contains `orderId` (uint256), `pending` (uint256), `status` (uint8), `buyUpdates` (ICCListing.BuyOrderUpdate[]), `sellUpdates` (ICCListing.SellOrderUpdate[]).
 - **OrderProcessContext** (`CCSettlementPartial`): Contains `orderId` (uint256), `pendingAmount` (uint256), `filled` (uint256), `amountSent` (uint256), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `maxPrice` (uint256), `minPrice` (uint256), `currentPrice` (uint256), `maxAmountIn` (uint256), `swapAmount` (uint256), `buyUpdates` (ICCListing.BuyOrderUpdate[]), `sellUpdates` (ICCListing.SellOrderUpdate[]).
 - **PrepOrderUpdateResult** (`CCSettlementPartial`): Contains `tokenAddress` (address), `tokenDecimals` (uint8), `makerAddress` (address), `recipientAddress` (address), `orderStatus` (uint8), `amountReceived` (uint256), `normalizedReceived` (uint256), `amountSent` (uint256), `amountIn` (uint256).
-- **MaxAmountInContext**, **SwapContext**, **SwapImpactContext**, **BuyOrderUpdateContext**, **SellOrderUpdateContext**, **TokenSwapData**, **ETHSwapData**, **ReserveContext**, **ImpactContext** (`CCUniPartial`): Used for swap execution and update preparation.
-- **SwapContext** (`CCUniPartial`): Contains `listingContract` (ICCListing), `makerAddress` (address), `recipientAddress` (address), `status` (uint8), `tokenIn` (address), `tokenOut` (address), `decimalsIn` (uint8), `decimalsOut` (uint8), `denormAmountIn` (uint256), `denormAmountOutMin` (uint256), `price` (uint256), `expectedAmountOut` (uint256).
-- **SwapImpactContext** (`CCUniPartial`): Contains `reserveIn` (uint256), `reserveOut` (uint256), `decimalsIn` (uint8), `decimalsOut` (uint8), `normalizedReserveIn` (uint256), `normalizedReserveOut` (uint256), `amountInAfterFee` (uint256), `price` (uint256), `amountOut` (uint256).
-- **BuyOrderUpdateContext** (`CCUniPartial`): Contains `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, post-transfer tokenA), `normalizedReceived` (uint256), `amountSent` (uint256, post-transfer tokenA), `amountIn` (uint256, pre-transfer tokenB).
-- **SellOrderUpdateContext** (`CCUniPartial`): Contains `makerAddress` (address), `recipient` (address), `status` (uint8), `amountReceived` (uint256, post-transfer tokenB), `normalizedReceived` (uint256), `amountSent` (uint256, post-transfer tokenB), `amountIn` (uint256, pre-transfer tokenA).
 
-## External Functions and Call Trees
-- **settleOrders(address listingAddress, uint256 step, uint256 maxIterations, bool isBuyOrder)** (`CCSettlementRouter`):
-  - **Description**: Processes pending buy or sell orders from `listingAddress` using `pendingBuyOrdersView` or `pendingSellOrdersView`, starting at `step`, up to `maxIterations`. Creates a new `HistoricalUpdate` entry via `ccUpdate` if pending orders exist, using live data from `volumeBalances` and `prices`. Iterates over orders, calling `_validateOrder`, `_processOrder`, and `_updateOrder`.
-  - **Call Tree**:
-    - Calls `listingContract.pendingBuyOrdersView()` or `pendingSellOrdersView()` to fetch order IDs.
-    - Calls `_validateOrder(listingAddress, orderId, isBuyOrder, listingContract)` for each order.
-    - Calls `_processOrder(listingAddress, isBuyOrder, listingContract, context)` to process orders.
-    - Calls `_updateOrder(listingContract, context, isBuyOrder)` to apply updates via `ccUpdate`.
-    - Calls `listingContract.ccUpdate([], [], [], historicalUpdates)` for historical data.
-  - **Internal Calls**:
-    - `_validateOrder`: Validates order parameters, sets `pending` to 0 if invalid.
-    - `_processOrder`: Delegates to `_processBuyOrder` or `_processSellOrder`.
-    - `_updateOrder`: Applies `buyUpdates` or `sellUpdates` via `ccUpdate`.
-- **_processOrder(address listingAddress, bool isBuyOrder, ICCListing listingContract, OrderContext memory context)** (`CCSettlementRouter`):
-  - **Description**: Processes a single order by calling `_processBuyOrder` or `_processSellOrder` and returns updated context with `buyUpdates` or `sellUpdates`.
-  - **Call Tree**:
-    - Calls `_processBuyOrder(listingAddress, context.orderId, listingContract)` or `_processSellOrder(listingAddress, context.orderId, listingContract)`.
-    - Assigns `buyUpdates` or `sellUpdates` to `context`.
-  - **Internal Calls**:
-    - `_processBuyOrder`/`_processSellOrder`: Handles swap execution and update preparation.
-- **_updateOrder(ICCListing listingContract, OrderContext memory context, bool isBuyOrder)** (`CCSettlementRouter`):
-  - **Description**: Applies order updates via `listingContract.ccUpdate(buyUpdates, sellUpdates, [], [])`, returns success and reason.
-  - **Call Tree**:
-    - Calls `listingContract.ccUpdate` with `buyUpdates` or `sellUpdates` based on `isBuyOrder`.
-  - **Internal Calls**: None direct; relies on `ccUpdate` implementation in `CCListingTemplate.sol`.
-- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract)** (`CCSettlementRouter`): Validates order status and pricing, returns `OrderContext`.
+## External Functions
+- **settleOrders(address listingAddress, uint256 step, uint256 maxIterations, bool isBuyOrder) → string memory reason** (`CCSettlementRouter`):
+  - Iterates over pending orders (`pendingBuyOrdersView` or `pendingSellOrdersView`) from `step` up to `maxIterations`.
+  - Validates orders via `_validateOrder`, processes via `_processOrder`, and applies updates via `_updateOrder`.
+  - Creates a `HistoricalUpdate` at the start using live data (`volumeBalances`, `prices`, `historicalDataLengthView`, `getHistoricalDataView`) if orders exist.
+  - Calls `ccUpdate` for historical data and order updates (prepared in `CCUniPartial.sol`, refined in `CCSettlementPartial.sol`).
+  - Returns empty string on success or error reason (e.g., "No orders settled: price out of range, insufficient tokens, or swap failure").
+  - **Internal Call Tree**:
+    - `_validateOrder` → Fetches order data (`getBuyOrderAmounts`/`getSellOrderAmounts`, `getBuyOrderCore`/`getSellOrderCore`), checks pricing via `_checkPricing`.
+    - `_processOrder` → Calls `_processBuyOrder` or `_processSellOrder` (from `CCSettlementPartial`).
+    - `_updateOrder` → Applies `ccUpdate` with `buyUpdates` or `sellUpdates`.
+  - **Modifiers**: `nonReentrant`, `onlyValidListing`.
 
 ## Internal Functions
+- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context** (`CCSettlementRouter`): Fetches order data and validates pricing.
+- **_processOrder(address listingAddress, bool isBuyOrder, ICCListing listingContract, OrderContext memory context) → OrderContext memory** (`CCSettlementRouter`): Calls `_processBuyOrder` or `_processSellOrder`.
+- **_updateOrder(ICCListing listingContract, OrderContext memory context, bool isBuyOrder) → (bool success, string memory reason)** (`CCSettlementRouter`): Applies `ccUpdate` with `buyUpdates` or `sellUpdates`, returns success or error reason.
 - **_processBuyOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract) → ICCListing.BuyOrderUpdate[] memory buyUpdates** (`CCSettlementPartial`):
-  - Validates parameters, computes swap amount, executes swap, prepares and applies updates.
-  - Calls: `_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`.
+  - Orchestrates buy order processing via `_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`.
+  - Returns `buyUpdates` for `_updateOrder` in `CCSettlementRouter.sol`.
 - **_processSellOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract) → ICCListing.SellOrderUpdate[] memory sellUpdates** (`CCSettlementPartial`):
   - Similar to `_processBuyOrder` for sell orders.
-  - Calls: `_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_prepareUpdateData`, `_applyOrderUpdate`.
 - **_validateOrderParams(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, ICCListing listingContract) → OrderProcessContext memory context** (`CCSettlementPartial`): Fetches and validates order data.
 - **_computeSwapAmount(address listingAddress, bool isBuyOrder, OrderProcessContext memory context) → OrderProcessContext memory** (`CCSettlementPartial`): Computes `swapAmount` within price and reserve constraints.
 - **_executeOrderSwap(address listingAddress, bool isBuyOrder, OrderProcessContext memory context) → OrderProcessContext memory** (`CCSettlementPartial`): Executes Uniswap V2 swap via `_executePartialBuySwap` or `_executePartialSellSwap`.
 - **_prepareUpdateData(OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)** (`CCSettlementPartial`): Prepares update structs.
-- **_applyOrderUpdate(address listingAddress, ICCListing listingContract, OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)** (`CCSettlementPartial`): Applies updates via `ccUpdate`.
+- **_applyOrderUpdate(address listingAddress, ICCListing listingContract, OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)** (`CCSettlementPartial`): Prepares `buyUpdates` or `sellUpdates` (pure after v0.1.11).
 - **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory** (`CCUniPartial`): Creates buy order updates, sets `filled` to `amountIn` (tokenB), `amountSent` to `amountInReceived` (tokenA).
 - **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory** (`CCUniPartial`): Creates sell order updates, sets `filled` to `amountIn` (tokenA), `amountSent` to `amountInReceived` (tokenB).
 - **_executeBuyTokenSwap**, **_executeSellTokenSwap**, **_executeBuyETHSwap**, **_executeSellETHSwapInternal**, **_finalizeTokenSwap**, **_finalizeSellTokenSwap**, **_executePartialBuySwap**, **_executePartialSellSwap**, **_computeCurrentPrice**, **_computeSwapImpact**, **_fetchReserves**, **_prepareSwapData**, **_prepareSellSwapData**, **_prepareTokenSwap**, **_executeTokenSwap**, **_performETHBuySwap**, **_performETHSellSwap** (`CCUniPartial`): Handle swap execution and update preparation.
@@ -132,7 +116,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
   - `to`: `recipientAddress`.
   - `deadline`: `block.timestamp + 15 minutes`.
 - **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `ccUpdate` with decoded reasons (v0.1.5).
-- **Status Handling**: If `updateContext.status == 1` (active) and `updateContext.amountIn >= pendingAmount`, status is set to `3` (fully settled). Otherwise, status is set to `2` (partially settled). Partially settled orders may also be set to fully settled.
+- **Status Handling**: If `updateContext.status == 1` (active) and `updateContext.amountIn >= pendingAmount`, status is set to `3` (fully settled). Otherwise, status is set to `2` (partially settled).
 - **ccUpdate Call Locations**:
-  - **CCSettlementRouter.sol**: Handles all `ccUpdate` calls to `CCListingTemplate.sol`. The `_updateOrder` function applies order updates (`buyUpdates` or `sellUpdates`) for buy or sell orders. The `settleOrders` function applies historical data updates (`historicalUpdates`) at the start of order processing. Updates are prepared in `CCUniPartial.sol` (via `_createBuyOrderUpdates`/`_createSellOrderUpdates`), refined in `CCSettlementPartial.sol` (via `_prepareUpdateData`/`_applyOrderUpdate`), and applied only in `CCSettlementRouter.sol`.
-  - **No Duplicate Calls**: The call tree ensures `ccUpdate` is invoked once per order in `_updateOrder` (via `_processOrder` → `_processBuyOrder`/`_processSellOrder` → `_applyOrderUpdate`) and once for historical data in `settleOrders`. No redundant calls occur, as `_applyOrderUpdate` is part of the `_processOrder` flow, not an independent trigger.
+  - **CCSettlementRouter.sol**: Handles all `ccUpdate` calls to `CCListingTemplate.sol`. The `_updateOrder` function applies order updates (`buyUpdates` or `sellUpdates`) for buy or sell orders. The `settleOrders` function applies historical data updates (`historicalUpdates`) at the start of order processing. Updates are prepared in `CCUniPartial.sol` (via `_createBuyOrderUpdates`/`_createSellOrderUpdates`), refined in `CCSettlementPartial.sol` (via `_prepareUpdateData`/`_applyOrderUpdate`, now pure), and applied only in `CCSettlementRouter.sol`.
+  - **No Duplicate Calls**: After v0.1.11, `_applyOrderUpdate` is pure, and `ccUpdate` is called once per order in `_updateOrder` and once for historical data in `settleOrders`.

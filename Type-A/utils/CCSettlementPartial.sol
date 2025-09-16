@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.10
+// Version: 0.1.11
 // Changes:
+// - v0.1.11: Removed ccUpdate call from _applyOrderUpdate to prevent redundant state updates. Made _applyOrderUpdate pure, returning prepared BuyOrderUpdate/SellOrderUpdate structs for single ccUpdate call in CCSettlementRouter.sol's _updateOrder. Fixes double updates to pending, filled, and amountSent. 
 // - v0.1.10: Added amountIn to PrepOrderUpdateResult struct to track input token amount, fixing TypeError in _prepBuyOrderUpdate and _prepSellOrderUpdate. Compatible with CCUniPartial.sol v0.1.11.
 // - v0.1.9: Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to use amountIn for input token amount and amountSent for recipient’s received amount via pre/post balance checks.
 // - v0.1.8: addresses Incorrect pending amount updates in _prepareUpdateData. 
@@ -326,31 +327,19 @@ function _computeSwapAmount(
         return _updateFilledAndStatus(context, isBuyOrder, pendingAmount);
     }
 
-    // Updated _applyOrderUpdate to use new structs
-        // Passes through swap results, applies updates via ccUpdate
+    // Prepares update data using swap results directly, now pure
     function _applyOrderUpdate(
         address listingAddress,
         ICCListing listingContract,
         OrderProcessContext memory context,
         bool isBuyOrder
-    ) internal returns (
+    ) internal pure returns (
         ICCListing.BuyOrderUpdate[] memory buyUpdates,
         ICCListing.SellOrderUpdate[] memory sellUpdates
     ) {
+        // Prepares BuyOrderUpdate/SellOrderUpdate structs; updates applied in CCSettlementRouter.sol via ccUpdate
         (buyUpdates, sellUpdates) = _prepareUpdateData(context, isBuyOrder);
-        if (buyUpdates.length == 0 && sellUpdates.length == 0) {
-            return (buyUpdates, sellUpdates);
-        }
-        try listingContract.ccUpdate(
-            isBuyOrder ? buyUpdates : new ICCListing.BuyOrderUpdate[](0),
-            isBuyOrder ? new ICCListing.SellOrderUpdate[](0) : sellUpdates,
-            new ICCListing.BalanceUpdate[](0),
-            new ICCListing.HistoricalUpdate[](0)
-        ) {
-            return (buyUpdates, sellUpdates);
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("ccUpdate failed for order ", uint2str(context.orderId), ": ", reason)));
-        }
+        return (buyUpdates, sellUpdates);
     }
 
     // Updated _processBuyOrder to return BuyOrderUpdate[]
