@@ -135,9 +135,9 @@ Formulas in `CCLiquidPartial.sol` (v0.0.45) govern settlement and price impact c
 - **_prepSellLiquidUpdates**: Validates pricing, computes `amountOut`, calls `_prepSellOrderUpdate`, `_createSellOrderUpdates`.
 - **_executeOrderWithFees**: Emits `FeeDeducted`, creates `HistoricalUpdate` with current `xVolume`, `yVolume`, executes order via `executeSingleBuy/SellLiquid`, reverts on critical failures.
 - **_processSingleOrder**: Validates prices and liquidity, computes fees, executes order, skips on insufficient liquidity or invalid pricing.
-- **_processOrderBatch**: Iterates orders, skips settled orders, returns success status.
-- **_createBuyOrderUpdates**: Builds `BuyOrderUpdate` structs for `ccUpdate`, sets status (0: cancelled, 2: partially filled, 3: filled).
-- **_createSellOrderUpdates**: Builds `SellOrderUpdate` structs for `ccUpdate`, sets status (0: cancelled, 2: partially filled, 3: filled).
+- **_processOrderBatch**: Iterates orders, skips settled orders (pendingAmount == 0), returns success status.
+- **_createBuyOrderUpdates**: Builds `BuyOrderUpdate` structs for `ccUpdate`, sets status (0: cancelled, 2: partially filled, 3: filled). If `pendingAmount == 0` when fetched in `_processOrderBatch`, the order is skipped and not processed. During settlement, if `pendingAmount == 0` (e.g., fully processed or malformed) and no tokens are transferred (e.g., due to insufficient liquidity, invalid pricing, or transfer failure), `newStatus` is set to 0 (cancelled) as a safeguard to mark the order as invalid. Status 3 (filled) is set when `context.preTransferWithdrawn >= pendingAmount`, indicating the entire `pendingAmount` was successfully transferred and settled in `_prepBuyOrderUpdate` (e.g., `pendingAmount` of 20 tokens reduced to 0 via successful transfer of tokenB, with tokenA output sent to the recipient). Status 2 (partially filled) is set when `context.preTransferWithdrawn < pendingAmount`, indicating partial settlement.
+- **_createSellOrderUpdates**: Builds `SellOrderUpdate` structs for `ccUpdate`, sets status (0: cancelled, 2: partially filled, 3: filled). If `pendingAmount == 0` when fetched in `_processOrderBatch`, the order is skipped and not processed. During settlement, if `pendingAmount == 0` (e.g., fully processed or malformed) and no tokens are transferred (e.g., due to insufficient liquidity, invalid pricing, or transfer failure), `newStatus` is set to 0 (cancelled) as a safeguard to mark the order as invalid. Status 3 (filled) is set when `context.preTransferWithdrawn >= pendingAmount`, indicating the entire `pendingAmount` was successfully transferred and settled in `_prepSellOrderUpdate` (e.g., `pendingAmount` of 20 tokens reduced to 0 via successful transfer of tokenA, with tokenB output sent to the recipient). Status 2 (partially filled) is set when `context.preTransferWithdrawn < pendingAmount`, indicating partial settlement.
 - **_finalizeUpdates**: Resizes `BuyOrderUpdate[]` or `SellOrderUpdate[]` based on `isBuyOrder`.
 - **_uint2str**: Converts uint to string for error messages.
 
@@ -154,7 +154,7 @@ Formulas in `CCLiquidPartial.sol` (v0.0.45) govern settlement and price impact c
   - Hidden state variables (`agent`, `uniswapV2Router`) accessed via view functions.
   - Avoids reserved keywords, `virtual`/`override`.
   - Graceful degradation with events (`NoPendingOrders`, `InsufficientBalance`, `PriceOutOfBounds`, `UpdateFailed`, `MissingUniswapRouter`, `ApprovalFailed`, `TokenTransferFailed`, `SwapFailed`).
-  - Skips settled orders via `pendingAmount == 0`.
+  - Skips settled orders via `pendingAmount == 0` in `_processOrderBatch`.
   - Validates `step <= identifiers.length`.
   - Validates liquidity in `_processSingleOrder` (v0.0.45).
   - Struct-based `ccUpdate` calls with `BuyOrderUpdate`, `SellOrderUpdate`, `BalanceUpdate`, `HistoricalUpdate` (v0.0.25).
