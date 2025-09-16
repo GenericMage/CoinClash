@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.8
+// Version: 0.1.10
 // Changes:
+// - v0.1.10: Added amountIn to PrepOrderUpdateResult struct to track input token amount, fixing TypeError in _prepBuyOrderUpdate and _prepSellOrderUpdate. Compatible with CCUniPartial.sol v0.1.11.
+// - v0.1.9: Updated _prepBuyOrderUpdate and _prepSellOrderUpdate to use amountIn for input token amount and amountSent for recipient’s received amount via pre/post balance checks.
 // - v0.1.8: addresses Incorrect pending amount updates in _prepareUpdateData. 
 // - v0.1.7: Patched _prepareUpdateData to use swap results from context.buyUpdates or context.sellUpdates for pending and amountSent. Updated pending to subtract swapAmount from prior pending amount. Ensured amountSent reflects actual swap amount. Streamlined _applyOrderUpdate to pass through swap results directly.
 // - v0.1.6: Modified _applyOrderUpdate and _prepareUpdateData to use ICCListing.BuyOrderUpdate and SellOrderUpdate structs directly, removing encoding/decoding. Updated OrderProcessContext to hold BuyOrderUpdate[] or SellOrderUpdate[]. Fixed return types for _processBuyOrder and _processSellOrder.
@@ -21,15 +23,16 @@ import "./CCMainPartial.sol";
 
 contract CCSettlementPartial is CCUniPartial {
     struct PrepOrderUpdateResult {
-        address tokenAddress;
-        uint8 tokenDecimals;
-        address makerAddress;
-        address recipientAddress;
-        uint8 orderStatus;
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        uint256 amountSent;
-    }
+    address tokenAddress;
+    uint8 tokenDecimals;
+    address makerAddress;
+    address recipientAddress;
+    uint8 orderStatus;
+    uint256 amountReceived;
+    uint256 normalizedReceived;
+    uint256 amountSent;
+    uint256 amountIn; // Tracks input token amount
+}
     
     struct OrderProcessContext {
         uint256 orderId;
@@ -124,84 +127,84 @@ contract CCSettlementPartial is CCUniPartial {
     }
 
     function _prepBuyOrderUpdate(
-        address listingAddress,
-        uint256 orderIdentifier,
-        uint256 amountReceived
-    ) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares buy order update data, including token transfer with validation
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
-        if (pending == 0) {
-            revert(string(abi.encodePacked("No pending amount for buy order ", uint2str(orderIdentifier))));
-        }
-        (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
-        (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
-        if (result.orderStatus != 1) {
-            revert(string(abi.encodePacked("Invalid status for buy order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
-        }
-        uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
-        uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
-        if (result.tokenAddress == address(0)) {
-            try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
-                uint256 postBalance = result.recipientAddress.balance;
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Native transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
-            }
-        } else {
-            try listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress) {
-                uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
-            }
-        }
-        if (result.amountReceived == 0) {
-            revert(string(abi.encodePacked("No tokens received for buy order ", uint2str(orderIdentifier))));
-        }
-        result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
-        result.amountSent = result.amountReceived;
+    address listingAddress,
+    uint256 orderIdentifier,
+    uint256 amountReceived
+) internal returns (PrepOrderUpdateResult memory result) {
+    // Prepares buy order update data, including token transfer with validation
+    ICCListing listingContract = ICCListing(listingAddress);
+    (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
+    if (pending == 0) {
+        revert(string(abi.encodePacked("No pending amount for buy order ", uint2str(orderIdentifier))));
     }
+    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true);
+    (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
+    if (result.orderStatus != 1) {
+        revert(string(abi.encodePacked("Invalid status for buy order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
+    }
+    uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
+    uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
+    if (result.tokenAddress == address(0)) {
+        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
+            uint256 postBalance = result.recipientAddress.balance;
+            result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0; // Tracks recipient’s received amount
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Native transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
+        }
+    } else {
+        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress) {
+            uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+            result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0; // Tracks recipient’s received amount
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
+        }
+    }
+    if (result.amountSent == 0) {
+        revert(string(abi.encodePacked("No tokens received for buy order ", uint2str(orderIdentifier))));
+    }
+    result.normalizedReceived = normalize(result.amountSent, result.tokenDecimals);
+    result.amountIn = amountReceived; // Tracks input token amount
+}
 
     function _prepSellOrderUpdate(
-        address listingAddress,
-        uint256 orderIdentifier,
-        uint256 amountReceived
-    ) internal returns (PrepOrderUpdateResult memory result) {
-        // Prepares sell order update data, including token transfer with validation
-        ICCListing listingContract = ICCListing(listingAddress);
-        (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
-        if (pending == 0) {
-            revert(string(abi.encodePacked("No pending amount for sell order ", uint2str(orderIdentifier))));
-        }
-        (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
-        (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
-        if (result.orderStatus != 1) {
-            revert(string(abi.encodePacked("Invalid status for sell order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
-        }
-        uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
-        uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
-        if (result.tokenAddress == address(0)) {
-            try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
-                uint256 postBalance = result.recipientAddress.balance;
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Native transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
-            }
-        } else {
-            try listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress) {
-                uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
-                result.amountReceived = postBalance > preBalance ? postBalance - preBalance : 0;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
-            }
-        }
-        if (result.amountReceived == 0) {
-            revert(string(abi.encodePacked("No tokens received for sell order ", uint2str(orderIdentifier))));
-        }
-        result.normalizedReceived = normalize(result.amountReceived, result.tokenDecimals);
-        result.amountSent = result.amountReceived;
+    address listingAddress,
+    uint256 orderIdentifier,
+    uint256 amountReceived
+) internal returns (PrepOrderUpdateResult memory result) {
+    // Prepares sell order update data, including token transfer with validation
+    ICCListing listingContract = ICCListing(listingAddress);
+    (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
+    if (pending == 0) {
+        revert(string(abi.encodePacked("No pending amount for sell order ", uint2str(orderIdentifier))));
     }
+    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false);
+    (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
+    if (result.orderStatus != 1) {
+        revert(string(abi.encodePacked("Invalid status for sell order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
+    }
+    uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
+    uint256 preBalance = _computeAmountSent(result.tokenAddress, result.recipientAddress, denormalizedAmount);
+    if (result.tokenAddress == address(0)) {
+        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, result.recipientAddress) {
+            uint256 postBalance = result.recipientAddress.balance;
+            result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0; // Tracks recipient’s received amount
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Native transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
+        }
+    } else {
+        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, result.recipientAddress) {
+            uint256 postBalance = IERC20(result.tokenAddress).balanceOf(result.recipientAddress);
+            result.amountSent = postBalance > preBalance ? postBalance - preBalance : 0; // Tracks recipient’s received amount
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
+        }
+    }
+    if (result.amountSent == 0) {
+        revert(string(abi.encodePacked("No tokens received for sell order ", uint2str(orderIdentifier))));
+    }
+    result.normalizedReceived = normalize(result.amountSent, result.tokenDecimals);
+    result.amountIn = amountReceived; // Tracks input token amount
+}
 
 // Helper function to validate order parameters
 function _validateOrderParams(
