@@ -120,3 +120,8 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **ccUpdate Call Locations**:
   - **CCSettlementRouter.sol**: Handles all `ccUpdate` calls to `CCListingTemplate.sol`. The `_updateOrder` function applies order updates (`buyUpdates` or `sellUpdates`) for buy or sell orders. The `settleOrders` function applies historical data updates (`historicalUpdates`) at the start of order processing. Updates are prepared in `CCUniPartial.sol` (via `_createBuyOrderUpdates`/`_createSellOrderUpdates`), refined in `CCSettlementPartial.sol` (via `_prepareUpdateData`/`_applyOrderUpdate`, now pure), and applied only in `CCSettlementRouter.sol`.
   - **No Duplicate Calls**: After v0.1.11, `_applyOrderUpdate` is pure, and `ccUpdate` is called once per order in `_updateOrder` and once for historical data in `settleOrders`.
+- **State Update (`CCListingTemplate.ccUpdate`)**
+    - **Core (`structId = 0`)**: Updates `status`; immutable fields (`maker`, `recipient`) are rewritten with original values.
+    - **Pricing (`structId = 1`)**: Immutable fields (`minPrice`/`maxPrice`) are rewritten with original values (a no-op for data, crucial for consistency).
+    - **Amounts (`structId = 2`)**: Volatile fields (`pending`, `filled`, `amountSent`) are updated with new values from the swap.
+- **Price Impact Protection:** `_computeMaxAmountIn` ensures estimated impact price respects the user's `maxPrice` (for buys) and `minPrice` (for sells).
