@@ -125,3 +125,12 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
     - **Pricing (`structId = 1`)**: Immutable fields (`minPrice`/`maxPrice`) are rewritten with original values (a no-op for data, crucial for consistency).
     - **Amounts (`structId = 2`)**: Volatile fields (`pending`, `filled`, `amountSent`) are updated with new values from the swap.
 - **Price Impact Protection:** `_computeMaxAmountIn` ensures estimated impact price respects the user's `maxPrice` (for buys) and `minPrice` (for sells).
+- **Price Calculation:**
+The system consistently uses `listingContract.prices(0)` to fetch the current price, it calculates price as `(balanceB * 1e18) / balanceA`. 
+- **Partial Fills Behavior:**
+Partial fills occur when the `swapAmount` is limited by `maxAmountIn`, calculated in `_computeMaxAmountIn` (CCSettlementPartial.sol) to respect price bounds and available reserves. For example, with a buy order of 100 tokenB pending, a pool of 1000 tokenA and 500 tokenB (price = 0.5 tokenA/tokenB), and price bounds (max 0.6, min 0.4), `maxAmountIn` is 50 tokenB due to price-adjusted constraints. This results in a swap of 50 tokenB for ~90.59 tokenA, updating `pending = 50`, `filled += 50`, `amountSent = 90.59` and `status = 2` (partially filled) via a single `ccUpdate` call in `_updateOrder` (CCSettlementRouter.sol). 
+- **AmountSent Usage:**
+`amountSent` tracks the actual tokens a recipient gets after a trade (e.g., tokenA for buy orders) in the `BuyOrderUpdate`/`SellOrderUpdate` structs.
+  - **Calculation**: The system checks the recipient’s balance before and after a transfer to record `amountSent` (e.g., ~90.59 tokenA for 50 tokenB after fees).
+  - **Partial Fills**: For partial trades (e.g., 50 of 100 tokenB), `amountSent` shows the tokens received each time.
+  - **Application**: Prepared in `CCUniPartial.sol` and applied via one `ccUpdate` call in `CCSettlementRouter.sol`, updating the order’s Amounts struct.
