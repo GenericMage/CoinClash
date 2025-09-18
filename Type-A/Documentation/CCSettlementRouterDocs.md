@@ -132,5 +132,5 @@ Partial fills occur when the `swapAmount` is limited by `maxAmountIn`, calculate
 - **AmountSent Usage:**
 `amountSent` tracks the actual tokens a recipient gets after a trade (e.g., tokenA for buy orders) in the `BuyOrderUpdate`/`SellOrderUpdate` structs.
   - **Calculation**: The system checks the recipient’s balance before and after a transfer to record `amountSent` (e.g., ~90.59 tokenA for 50 tokenB after fees).
-  - **Partial Fills**: For partial trades (e.g., 50 of 100 tokenB), `amountSent` shows the tokens received each time.
+  - **Partial Fills**: For partial trades (e.g., 50 of 100 tokenB), `amountSent` shows the tokens received each time. Is incremented for each partial fill.
   - **Application**: Prepared in `CCUniPartial.sol` and applied via one `ccUpdate` call in `CCSettlementRouter.sol`, updating the order’s Amounts struct.
