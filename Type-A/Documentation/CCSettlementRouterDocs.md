@@ -132,5 +132,15 @@ Partial fills occur when the `swapAmount` is limited by `maxAmountIn`, calculate
 - **AmountSent Usage:**
 `amountSent` tracks the actual tokens a recipient gets after a trade (e.g., tokenA for buy orders) in the `BuyOrderUpdate`/`SellOrderUpdate` structs.
   - **Calculation**: The system checks the recipient’s balance before and after a transfer to record `amountSent` (e.g., ~90.59 tokenA for 50 tokenB after fees).
-  - **Partial Fills**: For partial trades (e.g., 50 of 100 tokenB), `amountSent` shows the tokens received each time. Is incremented for each partial fill.
+  - **Partial Fills**: For partial trades (e.g., 50 of 100 tokenB), `amountSent` shows the tokens received each time. Is incremented for each partial fill. 
   - **Application**: Prepared in `CCUniPartial.sol` and applied via one `ccUpdate` call in `CCSettlementRouter.sol`, updating the order’s Amounts struct.
+- **Maximum Input Amount:** 
+(`maxAmountIn`) ensures that the size of the swap doesn't push the execution price outside the `minPrice`/`maxPrice` boundaries set in the order. This calculation happens in `_computeMaxAmountIn`.
+  - **Calculate a Price-Adjusted Amount**: The system first calculates a theoretical maximum amount based on the current market price and the order's pending amount.
+  - **Determine the True Maximum**: This is limited by;
+    * The **`priceAdjustedAmount`**.
+    * The order's actual **`pendingAmount`**.
+    * The **`normalizedReserveIn`** (the total amount of the input token available in the Uniswap pool, fetched via `_fetchReserves`).
+- **Minimum Output Amount:**
+(`amountOutMin`) is used to determine the minimum output expected from the Uniswap v2 swap, as a safeguard against slippage. 
+During `_computeSwapImpact` **`expectedAmountOut`** is calculated based on the current pool reserves and the size of the input amount (`denormAmountIn`) and is used directly as the value for the **`denormAmountOutMin`** parameter in the actual Uniswap `swapExactTokensForTokens` call. Slippage cannot exceed order's max/min price bounds. 
