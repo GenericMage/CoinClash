@@ -1,25 +1,12 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.13
-// Changes:
+// Version: 0.1.14
+// Changes: 
+// - v0.1.14: Patched _prepBuyOrderUpdate/_prepSellOrderUpdate to use actual contract balance for amountIn after transactToken/transactNative. 
 // - v0.1.13: Modified _prepBuyOrderUpdate/_prepSellOrderUpdate to check contract balance after transactToken, using received amount for swaps to handle tax-on-transfer. 
 // - v0.1.12: Removed NonCriticalPriceOutOfBounds event, relying on _checkPricing reverts. Ensured transactToken in _prepBuyOrderUpdate/_prepSellOrderUpdate handles tokenB transfers. Streamlined balanceOf calls by caching results. Compatible with CCUniPartial.sol v0.1.15, sol v0.1.8.
-// - v0.1.11: Removed ccUpdate call from _applyOrderUpdate, made it pure.
-// - v0.1.10: Added amountIn to PrepOrderUpdateResult for input token tracking.
-// - v0.1.9: Updated _prepBuyOrderUpdate/_prepSellOrderUpdate to use amountIn and amountSent.
-// - v0.1.8: Fixed pending amount updates in _prepareUpdateData.
-// - v0.1.7: Used swap results for pending and amountSent in _prepareUpdateData.
-// - v0.1.6: Modified _applyOrderUpdate/_prepareUpdateData to use BuyOrderUpdate/SellOrderUpdate structs.
-// - v0.1.5: Modified _applyOrderUpdate to call ccUpdate per UpdateType.
-// - v0.1.4: Refactored _processBuyOrder/_processSellOrder into helper functions.
-// - v0.1.3: Added non-critical events for price, pending, and swap issues.
-// - v0.1.2: Added _computeMaxAmountIn for max input calculation.
-// - v0.1.1: Modified _processBuyOrder/_processSellOrder to use ccUpdate.
-// - v0.1.0: Bumped version.
-// - v0.0.27: Removed try from _executePartialBuySwap/_executePartialSellSwap.
-// - v0.0.26: Removed this. from internal calls.
-// - v0.0.25: Enhanced error logging.
+
 
 import "./CCUniPartial.sol";
 import "./CCMainPartial.sol";
@@ -123,15 +110,14 @@ contract CCSettlementPartial is CCUniPartial {
     uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
     if (result.tokenAddress == address(0)) {
         try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, address(this)) {
-            result.amountSent = denormalizedAmount;
+            result.amountSent = address(this).balance; // Use actual contract balance
+            result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Native transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
         }
     } else {
-        uint256 contractPreBalance = IERC20(result.tokenAddress).balanceOf(address(this));
         try listingContract.transactToken(result.tokenAddress, denormalizedAmount, address(this)) {
-            uint256 contractPostBalance = IERC20(result.tokenAddress).balanceOf(address(this));
-            result.amountSent = contractPostBalance > contractPreBalance ? contractPostBalance - contractPreBalance : 0;
+            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)); // Use actual contract balance
             result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
@@ -163,15 +149,14 @@ function _prepSellOrderUpdate(
     uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
     if (result.tokenAddress == address(0)) {
         try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, address(this)) {
-            result.amountSent = denormalizedAmount;
+            result.amountSent = address(this).balance; // Use actual contract balance
+            result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Native transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
         }
     } else {
-        uint256 contractPreBalance = IERC20(result.tokenAddress).balanceOf(address(this));
         try listingContract.transactToken(result.tokenAddress, denormalizedAmount, address(this)) {
-            uint256 contractPostBalance = IERC20(result.tokenAddress).balanceOf(address(this));
-            result.amountSent = contractPostBalance > contractPreBalance ? contractPostBalance - contractPreBalance : 0;
+            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)); // Use actual contract balance
             result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));

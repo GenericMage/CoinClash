@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.16
-// Changes:
+// Version: 0.1.17
+// Changes: 
+// - v0.1.17: Patched _executeTokenSwap to use actual amountInReceived for swap. Added allowance check in _prepareTokenSwap, setting 10^50 if insufficient. 
 // - v0.1.16: Modified _fetchReserves to use token balances at Uniswap V2 pair address instead of getReserves to avoid scaling issues.
-// - v0.1.15: Removed _ensureTokenBalance and NonCriticalInsufficientBalance event, relying on _prepBuyOrderUpdate/_prepSellOrderUpdate for transactToken. Updated _computeMaxAmountIn with dynamic formula using price bounds and reserves. Streamlined _computeSwapImpact and _fetchReserves to use SettlementContext for static data. Compatible with sol v0.1.8, CCSettlementPartial.sol v0.1.12.
-// - v0.1.14: Added _ensureTokenBalance, capped maxAmountIn at 50 tokenB for buy orders.
-// - v0.1.13: Added balance check in _prepareTokenSwap, emits NonCriticalInsufficientBalance.
-// - v0.1.12: Updated _createBuyOrderUpdates/_createSellOrderUpdates to include filled parameter.
-// ... (previous changelog entries retained)
+// - v0.1.15: Removed _ensureTokenBalance and NonCriticalInsufficientBalance event, relying on _prepBuyOrderUpdate/_prepSellOrderUpdate for transactToken. Updated _computeMaxAmountIn with dynamic formula using price bounds and reserves. Streamlined _computeSwapImpact and _fetchReserves to use SettlementContext for static data. 
 
 import "./CCMainPartial.sol";
 interface IUniswapV2Pair {
@@ -230,37 +227,41 @@ function _computeSwapImpact(
     }
 
     function _prepareTokenSwap(
-        address tokenIn,
-        address tokenOut,
-        address recipientAddress
-    ) internal returns (TokenSwapData memory data) {
-        // Prepares token swap with pre/post balance checks
-        data.preBalanceIn = IERC20(tokenIn).balanceOf(address(this));
-        data.preBalanceOut = IERC20(tokenOut).balanceOf(recipientAddress);
-        bool success = IERC20(tokenIn).approve(uniswapV2Router, type(uint256).max);
+    address tokenIn,
+    address tokenOut,
+    address recipientAddress
+) internal returns (TokenSwapData memory data) {
+    // Prepares token swap with pre/post balance checks and allowance verification
+    data.preBalanceIn = IERC20(tokenIn).balanceOf(address(this));
+    data.preBalanceOut = IERC20(tokenOut).balanceOf(recipientAddress);
+    uint256 currentAllowance = IERC20(tokenIn).allowance(address(this), uniswapV2Router);
+    if (currentAllowance < data.preBalanceIn) {
+        bool success = IERC20(tokenIn).approve(uniswapV2Router, 10**50);
         require(success, "Token approval failed");
     }
+}
 
     function _executeTokenSwap(
-        SwapContext memory context,
-        address[] memory path
-    ) internal returns (TokenSwapData memory data) {
-        // Executes token-to-token swap
-        uint256 deadline = block.timestamp + 15 minutes;
-        IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
-        data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
-        data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
-        uint256[] memory amounts = router.swapExactTokensForTokens(
-            context.denormAmountIn,
-            context.denormAmountOutMin,
-            path,
-            context.recipientAddress,
-            deadline
-        );
-        data.amountReceived = amounts[amounts.length - 1];
-        data.postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
-        data.amountOut = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
-    }
+    SwapContext memory context,
+    address[] memory path
+) internal returns (TokenSwapData memory data) {
+    // Executes token-to-token swap using actual received amount
+    uint256 deadline = block.timestamp + 15 minutes;
+    IUniswapV2Router02 router = IUniswapV2Router02(uniswapV2Router);
+    data.postBalanceIn = IERC20(context.tokenIn).balanceOf(address(this));
+    data.amountInReceived = data.postBalanceIn > data.preBalanceIn ? data.postBalanceIn - data.preBalanceIn : 0;
+    require(data.amountInReceived > 0, "No tokens available for swap");
+    uint256[] memory amounts = router.swapExactTokensForTokens(
+        data.amountInReceived, // Use actual received amount
+        context.denormAmountOutMin,
+        path,
+        context.recipientAddress,
+        deadline
+    );
+    data.amountReceived = amounts[amounts.length - 1];
+    data.postBalanceOut = IERC20(context.tokenOut).balanceOf(context.recipientAddress);
+    data.amountOut = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
+}
 
     function _performETHBuySwap(
         SwapContext memory context,

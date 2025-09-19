@@ -1,7 +1,7 @@
 # CCSettlementRouter Contract Documentation
 
 ## Overview
-The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using Uniswap V2 for order execution. It inherits functionality from `CCSettlementPartial`, which extends `CCUniPartial` and `CCMainPartial`, integrating with external interfaces (`ICCListing`, `IUniswapV2Pair`, `IUniswapV2Router02`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles order settlement via `settleOrders`, with gas optimization through `step` and `maxIterations`, robust error handling, and decimal precision for tokens. It avoids reserved keywords, uses explicit casting, and ensures graceful degradation with try-catch returning decoded error reasons. Transfers to/from the listing call `listingContract.ccUpdate` after successful Uniswap V2 swaps, ensuring state consistency. Transfer taxes are handled using `amountInReceived` for buy/sell orders.
+The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitates the settlement of buy and sell orders on a decentralized trading platform using Uniswap V2 for order execution. It inherits functionality from `CCSettlementPartial`, which extends `CCUniPartial` and `CCMainPartial`, integrating with external interfaces (`ICCListing`, `IUniswapV2Pair`, `IUniswapV2Router02`, `IERC20`) for token operations, `ReentrancyGuard` for reentrancy protection, and `Ownable` for administrative control. The contract handles order settlement via `settleOrders`, with gas optimization through `step` and `maxIterations`, robust error handling, and decimal precision for tokens. It avoids reserved keywords, uses explicit casting, and ensures graceful degradation with try-catch returning decoded error reasons. Transfers to/from the listing call `listingContract.ccUpdate` after successful Uniswap V2 swaps, ensuring state consistency. Transfer taxes are handled using `amountInReceived` for buy/sell orders, with post-transfer balance checks and allowance verification (10^50 for high-supply tokens).
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
@@ -12,14 +12,13 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.3.9)
 - `CCMainPartial.sol` (v0.1.5)
-- `CCUniPartial.sol` (v0.1.12)
-- `CCSettlementPartial.sol` (v0.1.11)
+- `CCUniPartial.sol` (v0.1.17)
+- `CCSettlementPartial.sol` (v0.1.14)
 
 ### Changes
+- **v0.1.15**: Updated to reflect `CCUniPartial.sol` v0.1.17 (patched `_executeTokenSwap` to use `amountInReceived`, added allowance check in `_prepareTokenSwap` with 10^50 for high-supply tokens), `CCSettlementPartial.sol` v0.1.14 (patched `_prepBuyOrderUpdate`/`_prepSellOrderUpdate` to use actual contract balance for `amountIn` post-`transactToken`/`transactNative`). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.14**: Updated to reflect `CCUniPartial.sol` v0.1.16 (modified `_fetchReserves` to use token balances at Uniswap V2 pair address, updated `_computeMaxAmountIn` and `_computeSwapImpact` to handle unusual token decimals with `normalize`/`denormalize`).
 - **v0.1.13**: Updated to reflect `CCSettlementRouter.sol` v0.1.9 (refactored `settleOrders` into `_initSettlement`, `_createHistoricalEntry`, `_processOrderBatch` using `SettlementState` struct), `CCSettlementPartial.sol` v0.1.13 (post-`transactToken` balance checks for tax-on-transfer), `CCUniPartial.sol` v0.1.15 (removed `_ensureTokenBalance`, dynamic `maxAmountIn`, streamlined static data). Compatible with `CCListingTemplate.sol` v0.1.12.
-- **v0.1.12**: Updated to reflect `CCSettlementRouter.sol` v0.1.8 (fetches static data via `SettlementContext`, removed `NonCriticalNoPendingOrder`, `NonCriticalZeroSwapAmount`), `CCUniPartial.sol` v0.1.15 (removed `_ensureTokenBalance`, cleaned up dynamic `maxAmountIn`, streamlined static data), `CCSettlementPartial.sol` v0.1.13 (balance checks post-`transactToken` for tax-on-transfer, removed `NonCriticalPriceOutOfBounds`). Compatible with `CCListingTemplate.sol` v0.3.9.
-- **v0.1.11**: Updated for `CCSettlementPartial.sol` v0.1.11 (removed `ccUpdate` from `_applyOrderUpdate`, made pure, single `ccUpdate` in `_updateOrder`).
 
 ## Mappings
 - None defined directly in `CCSettlementRouter` or `CCSettlementPartial`. Relies on `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`) for order tracking.
@@ -60,8 +59,8 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 ### CCSettlementPartial
 - **_processBuyOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract, CCSettlementRouter.SettlementContext memory settlementContext) → ICCListing.BuyOrderUpdate[] memory**: Validates order, computes swap amount, executes swap via `_executePartialBuySwap`, prepares updates via `_applyOrderUpdate`.
 - **_processSellOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract, CCSettlementRouter.SettlementContext memory settlementContext) → ICCListing.SellOrderUpdate[] memory**: Validates order, computes swap amount, executes swap via `_executePartialSellSwap`, prepares updates via `_applyOrderUpdate`.
-- **_prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived, CCSettlementRouter.SettlementContext memory settlementContext) → PrepOrderUpdateResult memory**: Pulls funds via `transactToken`/`transactNative`, checks contract balance for tax-on-transfer, returns `amountSent` and `amountIn`.
-- **_prepSellOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived, CCSettlementRouter.SettlementContext memory settlementContext) → PrepOrderUpdateResult memory**: Pulls funds via `transactToken`/`transactNative`, checks contract balance for tax-on-transfer, returns `amountSent` and `amountIn`.
+- **_prepBuyOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived, CCSettlementRouter.SettlementContext memory settlementContext) → PrepOrderUpdateResult memory**: Pulls funds via `transactToken`/`transactNative`, uses actual contract balance (`address(this).balance` or `IERC20.balanceOf`) for `amountSent` and `amountIn` to handle tax-on-transfer, returns update data.
+- **_prepSellOrderUpdate(address listingAddress, uint256 orderIdentifier, uint256 amountReceived, CCSettlementRouter.SettlementContext memory settlementContext) → PrepOrderUpdateResult memory**: Pulls funds via `transactToken`/`transactNative`, uses actual contract balance for `amountSent` and `amountIn` to handle tax-on-transfer, returns update data.
 - **_validateOrderParams(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderProcessContext memory**: Validates order details (pending, status, pricing).
 - **_computeSwapAmount(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, CCSettlementRouter.SettlementContext memory settlementContext) → OrderProcessContext memory**: Computes `maxAmountIn` and `swapAmount` using `_computeMaxAmountIn`.
 - **_executeOrderSwap(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, CCSettlementRouter.SettlementContext memory settlementContext) → OrderProcessContext memory**: Executes swap via `_executePartialBuySwap` or `_executePartialSellSwap`.
@@ -84,6 +83,8 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **_executePartialSellSwap(address listingAddress, uint256 orderIdentifier, uint256 amountIn, uint256 pendingAmount, SettlementContext memory settlementContext) → ICCListing.SellOrderUpdate[] memory**: Executes sell swap (tokenA→tokenB/ETH), prepares updates via `_executeSellTokenSwap` or `_executeSellETHSwapInternal`.
 - **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory**: Creates `BuyOrderUpdate` structs for `pending`, `filled`, `amountSent`, `status`.
 - **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory**: Creates `SellOrderUpdate` structs for `pending`, `filled`, `amountSent`, `status`.
+- **_prepareTokenSwap(address tokenIn, address tokenOut, address recipientAddress) → TokenSwapData memory**: Prepares token swap with pre/post balance checks, verifies allowance, and sets 10^50 approval if insufficient for high-supply tokens.
+- **_executeTokenSwap(SwapContext memory context, address[] memory path) → TokenSwapData memory**: Executes token-to-token swap using `amountInReceived` (actual received amount post-transfer) to handle transfer taxes.
 
 ## Key Calculations
 - **Maximum Input Amount** (`_computeMaxAmountIn` in `CCSettlementPartial.sol`):
