@@ -16,6 +16,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - `CCSettlementPartial.sol` (v0.1.11)
 
 ### Changes
+- **v0.1.14**: Updated to reflect `CCUniPartial.sol` v0.1.16 (modified `_fetchReserves` to use token balances at Uniswap V2 pair address, updated `_computeMaxAmountIn` and `_computeSwapImpact` to handle unusual token decimals with `normalize`/`denormalize`).
 - **v0.1.13**: Updated to reflect `CCSettlementRouter.sol` v0.1.9 (refactored `settleOrders` into `_initSettlement`, `_createHistoricalEntry`, `_processOrderBatch` using `SettlementState` struct), `CCSettlementPartial.sol` v0.1.13 (post-`transactToken` balance checks for tax-on-transfer), `CCUniPartial.sol` v0.1.15 (removed `_ensureTokenBalance`, dynamic `maxAmountIn`, streamlined static data). Compatible with `CCListingTemplate.sol` v0.1.12.
 - **v0.1.12**: Updated to reflect `CCSettlementRouter.sol` v0.1.8 (fetches static data via `SettlementContext`, removed `NonCriticalNoPendingOrder`, `NonCriticalZeroSwapAmount`), `CCUniPartial.sol` v0.1.15 (removed `_ensureTokenBalance`, cleaned up dynamic `maxAmountIn`, streamlined static data), `CCSettlementPartial.sol` v0.1.13 (balance checks post-`transactToken` for tax-on-transfer, removed `NonCriticalPriceOutOfBounds`). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.11**: Updated for `CCSettlementPartial.sol` v0.1.11 (removed `ccUpdate` from `_applyOrderUpdate`, made pure, single `ccUpdate` in `_updateOrder`).
@@ -74,25 +75,15 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **_computeMaxAmountIn(address listingAddress, uint256 maxPrice, uint256 minPrice, uint256 pendingAmount, bool isBuyOrder, CCSettlementRouter.SettlementContext memory settlementContext) → uint256**: Computes maximum input amount for swaps.
 
 ### CCUniPartial
-- **_computeCurrentPrice(address listingAddress) → uint256**: Fetches current price from `listingContract.prices(0)`.
-- **_computeSwapImpact(address listingAddress, uint256 amountIn, bool isBuyOrder, CCSettlementRouter.SettlementContext memory settlementContext) → (uint256 price, uint256 amountOut)**: Computes swap impact using reserves and 0.3% Uniswap fee.
-- **_fetchReserves(address listingAddress, bool isBuyOrder, CCSettlementRouter.SettlementContext memory settlementContext) → ReserveContext memory**: Fetches reserves from Uniswap pair.
-- **_prepareSwapData(address listingAddress, uint256 orderIdentifier, uint256 amountIn, CCSettlementRouter.SettlementContext memory settlementContext) → (SwapContext memory context, address[] memory path)**: Prepares buy order swap data.
-- **_prepareSellSwapData(address listingAddress, uint256 orderIdentifier, uint256 amountIn, CCSettlementRouter.SettlementContext memory settlementContext) → (SwapContext memory context, address[] memory path)**: Prepares sell order swap data.
-- **_prepareTokenSwap(address tokenIn, address tokenOut, address recipientAddress) → TokenSwapData memory**: Prepares token swap with pre/post balance checks.
-- **_executeTokenSwap(SwapContext memory context, address[] memory path) → TokenSwapData memory**: Executes token-to-token swap.
-- **_performETHBuySwap(SwapContext memory context, address[] memory path) → ETHSwapData memory**: Performs ETH-to-token swap.
-- **_performETHSellSwap(SwapContext memory context, address[] memory path) → ETHSwapData memory**: Performs token-to-ETH swap.
-- **_executeBuyETHSwap(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.BuyOrderUpdate[] memory**: Executes ETH-to-token swap for buy order.
-- **_executeSellETHSwapInternal(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.SellOrderUpdate[] memory**: Executes token-to-ETH swap for sell order.
-- **_executeBuyTokenSwap(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.BuyOrderUpdate[] memory**: Executes token-to-token swap for buy order.
-- **_executeSellTokenSwap(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.SellOrderUpdate[] memory**: Executes token-to-token swap for sell order.
-- **_finalizeTokenSwap(TokenSwapData memory data, SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.BuyOrderUpdate[] memory**: Finalizes buy token swap.
-- **_finalizeSellTokenSwap(TokenSwapData memory data, SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.SellOrderUpdate[] memory**: Finalizes sell token swap.
-- **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory**: Creates buy order update structs.
-- **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory**: Creates sell order update structs.
-- **_computeOrderStatus(uint256 normalizedReceived, uint256 filled, uint256 pendingAmount, uint8 currentStatus) → uint8**: Computes order status (partially filled or filled).
-
+- **_fetchReserves(address listingAddress, bool isBuyOrder, SettlementContext memory settlementContext) → ReserveContext memory**: Fetches token balance of input token (tokenB for buys, tokenA for sells) at Uniswap V2 pair address, normalizes to 18 decimals.
+- **_computeMaxAmountIn(address listingAddress, uint256 maxPrice, uint256 minPrice, uint256 pendingAmount, bool isBuyOrder, SettlementContext memory settlementContext) → uint256**: Computes `maxAmountIn` using `_fetchReserves`, respects price bounds, caps at `pendingAmount` and `normalizedReserveIn`, applies Uniswap fee, denormalizes for token decimals.
+- **_computeSwapImpact(address listingAddress, uint256 amountIn, bool isBuyOrder, SettlementContext memory settlementContext) → (uint256 price, uint256 amountOut)**: Computes swap impact using token balances at Uniswap V2 pair, normalizes input/output, applies Uniswap fee, denormalizes output.
+- **_prepareSwapData(address listingAddress, uint256 orderIdentifier, uint256 amountIn, SettlementContext memory settlementContext) → (SwapContext memory, address[] memory path)**: Prepares buy order swap data (tokenB→tokenA), sets `denormAmountIn`, `denormAmountOutMin`.
+- **_prepareSellSwapData(address listingAddress, uint256 orderIdentifier, uint256 amountIn, SettlementContext memory settlementContext) → (SwapContext memory, address[] memory path)**: Prepares sell order swap data (tokenA→tokenB), sets `denormAmountIn`, `denormAmountOutMin`.
+- **_executePartialBuySwap(address listingAddress, uint256 orderIdentifier, uint256 amountIn, uint256 pendingAmount, SettlementContext memory settlementContext) → ICCListing.BuyOrderUpdate[] memory**: Executes buy swap (tokenB/ETH→tokenA), prepares updates via `_executeBuyTokenSwap` or `_executeBuyETHSwap`.
+- **_executePartialSellSwap(address listingAddress, uint256 orderIdentifier, uint256 amountIn, uint256 pendingAmount, SettlementContext memory settlementContext) → ICCListing.SellOrderUpdate[] memory**: Executes sell swap (tokenA→tokenB/ETH), prepares updates via `_executeSellTokenSwap` or `_executeSellETHSwapInternal`.
+- **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory**: Creates `BuyOrderUpdate` structs for `pending`, `filled`, `amountSent`, `status`.
+- **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory**: Creates `SellOrderUpdate` structs for `pending`, `filled`, `amountSent`, `status`.
 
 ## Key Calculations
 - **Maximum Input Amount** (`_computeMaxAmountIn` in `CCSettlementPartial.sol`):
@@ -191,3 +182,5 @@ Partial fills occur when the `swapAmount` is limited by `maxAmountIn`, calculate
 - **Minimum Output Amount:**
 (`amountOutMin`) is used to determine the minimum output expected from the Uniswap v2 swap, as a safeguard against slippage. 
 During `_computeSwapImpact` **`expectedAmountOut`** is calculated based on the current pool reserves and the size of the input amount (`denormAmountIn`) and is used directly as the value for the **`denormAmountOutMin`** parameter in the actual Uniswap `swapExactTokensForTokens` call. Slippage cannot exceed order's max/min price bounds. 
+- **Reserve Clarification:**
+Uniswap "reserves" are used in name only. The system fetches live balances of the LP address for `_computeSwapImpact` and `_computeMaxAmountIn `. 
