@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.14
+// Version: 0.1.15
 // Changes: 
+// - v0.1.15: Moved uint2str, getTokenAndDecimals,  prepBuyOrderUpdate and prepSellOrderUpdate to unipartial to resolve declaration error. 
 // - v0.1.14: Patched _prepBuyOrderUpdate/_prepSellOrderUpdate to use actual contract balance for amountIn after transactToken/transactNative. 
 // - v0.1.13: Modified _prepBuyOrderUpdate/_prepSellOrderUpdate to check contract balance after transactToken, using received amount for swaps to handle tax-on-transfer. 
 // - v0.1.12: Removed NonCriticalPriceOutOfBounds event, relying on _checkPricing reverts. Ensured transactToken in _prepBuyOrderUpdate/_prepSellOrderUpdate handles tokenB transfers. Streamlined balanceOf calls by caching results. Compatible with CCUniPartial.sol v0.1.15, sol v0.1.8.
@@ -12,19 +13,7 @@ import "./CCUniPartial.sol";
 import "./CCMainPartial.sol";
 
 contract CCSettlementPartial is CCUniPartial {
-    struct PrepOrderUpdateResult {
-        address tokenAddress;
-        uint8 tokenDecimals;
-        address makerAddress;
-        address recipientAddress;
-        uint8 orderStatus;
-        uint256 amountReceived;
-        uint256 normalizedReceived;
-        uint256 amountSent;
-        uint256 amountIn;
-    }
-
-    struct OrderProcessContext {
+      struct OrderProcessContext {
         uint256 orderId;
         uint256 pendingAmount;
         uint256 filled;
@@ -39,19 +28,6 @@ contract CCSettlementPartial is CCUniPartial {
         uint256 swapAmount;
         ICCListing.BuyOrderUpdate[] buyUpdates;
         ICCListing.SellOrderUpdate[] sellUpdates;
-    }
-
-    function _getTokenAndDecimals(
-        address listingAddress,
-        bool isBuyOrder,
-        SettlementContext memory settlementContext
-    ) internal pure returns (address tokenAddress, uint8 tokenDecimals) {
-        // Retrieves token address and decimals from cached data
-        tokenAddress = isBuyOrder ? settlementContext.tokenB : settlementContext.tokenA;
-        tokenDecimals = isBuyOrder ? settlementContext.decimalsB : settlementContext.decimalsA;
-        if (tokenAddress == address(0) && !isBuyOrder) {
-            revert("Invalid token address for sell order");
-        }
     }
 
     function _checkPricing(
@@ -89,84 +65,6 @@ contract CCSettlementPartial is CCUniPartial {
             ? recipientAddress.balance
             : IERC20(tokenAddress).balanceOf(recipientAddress);
     }
-
-    function _prepBuyOrderUpdate(
-    address listingAddress,
-    uint256 orderIdentifier,
-    uint256 amountReceived,
-    SettlementContext memory settlementContext
-) internal returns (PrepOrderUpdateResult memory result) {
-    // Prepares buy order update, pulls funds via transact for Uniswap swap
-    ICCListing listingContract = ICCListing(listingAddress);
-    (uint256 pending, uint256 filled, ) = listingContract.getBuyOrderAmounts(orderIdentifier);
-    if (pending == 0) {
-        revert(string(abi.encodePacked("No pending amount for buy order ", uint2str(orderIdentifier))));
-    }
-    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, true, settlementContext);
-    (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getBuyOrderCore(orderIdentifier);
-    if (result.orderStatus != 1) {
-        revert(string(abi.encodePacked("Invalid status for buy order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
-    }
-    uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
-    if (result.tokenAddress == address(0)) {
-        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, address(this)) {
-            result.amountSent = address(this).balance; // Use actual contract balance
-            result.amountIn = result.amountSent;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Native transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
-        }
-    } else {
-        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, address(this)) {
-            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)); // Use actual contract balance
-            result.amountIn = result.amountSent;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
-        }
-    }
-    if (result.amountSent == 0) {
-        revert(string(abi.encodePacked("No tokens received for buy order ", uint2str(orderIdentifier))));
-    }
-    result.normalizedReceived = normalize(result.amountSent, result.tokenDecimals);
-}
-
-function _prepSellOrderUpdate(
-    address listingAddress,
-    uint256 orderIdentifier,
-    uint256 amountReceived,
-    SettlementContext memory settlementContext
-) internal returns (PrepOrderUpdateResult memory result) {
-    // Prepares sell order update, pulls funds via transact for Uniswap swap
-    ICCListing listingContract = ICCListing(listingAddress);
-    (uint256 pending, uint256 filled, ) = listingContract.getSellOrderAmounts(orderIdentifier);
-    if (pending == 0) {
-        revert(string(abi.encodePacked("No pending amount for sell order ", uint2str(orderIdentifier))));
-    }
-    (result.tokenAddress, result.tokenDecimals) = _getTokenAndDecimals(listingAddress, false, settlementContext);
-    (result.makerAddress, result.recipientAddress, result.orderStatus) = listingContract.getSellOrderCore(orderIdentifier);
-    if (result.orderStatus != 1) {
-        revert(string(abi.encodePacked("Invalid status for sell order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
-    }
-    uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
-    if (result.tokenAddress == address(0)) {
-        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, address(this)) {
-            result.amountSent = address(this).balance; // Use actual contract balance
-            result.amountIn = result.amountSent;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Native transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
-        }
-    } else {
-        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, address(this)) {
-            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)); // Use actual contract balance
-            result.amountIn = result.amountSent;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
-        }
-    }
-    if (result.amountSent == 0) {
-        revert(string(abi.encodePacked("No tokens received for sell order ", uint2str(orderIdentifier))));
-    }
-    result.normalizedReceived = normalize(result.amountSent, result.tokenDecimals);
-}
 
     function _validateOrderParams(
         address listingAddress,
@@ -321,23 +219,5 @@ function _prepSellOrderUpdate(
         context = _executeOrderSwap(listingAddress, false, context, settlementContext);
         (, sellUpdates) = _applyOrderUpdate(listingAddress, listingContract, context, false);
         return sellUpdates;
-    }
-
-    function uint2str(uint256 _i) internal pure returns (string memory str) {
-        if (_i == 0) return "0";
-        uint256 j = _i;
-        uint256 length;
-        while (j != 0) {
-            length++;
-            j /= 10;
-        }
-        bytes memory bstr = new bytes(length);
-        uint256 k = length;
-        j = _i;
-        while (j != 0) {
-            bstr[--k] = bytes1(uint8(48 + j % 10));
-            j /= 10;
-        }
-        str = string(bstr);
     }
 }
