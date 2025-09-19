@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.15
+// Version: 0.1.16
 // Changes:
+// - v0.1.16: Modified _fetchReserves to use token balances at Uniswap V2 pair address instead of getReserves to avoid scaling issues.
 // - v0.1.15: Removed _ensureTokenBalance and NonCriticalInsufficientBalance event, relying on _prepBuyOrderUpdate/_prepSellOrderUpdate for transactToken. Updated _computeMaxAmountIn with dynamic formula using price bounds and reserves. Streamlined _computeSwapImpact and _fetchReserves to use SettlementContext for static data. Compatible with sol v0.1.8, CCSettlementPartial.sol v0.1.12.
 // - v0.1.14: Added _ensureTokenBalance, capped maxAmountIn at 50 tokenB for buy orders.
 // - v0.1.13: Added balance check in _prepareTokenSwap, emits NonCriticalInsufficientBalance.
@@ -141,41 +142,40 @@ contract CCUniPartial is CCMainPartial {
         require(price > 0, "Invalid price from listing");
     }
 
-    function _computeSwapImpact(
-        address listingAddress,
-        uint256 amountIn,
-        bool isBuyOrder,
-        SettlementContext memory settlementContext
-    ) internal view returns (uint256 price, uint256 amountOut) {
-        // Computes swap impact using cached static data
-        SwapImpactContext memory context;
-        context.decimalsIn = isBuyOrder ? settlementContext.decimalsB : settlementContext.decimalsA;
-        context.decimalsOut = isBuyOrder ? settlementContext.decimalsA : settlementContext.decimalsB;
-        context.reserveIn = isBuyOrder ? IERC20(settlementContext.tokenB).balanceOf(listingAddress) : IERC20(settlementContext.tokenA).balanceOf(listingAddress);
-        context.reserveOut = isBuyOrder ? IERC20(settlementContext.tokenA).balanceOf(listingAddress) : IERC20(settlementContext.tokenB).balanceOf(listingAddress);
-        context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
-        context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
-        context.amountInAfterFee = (amountIn * 997) / 1000; // Apply 0.3% Uniswap fee
-        context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) / (context.normalizedReserveIn + context.amountInAfterFee);
-        context.price = ICCListing(listingAddress).prices(0);
-        price = context.price;
-        amountOut = context.amountOut;
-    }
+    // Computes swap impact using normalized token balances
+function _computeSwapImpact(
+    address listingAddress,
+    uint256 amountIn,
+    bool isBuyOrder,
+    SettlementContext memory settlementContext
+) internal view returns (uint256 price, uint256 amountOut) {
+    SwapImpactContext memory context;
+    context.decimalsIn = isBuyOrder ? settlementContext.decimalsB : settlementContext.decimalsA;
+    context.decimalsOut = isBuyOrder ? settlementContext.decimalsA : settlementContext.decimalsB;
+    context.reserveIn = IERC20(isBuyOrder ? settlementContext.tokenB : settlementContext.tokenA).balanceOf(settlementContext.uniswapV2Pair);
+    context.reserveOut = IERC20(isBuyOrder ? settlementContext.tokenA : settlementContext.tokenB).balanceOf(settlementContext.uniswapV2Pair);
+    context.normalizedReserveIn = normalize(context.reserveIn, context.decimalsIn);
+    context.normalizedReserveOut = normalize(context.reserveOut, context.decimalsOut);
+    context.amountInAfterFee = (normalize(amountIn, context.decimalsIn) * 997) / 1000; // Normalize input and apply Uniswap fee
+    context.amountOut = (context.amountInAfterFee * context.normalizedReserveOut) / (context.normalizedReserveIn + context.amountInAfterFee);
+    context.price = ICCListing(listingAddress).prices(0);
+    price = context.price;
+    amountOut = denormalize(context.amountOut, context.decimalsOut); // Denormalize output for token decimals
+}
 
     function _fetchReserves(
-        address listingAddress,
-        bool isBuyOrder,
-        SettlementContext memory settlementContext
-    ) internal view returns (ReserveContext memory reserveContext) {
-        // Fetches reserves using cached Uniswap pair
-        require(settlementContext.uniswapV2Pair != address(0), "Uniswap V2 pair not set");
-        IUniswapV2Pair pair = IUniswapV2Pair(settlementContext.uniswapV2Pair);
-        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
-        reserveContext.tokenA = settlementContext.tokenA;
-        reserveContext.decimalsIn = isBuyOrder ? settlementContext.decimalsB : settlementContext.decimalsA;
-        reserveContext.reserveIn = isBuyOrder ? (reserveContext.tokenA == pair.token0() ? reserve1 : reserve0) : (reserveContext.tokenA == pair.token0() ? reserve0 : reserve1);
-        reserveContext.normalizedReserveIn = normalize(reserveContext.reserveIn, reserveContext.decimalsIn);
-    }
+    address listingAddress,
+    bool isBuyOrder,
+    SettlementContext memory settlementContext
+) internal view returns (ReserveContext memory reserveContext) {
+    // Fetches token balance from Uniswap V2 pair for input token
+    require(settlementContext.uniswapV2Pair != address(0), "Uniswap V2 pair not set");
+    reserveContext.tokenA = settlementContext.tokenA;
+    reserveContext.decimalsIn = isBuyOrder ? settlementContext.decimalsB : settlementContext.decimalsA;
+    address tokenIn = isBuyOrder ? settlementContext.tokenB : settlementContext.tokenA;
+    reserveContext.reserveIn = IERC20(tokenIn).balanceOf(settlementContext.uniswapV2Pair);
+    reserveContext.normalizedReserveIn = normalize(reserveContext.reserveIn, reserveContext.decimalsIn);
+}
 
     function _prepareSwapData(
         address listingAddress,
@@ -539,31 +539,29 @@ contract CCUniPartial is CCMainPartial {
         });
     }
 
-    function _computeMaxAmountIn(
-        address listingAddress,
-        uint256 maxPrice,
-        uint256 minPrice,
-        uint256 pendingAmount,
-        bool isBuyOrder,
-        SettlementContext memory settlementContext
-    ) internal view returns (uint256 maxAmountIn) {
-        // Dynamically calculates max input amount based on price bounds and reserves
-        ReserveContext memory reserveContext = _fetchReserves(listingAddress, isBuyOrder, settlementContext);
-        ICCListing listingContract = ICCListing(listingAddress);
-        uint256 currentPrice = listingContract.prices(0);
-        if (currentPrice == 0 || reserveContext.normalizedReserveIn == 0) {
-            return 0;
-        }
-        // Calculate maxAmountIn respecting price bounds
-        uint256 priceAdjustedAmount = isBuyOrder
-            ? (pendingAmount * maxPrice) / 1e18 // tokenB amount for buys
-            : (pendingAmount * 1e18) / minPrice; // tokenA amount for sells
-        maxAmountIn = priceAdjustedAmount > pendingAmount ? pendingAmount : priceAdjustedAmount;
-        // Cap by available reserves to prevent pool depletion
-        if (maxAmountIn > reserveContext.normalizedReserveIn) {
-            maxAmountIn = reserveContext.normalizedReserveIn;
-        }
-        // Apply Uniswap fee adjustment (0.3%)
-        maxAmountIn = (maxAmountIn * 1000) / 997;
+    // Computes max input amount with proper decimal normalization
+function _computeMaxAmountIn(
+    address listingAddress,
+    uint256 maxPrice,
+    uint256 minPrice,
+    uint256 pendingAmount,
+    bool isBuyOrder,
+    SettlementContext memory settlementContext
+) internal view returns (uint256 maxAmountIn) {
+    ReserveContext memory reserveContext = _fetchReserves(listingAddress, isBuyOrder, settlementContext);
+    ICCListing listingContract = ICCListing(listingAddress);
+    uint256 currentPrice = listingContract.prices(0);
+    if (currentPrice == 0 || reserveContext.normalizedReserveIn == 0) {
+        return 0;
     }
+    uint256 priceAdjustedAmount = isBuyOrder
+        ? (pendingAmount * maxPrice) / 1e18 // tokenB amount for buys
+        : (pendingAmount * 1e18) / minPrice; // tokenA amount for sells
+    maxAmountIn = priceAdjustedAmount > pendingAmount ? pendingAmount : priceAdjustedAmount;
+    if (maxAmountIn > reserveContext.normalizedReserveIn) {
+        maxAmountIn = reserveContext.normalizedReserveIn;
+    }
+    maxAmountIn = (maxAmountIn * 1000) / 997; // Apply Uniswap fee
+    maxAmountIn = denormalize(maxAmountIn, reserveContext.decimalsIn); // Denormalize for token decimals
+}
 }
