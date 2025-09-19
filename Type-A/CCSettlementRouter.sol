@@ -1,30 +1,33 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.6
+// Version: 0.1.9
 // Changes:
-// - v0.1.6: Modified _updateOrder to use ICCListing.BuyOrderUpdate and SellOrderUpdate structs directly in ccUpdate, removing encoding/decoding. Updated OrderContext to hold BuyOrderUpdate[] or SellOrderUpdate[] instead of UpdateType[].
-// - v0.1.4: Modified _updateOrder to call ccUpdate for each UpdateType separately, ensuring one struct per call.
-// - v0.1.3: Modified settleOrders to fetch live balances, price, and current historical volumes instead of using latest historical data entry for new historical data creation. Uses volumeBalances and prices functions from listingContract for live data.
-// - v0.1.2: Adjusted settleOrders to create new historical data entry as listing only increases volumes of latest entry on order updates. 
-// - v0.1.1: Fixed TypeError by replacing `listingContract.update` with `listingContract.ccUpdate` in `_updateOrder` to align with CCSettlementPartial.sol v0.1.3 and CCUniPartial.sol v0.1.5. Ensured `context.updates` is converted to `updateType`, `updateSort`, `updateData` arrays for `ccUpdate`. Compatible with CCListingTemplate.sol v0.1.12, CCMainPartial.sol v0.1.1, CCUniPartial.sol v0.1.5, CCSettlementPartial.sol v0.1.3.
-// - v0.1.0: Bumped version
-// - v0.0.13: Refactored settleOrders to resolve stack-too-deep error per "do x64" instruction. Split into helper functions (_validateOrder, _processOrder, _updateOrder) with OrderContext struct (orderId, pending, status, updates) to manage at most 4 variables per function. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging for failed token transfers, Uniswap swap failures, and approvals.
-// - v0.0.12: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
-// - v0.0.11: Fixed TypeError by removing `this.` from `_processBuyOrder` and `_processSellOrder` calls in `settleOrders`, as they are internal functions inherited from CCSettlementPartial.sol. Ensured compatibility with CCListingTemplate.sol v0.1.12 and maintained detailed error logging.
-// Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.1.1), CCUniPartial.sol (v0.1.5), CCSettlementPartial.sol (v0.1.3).
+// - v0.1.9: Refactored settleOrders into helper functions (_initSettlement, _createHistoricalEntry, _processOrderBatch) to resolve stack-too-deep error, using SettlementState struct to manage state. 
+// - v0.1.8: Restructured settleOrders to fetch static data (tokenA, tokenB, decimalsA, decimalsB, uniswapV2Pair) once via SettlementContext. Ensured transactToken is called via _prepBuyOrderUpdate/_prepSellOrderUpdate. Removed NonCriticalNoPendingOrder, NonCriticalZeroSwapAmount events. Ensured each order’s operations complete before next. Compatible with CCUniPartial.sol v0.1.15, CCSettlementPartial.sol v0.1.12, CCMainPartial.sol v0.1.5.
+// - v0.1.7: Added SettlementContext for static data, called _ensureTokenBalance for buy orders, capped maxAmountIn at 50 tokenB.
+// - v0.1.6: Modified _updateOrder to use BuyOrderUpdate/SellOrderUpdate structs directly in ccUpdate, removing encoding/decoding.
+// - v0.1.5: Updated to fetch live balances, price, and volumes for historical data in settleOrders.
+// - v0.1.4: Modified _updateOrder to call ccUpdate per UpdateType.
+// - v0.1.3: Used volumeBalances and prices for live data in settleOrders.
+// - v0.1.2: Adjusted settleOrders to create new historical data entry.
+// - v0.1.1: Fixed TypeError by using ccUpdate in _updateOrder.
+// - v0.1.0: Bumped version.
+// - v0.0.13: Refactored settleOrders to resolve stack-too-deep error.
+// - v0.0.12: Removed `this.` from _processBuyOrder/_processSellOrder calls.
+// - v0.0.11: Fixed TypeError by removing `this.` from internal calls.
+// Compatible with CCListingTemplate.sol (v0.1.12), CCMainPartial.sol (v0.1.5), CCUniPartial.sol (v0.1.15), CCSettlementPartial.sol (v0.1.12).
 
 import "./utils/CCSettlementPartial.sol";
 
 contract CCSettlementRouter is CCSettlementPartial {
-    struct OrderContext {
-        uint256 orderId;
-        uint256 pending;
-        uint8 status;
-        ICCListing.BuyOrderUpdate[] buyUpdates; // Updated for buy orders
-        ICCListing.SellOrderUpdate[] sellUpdates; // Updated for sell orders
-    }
-
+	
+struct SettlementState {
+    address listingAddress;
+    bool isBuyOrder;
+    uint256 step;
+    uint256 maxIterations;
+}
     function _validateOrder(
         address listingAddress,
         uint256 orderId,
@@ -36,39 +39,35 @@ contract CCSettlementRouter is CCSettlementPartial {
         (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
         (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
         if (context.pending == 0 || context.status != 1) {
-            return context;
+            revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
         }
         if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-            context.pending = 0; // Mark invalid for pricing
+            revert(string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
         }
     }
 
-    // Updated _processOrder to use buyUpdates or sellUpdates
     function _processOrder(
-        address listingAddress,
-        bool isBuyOrder,
-        ICCListing listingContract,
-        OrderContext memory context
-    ) internal returns (OrderContext memory) {
-        // Processes buy or sell order; updates are prepared in CCUniPartial.sol, refined in CCSettlementPartial.sol, and applied once here via ccUpdate
-        if (context.pending == 0 || context.status != 1) {
-            return context;
-        }
-        if (isBuyOrder) {
-            context.buyUpdates = _processBuyOrder(listingAddress, context.orderId, listingContract);
-        } else {
-            context.sellUpdates = _processSellOrder(listingAddress, context.orderId, listingContract);
-        }
-        return context;
+    address listingAddress,
+    bool isBuyOrder,
+    ICCListing listingContract,
+    OrderContext memory context,
+    CCSettlementRouter.SettlementContext memory settlementContext
+) internal returns (OrderContext memory) {
+    // Processes order; updates prepared in CCUniPartial.sol, refined in CCSettlementPartial.sol, applied via ccUpdate
+    if (isBuyOrder) {
+        context.buyUpdates = _processBuyOrder(listingAddress, context.orderId, listingContract, settlementContext);
+    } else {
+        context.sellUpdates = _processSellOrder(listingAddress, context.orderId, listingContract, settlementContext);
     }
+    return context;
+}
 
-    // Updated _updateOrder to use new structs directly
     function _updateOrder(
         ICCListing listingContract,
         OrderContext memory context,
         bool isBuyOrder
     ) internal returns (bool success, string memory reason) {
-        // Applies updates using BuyOrderUpdate/SellOrderUpdate structs; updates are applied once here via ccUpdate
+        // Applies updates via ccUpdate
         if (isBuyOrder && context.buyUpdates.length == 0 || !isBuyOrder && context.sellUpdates.length == 0) {
             return (false, "");
         }
@@ -87,80 +86,107 @@ contract CCSettlementRouter is CCSettlementPartial {
             return (true, "");
         } catch Error(string memory updateReason) {
             return (false, string(abi.encodePacked("Update failed for order ", uint2str(context.orderId), ": ", updateReason)));
-        } catch {
-            return (false, string(abi.encodePacked("Update failed for order ", uint2str(context.orderId), ": Unexpected error")));
         }
+    }
+
+    function _initSettlement(
+    address listingAddress,
+    bool isBuyOrder,
+    uint256 step,
+    ICCListing listingContract
+) private view returns (SettlementState memory state, uint256[] memory orderIds) {
+    // Initializes settlement state and fetches order IDs
+    if (uniswapV2Router == address(0)) {
+        revert("Missing Uniswap V2 router address");
+    }
+    state = SettlementState({
+        listingAddress: listingAddress,
+        isBuyOrder: isBuyOrder,
+        step: step,
+        maxIterations: 0
+    });
+    orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
+    if (orderIds.length == 0 || step >= orderIds.length) {
+        revert("No pending orders or invalid step");
+    }
 }
 
-    // Updated settleOrders to use four arguments for ccUpdate
-    function settleOrders(
-        address listingAddress,
-        uint256 step,
-        uint256 maxIterations,
-        bool isBuyOrder
-    ) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
-        // Iterates over pending orders, validates, processes, and applies updates here via ccUpdate
-        ICCListing listingContract = ICCListing(listingAddress);
-        if (uniswapV2Router == address(0)) {
-            return "Missing Uniswap V2 router address";
-        }
-        uint256[] memory orderIds = isBuyOrder ? listingContract.pendingBuyOrdersView() : listingContract.pendingSellOrdersView();
-        if (orderIds.length == 0 || step >= orderIds.length) {
-            return "No pending orders or invalid step";
-        }
-        // Create new historical data entry using live data
-        if (orderIds.length > 0) {
-            // Fetch live balances and price
-            (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
-            uint256 price = listingContract.prices(0);
-            // Fetch current historical volumes
-            uint256 historicalLength = listingContract.historicalDataLengthView();
-            uint256 xVolume = 0;
-            uint256 yVolume = 0;
-            if (historicalLength > 0) {
-                ICCListing.HistoricalData memory historicalData = listingContract.getHistoricalDataView(historicalLength - 1);
-                xVolume = historicalData.xVolume;
-                yVolume = historicalData.yVolume;
-            }
-            // Prepare ccUpdate for new historical data entry with live data
-            ICCListing.HistoricalUpdate[] memory historicalUpdates = new ICCListing.HistoricalUpdate[](1);
-            historicalUpdates[0] = ICCListing.HistoricalUpdate({
-                price: price,
-                xBalance: xBalance,
-                yBalance: yBalance,
-                xVolume: xVolume,
-                yVolume: yVolume,
-                timestamp: block.timestamp
-            });
-            try listingContract.ccUpdate(
-                new ICCListing.BuyOrderUpdate[](0),
-                new ICCListing.SellOrderUpdate[](0),
-                new ICCListing.BalanceUpdate[](0),
-                historicalUpdates
-            ) {
-                // Historical data entry created successfully with live data
-            } catch Error(string memory updateReason) {
-                return string(abi.encodePacked("Failed to create historical data entry: ", updateReason));
-            }
-        }
-        uint256 count = 0;
-        for (uint256 i = step; i < orderIds.length && count < maxIterations; i++) {
-            OrderContext memory context = _validateOrder(listingAddress, orderIds[i], isBuyOrder, listingContract);
-            if (context.pending == 0 || context.status != 1) {
-                continue;
-            }
-            context = _processOrder(listingAddress, isBuyOrder, listingContract, context);
-            (bool success, string memory updateReason) = _updateOrder(listingContract, context, isBuyOrder);
-            if (!success && bytes(updateReason).length > 0) {
-                return updateReason;
-            }
-            if (success) {
-                count++;
-            }
-        }
-        if (count == 0) {
-            return "No orders settled: price out of range, insufficient tokens, or swap failure";
-        }
-        return "";
+function _createHistoricalEntry(
+    ICCListing listingContract
+) private returns (ICCListing.HistoricalUpdate[] memory historicalUpdates) {
+    // Creates historical data entry
+    (uint256 xBalance, uint256 yBalance) = listingContract.volumeBalances(0);
+    uint256 price = listingContract.prices(0);
+    uint256 xVolume = 0;
+    uint256 yVolume = 0;
+    uint256 historicalLength = listingContract.historicalDataLengthView();
+    if (historicalLength > 0) {
+        ICCListing.HistoricalData memory historicalData = listingContract.getHistoricalDataView(historicalLength - 1);
+        xVolume = historicalData.xVolume;
+        yVolume = historicalData.yVolume;
     }
+    historicalUpdates = new ICCListing.HistoricalUpdate[](1);
+    historicalUpdates[0] = ICCListing.HistoricalUpdate({
+        price: price,
+        xBalance: xBalance,
+        yBalance: yBalance,
+        xVolume: xVolume,
+        yVolume: yVolume,
+        timestamp: block.timestamp
+    });
+    try listingContract.ccUpdate(
+        new ICCListing.BuyOrderUpdate[](0),
+        new ICCListing.SellOrderUpdate[](0),
+        new ICCListing.BalanceUpdate[](0),
+        historicalUpdates
+    ) {} catch Error(string memory updateReason) {
+        revert(string(abi.encodePacked("Failed to create historical data entry: ", updateReason)));
+    }
+}
+
+function _processOrderBatch(
+    SettlementState memory state,
+    uint256[] memory orderIds,
+    ICCListing listingContract,
+    SettlementContext memory settlementContext
+) private returns (uint256 count) {
+    // Processes batch of orders
+    count = 0;
+    for (uint256 i = state.step; i < orderIds.length && count < state.maxIterations; i++) {
+        OrderContext memory context = _validateOrder(state.listingAddress, orderIds[i], state.isBuyOrder, listingContract);
+        context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
+        (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
+        if (!success && bytes(updateReason).length > 0) {
+            revert(updateReason);
+        }
+        if (success) {
+            count++;
+        }
+    }
+}
+
+function settleOrders(
+    address listingAddress,
+    uint256 step,
+    uint256 maxIterations,
+    bool isBuyOrder
+) external nonReentrant onlyValidListing(listingAddress) returns (string memory reason) {
+    // Iterates over pending orders, completes each order fully
+    ICCListing listingContract = ICCListing(listingAddress);
+    SettlementContext memory settlementContext = SettlementContext({
+        tokenA: listingContract.tokenA(),
+        tokenB: listingContract.tokenB(),
+        decimalsA: listingContract.decimalsA(),
+        decimalsB: listingContract.decimalsB(),
+        uniswapV2Pair: listingContract.uniswapV2PairView()
+    });
+    (SettlementState memory state, uint256[] memory orderIds) = _initSettlement(listingAddress, isBuyOrder, step, listingContract);
+    state.maxIterations = maxIterations;
+    _createHistoricalEntry(listingContract);
+    uint256 count = _processOrderBatch(state, orderIds, listingContract, settlementContext);
+    if (count == 0) {
+        return "No orders settled: price out of range or swap failure";
+    }
+    return "";
+}
 }
