@@ -2,16 +2,11 @@
 pragma solidity ^0.8.2;
 
 /*
-// Version: 0.1.29
+// Version: 0.1.32
 // Changes:
-// - v0.1.29: Corrected inverted updateType in _executeFeeClaim for fee subtraction
-// - v0.1.28: Modified _executeFeeClaim to use updateType 8 (xFees subtraction) or 9 (yFees subtraction) for fee reduction.
-// - v0.1.27: Modified _transferWithdrawalAmount to track success of primary and compensation transfers, reverting if compensation transfer fails when compensationAmount > 0. Ensures slot allocation is only updated if both transfers succeed, preventing allocation reduction without full transfer. Preserves existing event emissions and functionality.
-// - v0.1.26: Reordered _executeWithdrawal to call _transferWithdrawalAmount before _updateWithdrawalAllocation to prevent slot allocation reduction if transactNative or transactToken fails.
-// - v0.1.25: Refactored _executeWithdrawal to address stack too deep error by splitting into helper functions (_fetchWithdrawalData, _updateWithdrawalAllocation, _transferWithdrawalAmount). Extended WithdrawalContext to include totalAllocationDeduct and price. Removed redundant local variables, ensured non-reverting behavior, and maintained v0.1.23 functionality (minimal checks, event emission, optional compensationAmount).
-// - v0.1.24: Removed _checkLiquidity, WithdrawalPrepData struct, _getLiquidityDetails, _validateSlot, and _calculateCompensation, as they are no longer used after v0.1.23 simplified withdrawal logic to skip liquidity checks and helper functions.
-// - v0.1.23: Refactored _prepWithdrawal to accept compensationAmount, validate only ownership and total allocation (output + converted compensation). Refactored _executeWithdrawal to remove liquidity checks, ensure non-reverting behavior, emit events for all failures, and update slot allocation based on converted compensation amount.
-// Compatible with CCListingTemplate.sol (v0.0.10), CCMainPartial.sol (v0.0.10), CCLiquidityRouter.sol (v0.0.25), ICCLiquidity.sol (v0.0.4), ICCListing.sol (v0.0.7), CCLiquidityTemplate.sol (v0.0.20).
+// - v0.1.32: Split FeeClaimContext into FeeClaimCore and FeeClaimDetails to fix stack too deep error. Added helper functions _fetchLiquidityDetails and _fetchSlotDetails in _validateFeeClaim. Updated _validateFeeClaim, _calculateFeeShare, _executeFeeClaim to use new structs. Updated _processFeeShare to use FeeClaimCore and FeeClaimDetails structs. 
+// - v0.1.31: Streamlined FeeClaimContext by removing unused xBalance, liquid, fees fields. Updated _validateFeeClaim and _calculateFeeShare to use new struct. 
+// - v0.1.30: Fixed _calculateFeeShare to use xFeesAcc/yFeesAcc instead of xFees/yFees for contributedFees calculation. Added xFeesAcc, yFeesAcc to FeeClaimContext struct. Fixed _validateFeeClaim to include xFeesAcc, yFeesAcc in constructor.
 */
 
 import "./CCMainPartial.sol";
@@ -58,24 +53,26 @@ struct WithdrawalContext {
         uint256 index;
     }
 
-    struct FeeClaimContext {
-        address listingAddress;
-        address depositor;
-        uint256 liquidityIndex;
-        bool isX;
-        address liquidityAddr;
-        uint256 xBalance;
-        uint256 xLiquid;
-        uint256 yLiquid;
-        uint256 xFees;
-        uint256 yFees;
-        uint256 liquid;
-        uint256 fees;
-        uint256 allocation;
-        uint256 dFeesAcc;
-        address transferToken;
-        uint256 feeShare;
-    }
+    struct FeeClaimCore {
+    address listingAddress;
+    address depositor;
+    uint256 liquidityIndex;
+    bool isX;
+    address liquidityAddr;
+    address transferToken;
+    uint256 feeShare;
+}
+
+struct FeeClaimDetails {
+    uint256 xLiquid;
+    uint256 yLiquid;
+    uint256 xFees;
+    uint256 yFees;
+    uint256 xFeesAcc;
+    uint256 yFeesAcc;
+    uint256 allocation;
+    uint256 dFeesAcc;
+}
     
     function _validateDeposit(address listingAddress, address depositor, uint256 inputAmount, bool isTokenA) internal view returns (DepositContext memory) {
     // Validates deposit parameters, using depositor for slot assignment and msg.sender as depositInitiator
@@ -445,138 +442,106 @@ function _transferWithdrawalAmount(WithdrawalContext memory context) internal {
     }
 }
 
-function _validateFeeClaim(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal returns (FeeClaimContext memory) {
-
-    // Validates fee claim parameters and ensures sufficient fees
-
-    ICCListing listingContract = ICCListing(listingAddress);
-
-    address liquidityAddr = listingContract.liquidityAddressView();
-
+function _fetchLiquidityDetails(address liquidityAddr) private view returns (FeeClaimDetails memory) {
+    // Fetches liquidity details from liquidity contract
     ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
-
-    require(depositor != address(0), "Invalid depositor");
-
-    (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, , ) = liquidityContract.liquidityDetailsView();
-
-    ICCLiquidity.Slot memory slot = isX ? liquidityContract.getXSlotView(liquidityIndex) : liquidityContract.getYSlotView(liquidityIndex);
-
-    require(slot.depositor == depositor, "Depositor not slot owner");
-
-    require(xLiquid > 0 || yLiquid > 0, "No liquidity available");
-
-    require(slot.allocation > 0, "No allocation for slot");
-
-    uint256 fees = isX ? yFees : xFees;
-
-    if (fees == 0) {
-
-        emit FeeValidationFailed(depositor, listingAddress, isX, liquidityIndex, "No fees available");
-
-        revert("No fees available");
-
-    }
-
-    return FeeClaimContext({
-
-        listingAddress: listingAddress,
-
-        depositor: depositor,
-
-        liquidityIndex: liquidityIndex,
-
-        isX: isX,
-
-        liquidityAddr: liquidityAddr,
-
-        xBalance: 0, // Unused, retained for compatibility
-
+    (uint256 xLiquid, uint256 yLiquid, uint256 xFees, uint256 yFees, uint256 xFeesAcc, uint256 yFeesAcc) = liquidityContract.liquidityDetailsView();
+    return FeeClaimDetails({
         xLiquid: xLiquid,
-
         yLiquid: yLiquid,
-
         xFees: xFees,
-
         yFees: yFees,
-
-        liquid: isX ? xLiquid : yLiquid,
-
-        fees: fees,
-
-        allocation: slot.allocation,
-
-        dFeesAcc: slot.dFeesAcc,
-
-        transferToken: isX ? listingContract.tokenB() : listingContract.tokenA(),
-
-        feeShare: 0
-
+        xFeesAcc: xFeesAcc,
+        yFeesAcc: yFeesAcc,
+        allocation: 0,
+        dFeesAcc: 0
     });
-
 }
 
+function _fetchSlotDetails(address liquidityAddr, uint256 liquidityIndex, bool isX, address depositor) private view returns (FeeClaimDetails memory details) {
+    // Fetches slot details and validates ownership
+    ICCLiquidity liquidityContract = ICCLiquidity(liquidityAddr);
+    ICCLiquidity.Slot memory slot = isX ? liquidityContract.getXSlotView(liquidityIndex) : liquidityContract.getYSlotView(liquidityIndex);
+    require(slot.depositor == depositor, "Depositor not slot owner");
+    details.allocation = slot.allocation;
+    details.dFeesAcc = slot.dFeesAcc;
+}
 
-
-    function _calculateFeeShare(FeeClaimContext memory context) internal pure returns (FeeClaimContext memory) {
-
-        uint256 contributedFees = context.fees > context.dFeesAcc ? context.fees - context.dFeesAcc : 0;
-
-        uint256 liquidityContribution = context.liquid > 0 ? (context.allocation * 1e18) / context.liquid : 0;
-
-        context.feeShare = (contributedFees * liquidityContribution) / 1e18;
-
-        context.feeShare = context.feeShare > context.fees ? context.fees : context.feeShare;
-
-        return context;
-
+function _validateFeeClaim(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal returns (FeeClaimCore memory, FeeClaimDetails memory) {
+    // Validates fee claim parameters and ensures sufficient fees
+    require(depositor != address(0), "Invalid depositor");
+    ICCListing listingContract = ICCListing(listingAddress);
+    address liquidityAddr = listingContract.liquidityAddressView();
+    FeeClaimDetails memory details = _fetchLiquidityDetails(liquidityAddr);
+    require(details.xLiquid > 0 || details.yLiquid > 0, "No liquidity available");
+    details = _fetchSlotDetails(liquidityAddr, liquidityIndex, isX, depositor);
+    require(details.allocation > 0, "No allocation for slot");
+    uint256 fees = isX ? details.yFees : details.xFees;
+    if (fees == 0) {
+        emit FeeValidationFailed(depositor, listingAddress, isX, liquidityIndex, "No fees available");
+        revert("No fees available");
     }
+    return (
+        FeeClaimCore({
+            listingAddress: listingAddress,
+            depositor: depositor,
+            liquidityIndex: liquidityIndex,
+            isX: isX,
+            liquidityAddr: liquidityAddr,
+            transferToken: isX ? listingContract.tokenB() : listingContract.tokenA(),
+            feeShare: 0
+        }),
+        details
+    );
+}
 
+function _calculateFeeShare(FeeClaimCore memory core, FeeClaimDetails memory details) internal pure returns (FeeClaimCore memory) {
+    // Calculate fee share using xFeesAcc/yFeesAcc for contributed fees
+    uint256 feesAcc = core.isX ? details.yFeesAcc : details.xFeesAcc;
+    uint256 contributedFees = feesAcc > details.dFeesAcc ? feesAcc - details.dFeesAcc : 0;
+    uint256 liquidityContribution = core.isX ? details.xLiquid : details.yLiquid;
+    liquidityContribution = liquidityContribution > 0 ? (details.allocation * 1e18) / liquidityContribution : 0;
+    core.feeShare = (contributedFees * liquidityContribution) / 1e18;
+    core.feeShare = core.feeShare > (core.isX ? details.yFees : details.xFees) ? (core.isX ? details.yFees : details.xFees) : core.feeShare;
+    return core;
+}
 
-
-    function _executeFeeClaim(FeeClaimContext memory context) internal {
+function _executeFeeClaim(FeeClaimCore memory core, FeeClaimDetails memory details) internal {
     // Executes fee claim, updates fees and dFeesAcc, transfers fees
-    if (context.feeShare == 0) {
-        emit NoFeesToClaim(context.depositor, context.listingAddress, context.isX, context.liquidityIndex);
+    if (core.feeShare == 0) {
+        emit NoFeesToClaim(core.depositor, core.listingAddress, core.isX, core.liquidityIndex);
         return;
     }
-    ICCLiquidity liquidityContract = ICCLiquidity(context.liquidityAddr);
-    uint256 xFeesAcc;
-    uint256 yFeesAcc;
-    try liquidityContract.liquidityDetailsView() returns (uint256, uint256, uint256, uint256, uint256 _xFeesAcc, uint256 _yFeesAcc) {
-        xFeesAcc = _xFeesAcc;
-        yFeesAcc = _yFeesAcc;
-    } catch (bytes memory reason) {
-        revert(string(abi.encodePacked("Liquidity details fetch failed: ", reason)));
-    }
+    ICCLiquidity liquidityContract = ICCLiquidity(core.liquidityAddr);
     ICCLiquidity.UpdateType[] memory updates = new ICCLiquidity.UpdateType[](2);
-    updates[0] = ICCLiquidity.UpdateType(context.isX ? 9 : 8, context.isX ? 1 : 0, context.feeShare, address(0), address(0)); // Subtract feeShare
-    updates[1] = ICCLiquidity.UpdateType(context.isX ? 6 : 7, context.liquidityIndex, context.isX ? yFeesAcc : xFeesAcc, context.depositor, address(0));
-    try liquidityContract.ccUpdate(context.depositor, updates) {
+    updates[0] = ICCLiquidity.UpdateType(core.isX ? 9 : 8, core.isX ? 1 : 0, core.feeShare, address(0), address(0));
+    updates[1] = ICCLiquidity.UpdateType(core.isX ? 6 : 7, core.liquidityIndex, core.isX ? details.yFeesAcc : details.xFeesAcc, core.depositor, address(0));
+    try liquidityContract.ccUpdate(core.depositor, updates) {
     } catch (bytes memory reason) {
         revert(string(abi.encodePacked("Fee claim update failed: ", reason)));
     }
-    uint8 decimals = context.transferToken == address(0) ? 18 : IERC20(context.transferToken).decimals();
-    uint256 denormalizedFee = denormalize(context.feeShare, decimals);
-    if (context.transferToken == address(0)) {
-        try liquidityContract.transactNative(context.depositor, denormalizedFee, context.depositor) {
+    uint8 decimals = core.transferToken == address(0) ? 18 : IERC20(core.transferToken).decimals();
+    uint256 denormalizedFee = denormalize(core.feeShare, decimals);
+    if (core.transferToken == address(0)) {
+        try liquidityContract.transactNative(core.depositor, denormalizedFee, core.depositor) {
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
         }
     } else {
-        try liquidityContract.transactToken(context.depositor, context.transferToken, denormalizedFee, context.depositor) {
+        try liquidityContract.transactToken(core.depositor, core.transferToken, denormalizedFee, core.depositor) {
         } catch (bytes memory reason) {
             revert(string(abi.encodePacked("Fee claim transfer failed: ", reason)));
         }
     }
-    emit FeesClaimed(context.listingAddress, context.liquidityIndex, context.isX ? 0 : context.feeShare, context.isX ? context.feeShare : 0);
+    emit FeesClaimed(core.listingAddress, core.liquidityIndex, core.isX ? 0 : core.feeShare, core.isX ? core.feeShare : 0);
 }
 
-
     function _processFeeShare(address listingAddress, address depositor, uint256 liquidityIndex, bool isX) internal {
-        FeeClaimContext memory context = _validateFeeClaim(listingAddress, depositor, liquidityIndex, isX);
-        context = _calculateFeeShare(context);
-        _executeFeeClaim(context);
-    }
+    // Processes fee share using new FeeClaimCore and FeeClaimDetails structs
+    (FeeClaimCore memory core, FeeClaimDetails memory details) = _validateFeeClaim(listingAddress, depositor, liquidityIndex, isX);
+    core = _calculateFeeShare(core, details);
+    _executeFeeClaim(core, details);
+}
 
     function _changeDepositor(address listingAddress, address depositor, bool isX, uint256 slotIndex, address newDepositor) internal {
         // Changes depositor for a liquidity slot using ccUpdate with new updateType
