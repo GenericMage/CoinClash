@@ -183,3 +183,5 @@ Partial fills occur when the `swapAmount` is limited by `maxAmountIn`, calculate
 During `_computeSwapImpact` **`expectedAmountOut`** is calculated based on the current pool reserves and the size of the input amount (`denormAmountIn`) and is used directly as the value for the **`denormAmountOutMin`** parameter in the actual Uniswap `swapExactTokensForTokens` call. Slippage cannot exceed order's max/min price bounds. 
 - **Reserve Clarification:**
 Uniswap "reserves" are used in name only. The system fetches live balances of the LP address for `_computeSwapImpact` and `_computeMaxAmountIn `. 
+- **Partial Fills Continuation:**
+The system is capable of partially filling an order and continuing an order that was previously partially filled, until fully filled. 
