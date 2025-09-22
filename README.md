@@ -1,5 +1,5 @@
 # Overview
-CoinClash, derived from (ShockSpace)[https://github.com/Peng-Protocol/Dexhune-SS/tree/main/ShockSpace] uses Uniswap V2 for order settlement. The system introduces range/limit orders - dynamic fees - historical data, etc to Uniswap v2. 
+CoinClash, derived from [ShockSpace](https://github.com/Peng-Protocol/Dexhune-SS/tree/main/ShockSpace) uses Uniswap V2 for order settlement. The system introduces range/limit orders - dynamic fees - historical data, etc to Uniswap v2. 
 
 ## System Summary
 CoinClash operates via `CCAgent`, to deploy `CCListingTemplate` and `CCLiquidityTemplate` contracts for unique token pairs. `CCListingTemplate` serves as the order book, enabling order creation, cancellation, and settlement via `CCOrderRouter`, `CCSettlementRouter`, and `CCLiquidRouter`. It uses Uniswap V2 for real-time pricing and partial fills, tracking historical data and balances. `CCLiquidityTemplate` enables deposits, withdrawals, fee claims, and payouts, storing liquidity details and slot data. `CCLiquidityRouter` handles deposits, partial withdrawals with compensation, and fee calculations, while `CCLiquidRouter` settles orders using liquidity balances, charging up to 1% fees. `CCGlobalizer` and `TokenRegistry` ensure cross-contract order and balance consistency. Pagination (`maxIterations`, `step`) optimizes queries, and relisting supports system upgrades.
@@ -111,4 +111,5 @@ As seen in [MFP](https://github.com/Peng-Protocol/Dexhune-P).
 # CCLiquidityRouter
 
 ## Description 
+
 As seen in [MFP](https://github.com/Peng-Protocol/Dexhune-P).
