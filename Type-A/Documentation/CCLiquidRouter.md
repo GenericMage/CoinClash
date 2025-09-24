@@ -1,15 +1,17 @@
 # CCLiquidRouter Contract Documentation
 
 ## Overview
-The `CCLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `CCLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair`. Features include a dynamic fee system (min 0.01%, max 10% based on liquidity usage ratio: `normalizedPending / normalizedLiquidity`), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step` (starting index for partial batch processing, e.g., step=0 processes from first order, step=10 skips first 10 for resumed settlements). Uses `ReentrancyGuard` for security. Fees are deducted from `pendingAmount` (netAmount transferred), recorded in `xFees`/`yFees`, and incentivize liquidity provision by scaling with usage—higher liquidity reduces relative fees, encouraging additions to lower slippage. Liquidity updates: for buy orders, `pendingAmount` (tokenB) increases `yLiquid`, `amountOut` (tokenA) decreases `xLiquid`; for sell orders, `pendingAmount` (tokenA) increases `xLiquid`, `amountOut` (tokenB) decreases `yLiquid`. Historical updates capture pre-settlement snapshots to track volumes without double-counting.
+The `CCLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `ICCLiquidity`, inheriting `CCLiquidPartial`. It integrates with `ICCListing`, `ICCLiquidity`, `IERC20`, and `IUniswapV2Pair`. Features include a dynamic fee system (min 0.01%, max 10% based on liquidity usage ratio: `normalizedAmountSent / normalizedLiquidity`), user-specific settlement via `makerPendingOrdersView`, and gas-efficient iteration with `step` (starting index for partial batch processing, e.g., step=0 processes from first order, step=10 skips first 10). Uses `ReentrancyGuard`. Fees are deducted from `pendingAmount` (net '
+
+System: Amount transferred), recorded in `xFees`/`yFees`, and incentivize liquidity provision by scaling with usage—higher liquidity reduces fees, encouraging additions to lower slippage. Liquidity updates: for buy orders, `pendingAmount` (tokenB) increases `yLiquid`, `amountOut` (tokenA) decreases `xLiquid`; for sell orders, `pendingAmount` (tokenA) increases `xLiquid`, `amountOut` (tokenB) decreases `yLiquid`. Historical updates capture pre-settlement snapshots to track volumes without double-counting.
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
 **Version:** 0.0.25 (updated 2025-09-24)
 
-**Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` (v0.0.46) → `CCMainPartial` (v0.1.5)
+**Inheritance Tree:** `CCLiquidRouter` → `CCLiquidPartial` (v0.0.47) → `CCMainPartial` (v0.1.5)
 
-**Compatibility:** `CCListingTemplate.sol` (v0.3.9), `ICCLiquidity.sol` (v0.0.5), `CCMainPartial.sol` (v0.1.5), `CCLiquidPartial.sol` (v0.0.46), `CCLiquidityTemplate.sol` (v0.1.20)
+**Compatibility:** `CCListingTemplate.sol` (v0.3.9), `ICCLiquidity.sol` (v0.0.5), `CCMainPartial.sol` (v0.1.5), `CCLiquidPartial.sol` (v0.0.47), `CCLiquidityTemplate.sol` (v0.1.20)
 
 ## Mappings
 - None defined in `CCLiquidRouter`. Uses `ICCListing` view functions (`pendingBuyOrdersView`, `pendingSellOrdersView`, `makerPendingOrdersView`) for order tracking, filtering user-specific pending IDs (e.g., `makerPendingOrdersView(msg.sender)` returns array of uint256 orderIds sorted by creation, enabling `step`-based slicing for gas control).
@@ -27,7 +29,7 @@ The `CCLiquidRouter` contract (Solidity ^0.8.2) settles buy/sell orders using `I
 - **LiquidityUpdateContext** (`CCLiquidPartial`): Holds `pendingAmount`, `amountOut` (uint256), `tokenDecimals` (uint8), `isBuyOrder` (bool) for updates in `_prepareLiquidityUpdates`.
 
 ## Formulas
-Formulas in `CCLiquidPartial.sol` (v0.0.46) govern settlement, pricing, and fees, ensuring normalized 18-decimal precision.
+Formulas in `CCLiquidPartial.sol` (v0.0.47) govern settlement, pricing, and fees, ensuring normalized 18-decimal precision.
 
 1. **Current Price**:
    - **Formula**: `price = listingContract.prices(0)`.
@@ -41,7 +43,7 @@ Formulas in `CCLiquidPartial.sol` (v0.0.46) govern settlement, pricing, and fees
      - `normalizedReserveIn/Out = normalize(reserveIn/Out, decimalsIn/Out)`.
      - `amountOut = (amountInAfterFee * normalizedReserveOut) / (normalizedReserveIn + amountInAfterFee)`.
      - `impactPrice = ((normalizedReserveIn + amountInAfterFee) * 1e18) / (normalizedReserveOut - amountOut)` (or max if division by zero).
-   - **Used in**: `_computeSwapImpact` (called by `_validateOrderPricing`, `_computeSwapAmount`, `_prepBuy/SellLiquidUpdates` in `_processSingleOrder`).
+   - **Used in**: `_computeSwapImpact` (called by `_validateOrderPricing`, "_computeSwapAmount`, `_prepBuy/SellLiquidUpdates` in `_processSingleOrder`).
    - **Description**: Simulates post-fee output and marginal price for buy (tokenB in, tokenA out) or sell (tokenA in, tokenB out) using live `balanceOf` on Uniswap V2 pair; reserves fetched via `_getSwapReserves` (token0-aware for pair ordering).
    - **Usage**: In `_processSingleOrder`, if `impactPrice` outside `[minPrice, maxPrice]`, emits `PriceOutOfBounds` and skips; denormalizes `amountOut` for liquidity checks/transfers.
 
@@ -56,16 +58,20 @@ Formulas in `CCLiquidPartial.sol` (v0.0.46) govern settlement, pricing, and fees
    - **Description**: Projects tokenB receivable for sell principal (tokenA); validates `yLiquid >= normalize(amountOut)`.
 
 5. **Normalization/Denormalization**:
-   - **Normalize**: `if (decimals == 18) amount; else if (decimals < 18) amount * 10^(18 - decimals); else amount / 10^(decimals - 18)`.
-   - **Denormalize**: `if (decimals == 18) amount; else if (decimals < 18) amount / 10^(18 - decimals); else amount * 10^(decimals - 18)`.
+   - **Formula**:
+     - Normalize: `if (decimals == 18) amount; else if (decimals < 18) amount * 10^(18 - decimals); else amount / 10^(decimals - 18)`.
+     - Denormalize: `if (decimals == 18) amount; else if (decimals < 18) amount / 10^(18 - decimals); else amount * 10^(decimals - 18)`.
    - **Used in**: Across `_getSwapReserves`, `_computeSwapImpact`, `_computeFee`, `_prepareLiquidityUpdates`, `_prepBuy/SellOrderUpdate`, `_processSingleOrder`.
    - **Description**: Standardizes to 18 decimals for ratio calcs (e.g., fees, reserves); reverses for transfers (`amountOut`, `feeAmount`). Ensures precision across varying token decimals (queried via `decimalsA/B`).
 
 6. **Fee Calculation**:
-   - **Formula**: `feePercent = (normalizedPending * 1e18) / normalizedLiquidity`; `feePercent = max(1e14, min(1e19, feePercent))` (0.01%-10%); `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
+   - **Formula**:
+     - `amountSent = normalize(amountOut, decimalsOut)`; `feePercent = (normalizedAmountSent * 1e18) / normalizedLiquidity`.
+     - `feePercent = max(1e14, min(1e18, feePercent))` (0.01%-10%).
+     - `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
    - **Used in**: `_computeFee` (called by `_processSingleOrder` → `_executeOrderWithFees` → `_prepareLiquidityUpdates`).
-   - **Description**: Dynamic fee on input liquidity usage (`yLiquid` for buy, `xLiquid` for sell); min 0.01% ensures micro-orders contribute, max 10% at 100% usage incentivizes liquidity additions to dilute ratios and reduce fees. `normalizedLiquidity` from `liquidityAmounts()`; fee added to `yFees` (buy) or `xFees` (sell).
-   - **Usage**: Deducted pre-swap in `_executeOrderWithFees`; emits `FeeDeducted` with details; netAmount used for `amountIn` in impact calc.
+   - **Description**: Dynamic fee on output liquidity usage (`yLiquid` for buy, `xLiquid` for sell); min 0.01% ensures micro-orders contribute, max 10% at 100% usage incentivizes liquidity additions. `normalizedLiquidity` from `liquidityAmounts()`; fee added to `yFees` (buy) or `xFees` (sell). E.g., `amountSent=100`, `liquidityAmount=120` yields `feePercent=83.33% * 10% = 8.33%`.
+   - **Usage**: Deducted pre-swap in `_executeOrderWithFees`; emits `FeeDeducted` with details; `netAmount` used for `amountIn` in impact calc.
 
 7. **Liquidity Updates**:
    - **Formula**:
@@ -88,7 +94,7 @@ Formulas in `CCLiquidPartial.sol` (v0.0.46) govern settlement, pricing, and fees
   - `_processOrderBatch(true, step)`: `_collectOrderIdentifiers` (slices array from `step`, limits to `maxIterations`) → loop: `getBuyOrderAmounts` (pendingAmount) → if >0: `_processSingleOrder`:
     - `getBuyOrderCore/Pricing` → `_validateOrderPricing` (`_computeCurrentPrice`, `_computeSwapImpact` for impactPrice).
     - Liquidity check: `liquidityAmounts` vs. normalize(pendingAmount, decimalsB), normalize(amountOut, decimalsA).
-    - `_computeFee` (usage ratio) → `_prepBuyOrderUpdate` (pre/post balance for `amountSent` tokenA to recipient; `preTransferWithdrawn` from maker tokenB).
+    - `_computeFee` (usage ratio: `amountSent/liquidityAmount`) → `_prepBuyOrderUpdate` (pre/post balance for `amountSent` tokenA to recipient; `preTransferWithdrawn` from maker tokenB).
     - `_executeOrderWithFees`: Emit `FeeDeducted`; `_computeSwapAmount`; `_prepareLiquidityUpdates` (transfer pendingAmount to liquidity, single `ccUpdate`s for yLiquid+/xLiquid-/yFees+); snapshot `HistoricalUpdate` (current volumes, no increment); `executeSingleBuyLiquid` (`_prepBuyLiquidUpdates` → `_createBuyOrderUpdates` → `ccUpdate` with updates).
 - **Emits**: `NoPendingOrders` (no orders/invalid step), `InsufficientBalance` (yBalance=0 or liquidity short), `UpdateFailed` (batch fail), `PriceOutOfBounds` (pricing skip), `FeeDeducted` (per order).
 - **Graceful Degradation**: Non-reverting skips (e.g., pricing/liquidity issues emit events, return false in `_processSingleOrder`); try-catch in `ccUpdate` emits `UpdateFailed` reason.
@@ -102,16 +108,16 @@ Formulas in `CCLiquidPartial.sol` (v0.0.46) govern settlement, pricing, and fees
 - **Graceful Degradation**: Identical.
 - **Note**: `amountSent` cumulative tokenB; fee scaling incentivizes xLiquid additions to cap at 10%.
 
-## Internal Functions (CCLiquidPartial, v0.0.46)
+## Internal Functions (CCLiquidPartial, v0.0.47)
 - **_getSwapReserves**: Builds `SwapImpactContext` from Uniswap pair `balanceOf` (token0/tokenB aware); called in `_computeSwapImpact` for live reserves.
 - **_computeCurrentPrice**: Try-catch fetch `prices(0)`; in `_validateOrderPricing` for bounds check.
 - **_computeSwapImpact**: Fee-adjusted output/price sim; in validation/swaps for `amountOut`.
 - **_getTokenAndDecimals**: Returns token/decimals for direction; in fee/liquidity calcs.
-- **_checkPricing** (unused in v0.0.46; legacy): Early bounds check.
+- **_checkPricing** (unused in v0.0.47; legacy): Early bounds check.
 - **_computeAmountSent**: Pre-balance snapshot; in `_prepBuy/SellOrderUpdate` for `amountSent` delta.
 - **_prepareLiquidityTransaction** (truncated in doc; internal): Simulates out; in legacy paths.
 - **_validateOrderPricing**: Builds `OrderProcessingContext`, checks bounds/current vs. impact; emits skip in `_processSingleOrder`.
-- **_computeFee**: Ratio-based with min/max clamps; in `_processSingleOrder` for `FeeContext`.
+- **_computeFee**: Ratio-based (`amountSent/liquidityAmount`) with min/max clamps; in `_processSingleOrder` for `FeeContext`.
 - **_computeSwapAmount**: Nets `amountOut` post-fee; in `_executeOrderWithFees` for `LiquidityUpdateContext`.
 - **_toSingleUpdateArray**: Wraps single `UpdateType`; in `_prepareLiquidityUpdates` for atomic `ccUpdate`.
 - **_prepareLiquidityUpdates**: Validates liquidity, transfers input, single `ccUpdate`s for liquid/fees; reverts critical (e.g., update/transfer fail); in `_executeOrderWithFees`.
