@@ -64,14 +64,15 @@ Formulas in `CCLiquidPartial.sol` (v0.0.47) govern settlement, pricing, and fees
    - **Used in**: Across `_getSwapReserves`, `_computeSwapImpact`, `_computeFee`, `_prepareLiquidityUpdates`, `_prepBuy/SellOrderUpdate`, `_processSingleOrder`.
    - **Description**: Standardizes to 18 decimals for ratio calcs (e.g., fees, reserves); reverses for transfers (`amountOut`, `feeAmount`). Ensures precision across varying token decimals (queried via `decimalsA/B`).
 
-6. **Fee Calculation**:
-   - **Formula**:
-     - `amountSent = normalize(amountOut, decimalsOut)`; `feePercent = (normalizedAmountSent * 1e18) / normalizedLiquidity`.
-     - `feePercent = max(1e14, min(1e18, feePercent))` (0.01%-10%).
-     - `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
-   - **Used in**: `_computeFee` (called by `_processSingleOrder` → `_executeOrderWithFees` → `_prepareLiquidityUpdates`).
-   - **Description**: Dynamic fee on output liquidity usage (`yLiquid` for buy, `xLiquid` for sell); min 0.01% ensures micro-orders contribute, max 10% at 100% usage incentivizes liquidity additions. `normalizedLiquidity` from `liquidityAmounts()`; fee added to `yFees` (buy) or `xFees` (sell). E.g., `amountSent=100`, `liquidityAmount=120` yields `feePercent=83.33% * 10% = 8.33%`.
-   - **Usage**: Deducted pre-swap in `_executeOrderWithFees`; emits `FeeDeducted` with details; `netAmount` used for `amountIn` in impact calc.
+6.  **Fee Calculation**:
+    * **Formula**:
+        * `usagePercent = (normalize(amountOut, decimalsOut) * 1e18) / normalize(outputLiquidity, decimalsOut)`.
+        * `feePercent = usagePercent / 10`.
+        * `feePercent = max(1e14, min(1e17, feePercent))` (clamped between 0.01% and 10%).
+        * `feeAmount = (pendingAmount * feePercent) / 1e18`; `netAmount = pendingAmount - feeAmount`.
+    * **Used in**: `_computeFee` (called by `_processSingleOrder` → `_executeOrderWithFees`).
+    * **Description**: A dynamic fee is calculated based on the usage of the **output** liquidity pool (i.e., `xLiquid` for buys, `yLiquid` for sells). The fee percentage is **one-tenth** of the liquidity usage percentage, clamped between a **0.01% minimum** and a **10% maximum**. This incentivizes liquidity providers by scaling fees with slippage. For example, if an order requires `amountSent` of 100 from an available `outputLiquidity` of 120, the usage is 83.33%, resulting in an 8.333% fee.
+    * **Usage**: The `feeAmount` is deducted from the user's input (`pendingAmount`) before the swap calculation. The fee is then added to the corresponding fee pool (`yFees` for buys, `xFees` for sells).
 
 7. **Liquidity Updates**:
    - **Formula**:

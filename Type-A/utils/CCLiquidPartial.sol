@@ -525,20 +525,54 @@ function executeSingleSellLiquid(address listingAddress, uint256 orderIdentifier
     }
 
     function _computeFee(address listingAddress, uint256 pendingAmount, bool isBuyOrder) private view returns (FeeContext memory feeContext) {
-    // Calculates fee (0.01%-10%) based on amountSent/liquidityAmount ratio
-    ICCLiquidity liquidityContract = ICCLiquidity(ICCListing(listingAddress).liquidityAddressView());
+    ICCListing listingContract = ICCListing(listingAddress);
+    ICCLiquidity liquidityContract = ICCLiquidity(listingContract.liquidityAddressView());
     (uint256 xLiquid, uint256 yLiquid) = liquidityContract.liquidityAmounts();
-    (address tokenAddress, uint8 tokenDecimals) = _getTokenAndDecimals(listingAddress, isBuyOrder);
-    uint256 liquidityAmount = isBuyOrder ? yLiquid : xLiquid;
+
+    // 1. Determine the CORRECT output liquidity pool and decimals
+    uint256 outputLiquidityAmount;
+    uint8 outputDecimals;
+
+    if (isBuyOrder) {
+        // Buy order output is Token A (xLiquid)
+        outputLiquidityAmount = xLiquid;
+        outputDecimals = listingContract.decimalsA();
+    } else {
+        // Sell order output is Token B (yLiquid)
+        outputLiquidityAmount = yLiquid;
+        outputDecimals = listingContract.decimalsB();
+    }
+
+    // Use _computeImpactPrice for MFPLiquidPartial or _computeSwapImpact for CCLiquidPartial
     (, uint256 amountOut) = _computeSwapImpact(listingAddress, pendingAmount, isBuyOrder);
-    uint256 amountSent = normalize(amountOut, isBuyOrder ? ICCListing(listingAddress).decimalsA() : ICCListing(listingAddress).decimalsB());
-    uint256 normalizedLiquidity = normalize(liquidityAmount, tokenDecimals);
-    uint256 feePercent = normalizedLiquidity > 0 ? (amountSent * 1e18) / normalizedLiquidity : 1e18;
-    feePercent = feePercent < 1e14 ? 1e14 : feePercent > 1e18 ? 1e18 : feePercent; // 0.01% min, 10% max
+
+    uint256 normalizedAmountSent = normalize(amountOut, outputDecimals);
+    uint256 normalizedLiquidity = normalize(outputLiquidityAmount, outputDecimals);
+
+    // 2. Calculate liquidity usage and divide by 10 for the fee percentage
+    uint256 feePercent;
+    if (normalizedLiquidity > 0) {
+        uint256 usagePercent = (normalizedAmountSent * 1e18) / normalizedLiquidity;
+        feePercent = usagePercent / 10;
+    } else {
+        feePercent = 1e17; // Default to max 10% fee if liquidity is zero
+    }
+    
+    // 3. Clamp the fee between 0.01% and 10%
+    uint256 minFeePercent = 1e14; // 0.01%
+    uint256 maxFeePercent = 1e17; // 10%
+
+    if (feePercent < minFeePercent) {
+        feePercent = minFeePercent;
+    } else if (feePercent > maxFeePercent) {
+        feePercent = maxFeePercent;
+    }
+
+    // Calculate final fee amount from the input (pendingAmount)
     feeContext.feeAmount = (pendingAmount * feePercent) / 1e18;
     feeContext.netAmount = pendingAmount - feeContext.feeAmount;
-    feeContext.liquidityAmount = liquidityAmount;
-    feeContext.decimals = tokenDecimals;
+    feeContext.decimals = outputDecimals; // For context, if needed elsewhere
+    feeContext.liquidityAmount = outputLiquidityAmount; // For context
 }
 
     function _computeSwapAmount(address listingAddress, FeeContext memory feeContext, bool isBuyOrder) private view returns (LiquidityUpdateContext memory context) {
