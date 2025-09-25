@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.19
+// Version: 0.1.21
 // Changes: 
+// - v0.1.21: Updated _finalizeTokenSwap and _finalizeSellTokenSwap to compute amountSent with pre/post balance checks, adjusted status based on pending amount.
 // - v0.1.20: added uint2str, getTokenAndDecimals, prepBuyOrderUpdate and prepSellOrderUpdate to unipartial to resolve declaration error. 
 // - v0.1.18: Patched _prepareSwapData/_prepareSellSwapData to compute amountOutMin using amountInReceived from _prepBuyOrderUpdate/_prepSellOrderUpdate to handle transfer taxes. 
 // - v0.1.17: Patched _executeTokenSwap to use actual amountInReceived for swap. Added allowance check in _prepareTokenSwap, setting 10^50 if insufficient. 
@@ -416,43 +417,45 @@ function _prepareSellSwapData(
         data.amountOut = data.postBalanceOut > data.preBalanceOut ? data.postBalanceOut - data.preBalanceOut : 0;
     }
 
-    function _finalizeTokenSwap(
-        TokenSwapData memory data,
-        SwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) internal view returns (ICCListing.BuyOrderUpdate[] memory) {
-        require(data.amountReceived > 0, "No tokens received in swap");
-        BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
-            makerAddress: context.makerAddress,
-            recipient: context.recipientAddress,
-            status: context.status,
-            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
-            amountSent: data.amountInReceived,
-            amountIn: context.denormAmountIn
-        });
-        (, uint256 filled, ) = context.listingContract.getBuyOrderAmounts(orderIdentifier);
-        return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount, filled);
-    }
+    // Modified _finalizeTokenSwap to fix amountSent and status
+function _finalizeTokenSwap(
+    TokenSwapData memory data,
+    SwapContext memory context,
+    uint256 orderIdentifier,
+    uint256 pendingAmount
+) internal view returns (ICCListing.BuyOrderUpdate[] memory) {
+    require(data.amountOut > 0, "No tokens received in swap");
+    BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
+        makerAddress: context.makerAddress,
+        recipient: context.recipientAddress,
+        status: pendingAmount <= data.amountOut ? 3 : 2,
+        normalizedReceived: normalize(data.amountOut, context.decimalsOut),
+        amountSent: data.amountOut,
+        amountIn: context.denormAmountIn
+    });
+    (, uint256 filled, ) = context.listingContract.getBuyOrderAmounts(orderIdentifier);
+    return _createBuyOrderUpdates(orderIdentifier, updateContext, pendingAmount, filled);
+}
 
-    function _finalizeSellTokenSwap(
-        TokenSwapData memory data,
-        SwapContext memory context,
-        uint256 orderIdentifier,
-        uint256 pendingAmount
-    ) internal view returns (ICCListing.SellOrderUpdate[] memory) {
-        require(data.amountReceived > 0, "No tokens received in swap");
-        SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
-            makerAddress: context.makerAddress,
-            recipient: context.recipientAddress,
-            status: context.status,
-            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
-            amountSent: data.amountInReceived,
-            amountIn: context.denormAmountIn
-        });
-        (, uint256 filled, ) = context.listingContract.getSellOrderAmounts(orderIdentifier);
-        return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount, filled);
-    }
+    // Modified _finalizeSellTokenSwap to fix amountSent and status
+function _finalizeSellTokenSwap(
+    TokenSwapData memory data,
+    SwapContext memory context,
+    uint256 orderIdentifier,
+    uint256 pendingAmount
+) internal view returns (ICCListing.SellOrderUpdate[] memory) {
+    require(data.amountOut > 0, "No tokens received in swap");
+    SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
+        makerAddress: context.makerAddress,
+        recipient: context.recipientAddress,
+        status: pendingAmount <= data.amountOut ? 3 : 2,
+        normalizedReceived: normalize(data.amountOut, context.decimalsOut),
+        amountSent: data.amountOut,
+        amountIn: context.denormAmountIn
+    });
+    (, uint256 filled, ) = context.listingContract.getSellOrderAmounts(orderIdentifier);
+    return _createSellOrderUpdates(orderIdentifier, updateContext, pendingAmount, filled);
+}
 
     function _executeBuyETHSwap(
         SwapContext memory context,
@@ -463,13 +466,13 @@ function _prepareSellSwapData(
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         ETHSwapData memory data = _performETHBuySwap(context, path);
-        require(data.amountReceived > 0, "No tokens received in swap");
+        require(data.amountOut > 0, "No tokens received in swap"); // Check using balance difference
         BuyOrderUpdateContext memory updateContext = BuyOrderUpdateContext({
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
             status: context.status,
-            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
-            amountSent: data.amountInReceived,
+            normalizedReceived: normalize(data.amountOut, context.decimalsOut), // Use balance difference
+            amountSent: data.amountOut, // Use actual amount received by user
             amountIn: context.denormAmountIn
         });
         (, uint256 filled, ) = context.listingContract.getBuyOrderAmounts(orderIdentifier);
@@ -485,13 +488,13 @@ function _prepareSellSwapData(
         path[0] = context.tokenIn;
         path[1] = context.tokenOut;
         ETHSwapData memory data = _performETHSellSwap(context, path);
-        require(data.amountReceived > 0, "No ETH received in swap");
+        require(data.amountOut > 0, "No ETH received in swap"); // Check using balance difference
         SellOrderUpdateContext memory updateContext = SellOrderUpdateContext({
             makerAddress: context.makerAddress,
             recipient: context.recipientAddress,
             status: context.status,
-            normalizedReceived: normalize(data.amountReceived, context.decimalsOut),
-            amountSent: data.amountInReceived,
+            normalizedReceived: normalize(data.amountOut, context.decimalsOut), // Use balance difference
+            amountSent: data.amountOut, // Use actual amount received by user
             amountIn: context.denormAmountIn
         });
         (, uint256 filled, ) = context.listingContract.getSellOrderAmounts(orderIdentifier);
@@ -566,16 +569,6 @@ function _prepareSellSwapData(
         }
     }
 
-    function _computeOrderStatus(
-        uint256 normalizedReceived,
-        uint256 filled,
-        uint256 pendingAmount,
-        uint8 currentStatus
-    ) internal pure returns (uint8 status) {
-        uint256 totalFilled = normalizedReceived + filled;
-        status = currentStatus == 1 && totalFilled >= pendingAmount ? 3 : 2;
-    }
-
     function _createBuyOrderUpdates(
         uint256 orderIdentifier,
         BuyOrderUpdateContext memory updateContext,
@@ -584,7 +577,7 @@ function _prepareSellSwapData(
     ) internal pure returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
         // Creates BuyOrderUpdate structs
         buyUpdates = new ICCListing.BuyOrderUpdate[](2);
-        uint256 newPending = pendingAmount - updateContext.amountIn;
+        uint256 newPending = pendingAmount > updateContext.amountIn ? pendingAmount - updateContext.amountIn : 0;
         buyUpdates[0] = ICCListing.BuyOrderUpdate({
             structId: 2,
             orderId: orderIdentifier,
@@ -594,7 +587,7 @@ function _prepareSellSwapData(
             maxPrice: 0,
             minPrice: 0,
             pending: newPending,
-            filled: updateContext.amountIn,
+            filled: filled + updateContext.amountIn,
             amountSent: updateContext.amountSent
         });
         buyUpdates[1] = ICCListing.BuyOrderUpdate({
@@ -602,7 +595,7 @@ function _prepareSellSwapData(
             orderId: orderIdentifier,
             makerAddress: updateContext.makerAddress,
             recipientAddress: updateContext.recipient,
-            status: newPending == 0 ? 3 : _computeOrderStatus(updateContext.amountIn, filled, pendingAmount, updateContext.status),
+            status: newPending == 0 ? 3 : 2, // Corrected status logic
             maxPrice: 0,
             minPrice: 0,
             pending: 0,
@@ -619,7 +612,7 @@ function _prepareSellSwapData(
     ) internal pure returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
         // Creates SellOrderUpdate structs
         sellUpdates = new ICCListing.SellOrderUpdate[](2);
-        uint256 newPending = pendingAmount - updateContext.amountIn;
+        uint256 newPending = pendingAmount > updateContext.amountIn ? pendingAmount - updateContext.amountIn : 0;
         sellUpdates[0] = ICCListing.SellOrderUpdate({
             structId: 2,
             orderId: orderIdentifier,
@@ -629,7 +622,7 @@ function _prepareSellSwapData(
             maxPrice: 0,
             minPrice: 0,
             pending: newPending,
-            filled: updateContext.amountIn,
+            filled: filled + updateContext.amountIn,
             amountSent: updateContext.amountSent
         });
         sellUpdates[1] = ICCListing.SellOrderUpdate({
@@ -637,7 +630,7 @@ function _prepareSellSwapData(
             orderId: orderIdentifier,
             makerAddress: updateContext.makerAddress,
             recipientAddress: updateContext.recipient,
-            status: newPending == 0 ? 3 : _computeOrderStatus(updateContext.amountIn, filled, pendingAmount, updateContext.status),
+            status: newPending == 0 ? 3 : 2, // Corrected status logic
             maxPrice: 0,
             minPrice: 0,
             pending: 0,

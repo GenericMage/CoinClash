@@ -33,7 +33,7 @@ struct SettlementState {
         uint256 orderId,
         bool isBuyOrder,
         ICCListing listingContract
-    ) internal view returns (OrderContext memory context) {
+    ) internal returns (OrderContext memory context) {
         // Validates order details and pricing
         context.orderId = orderId;
         (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);

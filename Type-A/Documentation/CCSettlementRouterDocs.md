@@ -5,7 +5,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.11 (updated 2025-09-16)
+**Version:** 0.1.17 (updated 2025-09-25)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
@@ -16,6 +16,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - `CCSettlementPartial.sol` (v0.1.15)
 
 ### Changes
+- **v0.1.17**: Updated to reflect `CCSettlementPartial.sol` v0.1.18 (fixed TypeError by adding `settlementContext` to `_applyOrderUpdate` calls in `_processBuyOrder`/`_processSellOrder`), v0.1.17 (fixed TypeError in `_applyOrderUpdate` using `settlementContext.tokenA/tokenB`, made `_applyOrderUpdate` view), v0.1.16 (added `OrderFailed` event, modified `_checkPricing` to emit instead of revert, updated `_applyOrderUpdate` for `amountSent` and status). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.16**: Updated to reflect `CCUniPartial.sol` v0.1.20 (moved `_prepBuyOrderUpdate`, `_prepSellOrderUpdate`, `_getTokenAndDecimals`, `uint2str`, `PrepOrderUpdateResult` to resolve declaration errors; patched `_prepareSwapData`/`_prepareSellSwapData` to compute `amountOutMin` using `amountInReceived` from `_prepBuyOrderUpdate`/`_prepSellOrderUpdate` for transfer taxes), `CCSettlementPartial.sol` v0.1.15 (removed moved functions). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.15**: Updated to reflect `CCUniPartial.sol` v0.1.17 (patched `_executeTokenSwap` to use `amountInReceived`, added allowance check in `_prepareTokenSwap` with 10^50 for high-supply tokens), `CCSettlementPartial.sol` v0.1.14 (patched `_prepBuyOrderUpdate`/`_prepSellOrderUpdate` to use actual contract balance for `amountIn` post-`transactToken`/`transactNative`). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.14**: Updated to reflect `CCUniPartial.sol` v0.1.16 (modified `_fetchReserves` to use token balances at Uniswap V2 pair address, updated `_computeMaxAmountIn` and `_computeSwapImpact` to handle unusual token decimals with `normalize`/`denormalize`).
@@ -32,26 +33,23 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ## External Functions
 - **settleOrders(address listingAddress, uint256 step, uint256 maxIterations, bool isBuyOrder) → string memory reason** (`CCSettlementRouter`):
-  - Iterates over pending orders (`pendingBuyOrdersView` or `pendingSellOrdersView`) from `step` up to `maxIterations`.
-  - Fetches static data once via `SettlementContext` (tokenA, tokenB, decimalsA, decimalsB, uniswapV2Pair).
-  - Initializes via `_initSettlement`, creates `HistoricalUpdate` via `_createHistoricalEntry`, processes orders via `_processOrderBatch`.
-  - Validates orders via `_validateOrder`, processes via `_processOrder`, applies updates via `_updateOrder`.
-  - Returns empty string on success or error reason (e.g., "No orders settled: price out of range or swap failure").
+  - Iterates pending orders from `step` up to `maxIterations`.
+  - Fetches static data via `SettlementContext`.
+  - Calls `_initSettlement`, `_createHistoricalEntry`, `_processOrderBatch`.
+  - Validates via `_validateOrder`, processes via `_processOrder`, applies via `_updateOrder`.
+  - Returns empty string or error reason.
   - **Internal Call Tree**:
-    - `_initSettlement` → Fetches order IDs, validates Uniswap router.
+    - `_initSettlement` → Fetches order IDs, validates router.
     - `_createHistoricalEntry` → Creates `HistoricalUpdate` using `volumeBalances`, `prices`, `historicalDataLengthView`, `getHistoricalDataView`.
     - `_processOrderBatch` → Iterates orders, calls `_validateOrder`, `_processOrder`, `_updateOrder`.
-    - `_validateOrder` → Fetches order data (`getBuyOrderAmounts`/`getSellOrderAmounts`, `getBuyOrderCore`/`getSellOrderCore`), checks pricing via `_checkPricing`.
+    - `_validateOrder` → Fetches order data, checks pricing via `_checkPricing`.
     - `_processOrder` → Calls `_processBuyOrder` or `_processSellOrder`.
-    - `_processBuyOrder` → Validates via `_validateOrderParams`, computes swap amount via `_computeSwapAmount`, executes swap via `_executeOrderSwap`, applies updates via `_applyOrderUpdate`.
-    - `_processSellOrder` → Validates via `_validateOrderParams`, computes swap amount via `_computeSwapAmount`, executes swap via `_executeOrderSwap`, applies updates via `_applyOrderUpdate`.
+    - `_processBuyOrder` → Validates via `_validateOrderParams`, computes swap via `_computeSwapAmount`, executes via `_executeOrderSwap`, applies via `_applyOrderUpdate`.
+    - `_processSellOrder` → Similar flow for sell orders.
     - `_executeOrderSwap` → Calls `_executePartialBuySwap` or `_executePartialSellSwap`.
-    - `_executePartialBuySwap` → Prepares swap via `_prepareSwapData`, executes via `_executeBuyTokenSwap` or `_executeBuyETHSwap`.
-    - `_executePartialSellSwap` → Prepares swap via `_prepareSellSwapData`, executes via `_executeSellTokenSwap` or `_executeSellETHSwapInternal`.
-    - `_executeBuyTokenSwap`/`_executeSellTokenSwap` → Prepares via `_prepareTokenSwap`, swaps via `_executeTokenSwap`, creates updates via `_createBuyOrderUpdates`/`_createSellOrderUpdates`.
-    - `_executeBuyETHSwap`/`_executeSellETHSwapInternal` → Prepares via `_prepareETHSwap`, swaps via `_executeETHSwap`, creates updates via `_createBuyOrderUpdates`/`_createSellOrderUpdates`.
-    - `_applyOrderUpdate` → Prepares updates via `_prepareUpdateData`, updates `filled` and `status` via `_updateFilledAndStatus`.
-    - `_updateOrder` → Applies updates via `ccUpdate`.
+    - `_executePartialBuySwap` → Prepares via `_prepareSwapData`, executes via `_executeBuyTokenSwap` or `_executeBuyETHSwap`.
+    - `_executePartialSellSwap` → Prepares via `_prepareSellSwapData`, executes via `_executeSellTokenSwap` or `_executeSellETHSwapInternal`.
+    - `_applyOrderUpdate` → Computes `amountSent` with pre/post balance checks, sets status based on pending amount (view).
 
 ## Internal Functions
 ### CCSettlementRouter
@@ -153,7 +151,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
   - `to`: `recipientAddress`.
   - `deadline`: `block.timestamp + 15 minutes`.
 - **Error Handling**: Try-catch in `transactNative`, `transactToken`, `approve`, `swap`, and `ccUpdate` with decoded reasons (v0.1.5).
-- **Status Handling**: If `updateContext.status == 1` (active) and `updateContext.amountIn >= pendingAmount`, status is set to `3` (fully settled). Otherwise, status is set to `2` (partially settled).
+- **Status Handling**: Status set to 3 (complete) if `pending <= 0`, else 2 (partially filled).
 - **ccUpdate Call Locations**:
   - **CCSettlementRouter.sol**: Handles all `ccUpdate` calls to `CCListingTemplate.sol`. The `_updateOrder` function applies order updates (`buyUpdates` or `sellUpdates`) for buy or sell orders. The `settleOrders` function applies historical data updates (`historicalUpdates`) at the start of order processing. Updates are prepared in `CCUniPartial.sol` (via `_createBuyOrderUpdates`/`_createSellOrderUpdates`), refined in `CCSettlementPartial.sol` (via `_prepareUpdateData`/`_applyOrderUpdate`, now pure), and applied only in `CCSettlementRouter.sol`.
   - **No Duplicate Calls**: After v0.1.11, `_applyOrderUpdate` is pure, and `ccUpdate` is called once per order in `_updateOrder` and once for historical data in `settleOrders`.
