@@ -79,7 +79,7 @@ This is where the magic happens, As seen in  [MFP](https://github.com/Peng-Proto
 - **Balance Handling**: Uses `transactToken`/`transactNative` to pull funds, checking own balance post-transfer for tax-on-transfer tokens.
 - **Update Application**: Applies updates via `ccUpdate` with `BuyOrderUpdate`/`SellOrderUpdate` structs, handling status changes (pending, partially filled, filled).
 - **Historical Data**: Creates historical entries in `_createHistoricalEntry`, capturing price and volume data for analytics.
-- **Pagination**: Limits processing up to `maxIterations` orders starting from `step`. E.g; if a pending orders array has (5) orders, "2,22,23,24,30", the user or frontend specifies a `step` "2" and `maxIterations` "3" this limits processing to orders "22,23,24". 
+- **Pagination**: Limits processing up to `maxIterations` orders starting from `step`. E.g; if a pending orders array has (5) orders, "2,22,23,24,30", the user or frontend specifies a `step` "1" (zero based indexing) and `maxIterations` "3" this limits processing to orders "22,23,24". 
 - **Security**: Uses `nonReentrant` modifier and try-catch for external calls, reverting with detailed reasons on failure. Emits no events if nonpending orders exist, relying on reverts. 
 If orders exist but none are settled due to price bounds or swap failures, returns string "No orders settled: price out of range or swap failure" without emitting events or reverting, ensuring graceful degradation.
 - **Partial Fills Behavior:**
