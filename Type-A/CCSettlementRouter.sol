@@ -159,7 +159,7 @@ function _processOrderBatch(
         context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
         (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
         if (!success && bytes(updateReason).length > 0) {
-            revert(updateReason);
+            revert(updateReason); //Only reverts on catastrophic failure
         }
         if (success) {
             count++;
