@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.16
+// Version: 0.1.17
 // Changes: 
+// - v0.1.17: Modified _validateOrderParams to handle non-reverting _checkPricing, emitting OrderFailed and returning empty context instead of reverting.
 // - v0.1.16: Added OrderFailed event for graceful degradation, modified _checkPricing to emit event instead of reverting, updated _applyOrderUpdate to compute amountSent with pre/post balance checks and set status based on pending amount.
 // - v0.1.15: Moved uint2str, getTokenAndDecimals,  prepBuyOrderUpdate and prepSellOrderUpdate to unipartial to resolve declaration error. 
 // - v0.1.14: Patched _prepBuyOrderUpdate/_prepSellOrderUpdate to use actual contract balance for amountIn after transactToken/transactNative. 
@@ -72,33 +73,31 @@ function _checkPricing(
     }
 
     function _validateOrderParams(
-        address listingAddress,
-        uint256 orderId,
-        bool isBuyOrder,
-        ICCListing listingContract
-    ) internal view returns (OrderProcessContext memory context) {
-        // Validates order details
-        context.orderId = orderId;
-        (context.pendingAmount, context.filled, context.amountSent) = isBuyOrder
-            ? listingContract.getBuyOrderAmounts(orderId)
-            : listingContract.getSellOrderAmounts(orderId);
-        (context.makerAddress, context.recipientAddress, context.status) = isBuyOrder
-            ? listingContract.getBuyOrderCore(orderId)
-            : listingContract.getSellOrderCore(orderId);
-        (context.maxPrice, context.minPrice) = isBuyOrder
-            ? listingContract.getBuyOrderPricing(orderId)
-            : listingContract.getSellOrderPricing(orderId);
-        context.currentPrice = listingContract.prices(0);
-        if (context.pendingAmount == 0 || context.status != 1) {
-            revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
-        }
-        if (context.currentPrice == 0) {
-            revert(string(abi.encodePacked("Invalid current price for order ", uint2str(orderId))));
-        }
-        if (context.currentPrice < context.minPrice || context.currentPrice > context.maxPrice) {
-            revert(string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
-        }
+    address listingAddress,
+    uint256 orderId,
+    bool isBuyOrder,
+    ICCListing listingContract
+) internal returns (OrderProcessContext memory context) {
+    // Validates order details, skips if pricing or state invalid
+    context.orderId = orderId;
+    (context.pendingAmount, context.filled, context.amountSent) = isBuyOrder
+        ? listingContract.getBuyOrderAmounts(orderId)
+        : listingContract.getSellOrderAmounts(orderId);
+    (context.makerAddress, context.recipientAddress, context.status) = isBuyOrder
+        ? listingContract.getBuyOrderCore(orderId)
+        : listingContract.getSellOrderCore(orderId);
+    (context.maxPrice, context.minPrice) = isBuyOrder
+        ? listingContract.getBuyOrderPricing(orderId)
+        : listingContract.getSellOrderPricing(orderId);
+    context.currentPrice = listingContract.prices(0);
+    if (context.pendingAmount == 0 || context.status != 1) {
+        emit OrderFailed(orderId, "No pending amount or invalid status");
+        return context; // Skip invalid order
     }
+    if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pendingAmount)) {
+        return context; // Skip if pricing fails
+    }
+}
 
     function _computeSwapAmount(
         address listingAddress,

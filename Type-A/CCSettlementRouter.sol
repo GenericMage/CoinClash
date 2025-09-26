@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.9
+// Version: 0.1.10
 // Changes:
+// - v0.1.10: Modified _validateOrder to handle non-reverting _checkPricing, emitting OrderFailed and skipping invalid orders instead of reverting.
 // - v0.1.9: Refactored settleOrders into helper functions (_initSettlement, _createHistoricalEntry, _processOrderBatch) to resolve stack-too-deep error, using SettlementState struct to manage state. 
 // - v0.1.8: Restructured settleOrders to fetch static data (tokenA, tokenB, decimalsA, decimalsB, uniswapV2Pair) once via SettlementContext. Ensured transactToken is called via _prepBuyOrderUpdate/_prepSellOrderUpdate. Removed NonCriticalNoPendingOrder, NonCriticalZeroSwapAmount events. Ensured each order’s operations complete before next. Compatible with CCUniPartial.sol v0.1.15, CCSettlementPartial.sol v0.1.12, CCMainPartial.sol v0.1.5.
 // - v0.1.7: Added SettlementContext for static data, called _ensureTokenBalance for buy orders, capped maxAmountIn at 50 tokenB.
@@ -29,22 +30,23 @@ struct SettlementState {
     uint256 maxIterations;
 }
     function _validateOrder(
-        address listingAddress,
-        uint256 orderId,
-        bool isBuyOrder,
-        ICCListing listingContract
-    ) internal returns (OrderContext memory context) {
-        // Validates order details and pricing
-        context.orderId = orderId;
-        (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
-        (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
-        if (context.pending == 0 || context.status != 1) {
-            revert(string(abi.encodePacked("Invalid order ", uint2str(orderId), ": no pending amount or status")));
-        }
-        if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-            revert(string(abi.encodePacked("Price out of bounds for order ", uint2str(orderId))));
-        }
+    address listingAddress,
+    uint256 orderId,
+    bool isBuyOrder,
+    ICCListing listingContract
+) internal returns (OrderContext memory context) {
+    // Validates order details, skips if pricing invalid
+    context.orderId = orderId;
+    (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
+    (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
+    if (context.pending == 0 || context.status != 1) {
+        emit OrderFailed(orderId, "No pending amount or invalid status");
+        return context; // Skip invalid order
     }
+    if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
+        return context; // Skip if pricing fails
+    }
+}
 
     function _processOrder(
     address listingAddress,

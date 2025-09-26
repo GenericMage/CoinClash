@@ -5,17 +5,18 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.17 (updated 2025-09-25)
+**Version:** 0.1.18 (updated 2025-09-26)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.3.9)
 - `CCMainPartial.sol` (v0.1.5)
-- `CCUniPartial.sol` (v0.1.20)
-- `CCSettlementPartial.sol` (v0.1.15)
+- `CCUniPartial.sol` (v0.1.21)
+- `CCSettlementPartial.sol` (v0.1.17)
 
 ### Changes
+- **v0.1.18**: Updated to reflect `CCSettlementRouter.sol` v0.1.10 (patched `_validateOrder` to handle non-reverting `_checkPricing`, emitting `OrderFailed` and skipping invalid orders), `CCSettlementPartial.sol` v0.1.17 (patched `_validateOrderParams` to handle non-reverting `_checkPricing`, emitting `OrderFailed` and skipping invalid orders). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.17**: Updated to reflect `CCSettlementPartial.sol` v0.1.18 (fixed TypeError by adding `settlementContext` to `_applyOrderUpdate` calls in `_processBuyOrder`/`_processSellOrder`), v0.1.17 (fixed TypeError in `_applyOrderUpdate` using `settlementContext.tokenA/tokenB`, made `_applyOrderUpdate` view), v0.1.16 (added `OrderFailed` event, modified `_checkPricing` to emit instead of revert, updated `_applyOrderUpdate` for `amountSent` and status). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.16**: Updated to reflect `CCUniPartial.sol` v0.1.20 (moved `_prepBuyOrderUpdate`, `_prepSellOrderUpdate`, `_getTokenAndDecimals`, `uint2str`, `PrepOrderUpdateResult` to resolve declaration errors; patched `_prepareSwapData`/`_prepareSellSwapData` to compute `amountOutMin` using `amountInReceived` from `_prepBuyOrderUpdate`/`_prepSellOrderUpdate` for transfer taxes), `CCSettlementPartial.sol` v0.1.15 (removed moved functions). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.15**: Updated to reflect `CCUniPartial.sol` v0.1.17 (patched `_executeTokenSwap` to use `amountInReceived`, added allowance check in `_prepareTokenSwap` with 10^50 for high-supply tokens), `CCSettlementPartial.sol` v0.1.14 (patched `_prepBuyOrderUpdate`/`_prepSellOrderUpdate` to use actual contract balance for `amountIn` post-`transactToken`/`transactNative`). Compatible with `CCListingTemplate.sol` v0.3.9.
@@ -42,7 +43,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
     - `_initSettlement` → Fetches order IDs, validates router.
     - `_createHistoricalEntry` → Creates `HistoricalUpdate` using `volumeBalances`, `prices`, `historicalDataLengthView`, `getHistoricalDataView`.
     - `_processOrderBatch` → Iterates orders, calls `_validateOrder`, `_processOrder`, `_updateOrder`.
-    - `_validateOrder` → Fetches order data, checks pricing via `_checkPricing`.
+    - `_validateOrder` → Fetches order data, checks pricing via `_checkPricing`, emits `OrderFailed` and skips invalid orders.
     - `_processOrder` → Calls `_processBuyOrder` or `_processSellOrder`.
     - `_processBuyOrder` → Validates via `_validateOrderParams`, computes swap via `_computeSwapAmount`, executes via `_executeOrderSwap`, applies via `_applyOrderUpdate`.
     - `_processSellOrder` → Similar flow for sell orders.
@@ -51,14 +52,28 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
     - `_executePartialSellSwap` → Prepares via `_prepareSellSwapData`, executes via `_executeSellTokenSwap` or `_executeSellETHSwapInternal`.
     - `_applyOrderUpdate` → Computes `amountSent` with pre/post balance checks, sets status based on pending amount (view).
 
+
 ## Internal Functions
 ### CCSettlementRouter
-- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context**: Fetches order data, validates pricing via `_checkPricing`.
+- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context**: Fetches order data, validates pricing via `_checkPricing`, emits `OrderFailed` and skips invalid orders (v0.1.10).
 - **_processOrder(address listingAddress, bool isBuyOrder, ICCListing listingContract, OrderContext memory context, SettlementContext memory settlementContext) → OrderContext memory**: Delegates to `_processBuyOrder` or `_processSellOrder`.
 - **_updateOrder(ICCListing listingContract, OrderContext memory context, bool isBuyOrder) → (bool success, string memory reason)**: Applies `ccUpdate` with `buyUpdates` or `sellUpdates`, returns success or error reason.
 - **_initSettlement(address listingAddress, bool isBuyOrder, uint256 step, ICCListing listingContract) → (SettlementState memory state, uint256[] memory orderIds)**: Initializes settlement state, fetches order IDs.
 - **_createHistoricalEntry(ICCListing listingContract) → ICCListing.HistoricalUpdate[] memory**: Creates historical data entry with live `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`.
 - **_processOrderBatch(SettlementState memory state, uint256[] memory orderIds, ICCListing listingContract, SettlementContext memory settlementContext) → uint256 count**: Processes batch of orders, returns count of successful settlements.
+
+### CCSettlementPartial
+- **_checkPricing(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) → bool**: Emits `OrderFailed` if price is invalid or out of bounds, returns false instead of reverting (v0.1.16).
+- **_computeAmountSent(address tokenAddress, address recipientAddress, uint256 amount) → uint256 preBalance**: Computes pre-transfer balance for `amountSent` calculation.
+- **_validateOrderParams(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderProcessContext memory**: Fetches order data, validates pricing via `_checkPricing`, emits `OrderFailed` and skips invalid orders (v0.1.17).
+- **_computeSwapAmount(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, SettlementContext memory settlementContext) → OrderProcessContext memory**: Computes `maxAmountIn` and `swapAmount`.
+- **_executeOrderSwap(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, SettlementContext memory settlementContext) → OrderProcessContext memory**: Executes swap via `_executePartialBuySwap` or `_executePartialSellSwap`.
+- **_extractPendingAmount(OrderProcessContext memory context, bool isBuyOrder) → uint256 pending**: Extracts pending amount from `buyUpdates` or `sellUpdates`.
+- **_updateFilledAndStatus(OrderProcessContext memory context, bool isBuyOrder, uint256 pendingAmount) → (ICCListing.BuyOrderUpdate[] memory, ICCListing.SellOrderUpdate[] memory)**: Updates `filled` and `status` for order updates.
+- **_prepareUpdateData(OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory, ICCListing.SellOrderUpdate[] memory)**: Prepares update data for `ccUpdate`.
+- **_applyOrderUpdate(address listingAddress, ICCListing listingContract, OrderProcessContext memory context, bool isBuyOrder, SettlementContext memory settlementContext) → (ICCListing.BuyOrderUpdate[] memory, ICCListing.SellOrderUpdate[] memory)**: Computes `amountSent` with pre/post balance checks, sets status based on pending amount (view, v0.1.17).
+- **_processBuyOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract, SettlementContext memory settlementContext) → ICCListing.BuyOrderUpdate[] memory**: Orchestrates buy order processing via `_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_applyOrderUpdate`.
+- **_processSellOrder(address listingAddress, uint256 orderIdentifier, ICCListing listingContract, SettlementContext memory settlementContext) → ICCListing.SellOrderUpdate[] memory**: Orchestrates sell order processing via `_validateOrderParams`, `_computeSwapAmount`, `_executeOrderSwap`, `_applyOrderUpdate`.
 
 ### CCUniPartial
 - **_getTokenAndDecimals(address listingAddress, bool isBuyOrder, SettlementContext memory settlementContext) → (address tokenAddress, uint8 tokenDecimals)**: Retrieves token address and decimals from cached `SettlementContext` data, reverts for invalid sell order token addresses.
@@ -73,14 +88,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory**: Creates buy order updates for `ccUpdate`, adjusting `pending`, `filled`, and `status`.
 - **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory**: Creates sell order updates for `ccUpdate`, adjusting `pending`, `filled`, and `status`.
 
-### CCSettlementPartial
-- **_checkPricing(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) → bool**: Validates order pricing against `maxPrice` and `minPrice`, reverts if `currentPrice` is out of bounds.
-- **_computeAmountSent(address tokenAddress, address recipientAddress, uint256 amount) → uint256 preBalance**: Computes pre-transfer balance for `amountSent` calculation.
-- **_validateOrderParams(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderProcessContext memory**: Validates order details, fetching amounts, core data, and pricing.
-- **_computeSwapAmount(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, SettlementContext memory settlementContext) → OrderProcessContext memory**: Computes `swapAmount` as the minimum of `maxAmountIn` and `pendingAmount`.
-- **_executeOrderSwap(address listingAddress, bool isBuyOrder, OrderProcessContext memory context, SettlementContext memory settlementContext) → OrderProcessContext memory**: Executes swap via `_executePartialBuySwap` or `_executePartialSellSwap`.
-- **_prepareUpdateData(OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Prepares update structs, extracting `pendingAmount` and updating `filled` and `status`.
-- **_applyOrderUpdate(address listingAddress, ICCListing listingContract, OrderProcessContext memory context, bool isBuyOrder) → (ICCListing.BuyOrderUpdate[] memory buyUpdates, ICCListing.SellOrderUpdate[] memory sellUpdates)**: Prepares updates via `_prepareUpdateData` for `ccUpdate`.
+
 
 ## Key Calculations
 - **Maximum Input Amount** (`_computeMaxAmountIn` in `CCSettlementPartial.sol`):
