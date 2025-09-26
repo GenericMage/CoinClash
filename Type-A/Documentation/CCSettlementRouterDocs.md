@@ -191,3 +191,7 @@ During `_computeSwapImpact` **`expectedAmountOut`** is calculated based on the c
 Uniswap "reserves" are used in name only. The system fetches live balances of the LP address for `_computeSwapImpact` and `_computeMaxAmountIn `. 
 - **Partial Fills Continuation:**
 The system is capable of partially filling an order and continuing an order that was previously partially filled, until fully filled. 
+- **Handling Tax-on-transfer tokens:**
+Certain tokens take a tax on each transfer, which can undercut the order settlement mechanism if not properly handled. The router handles the following fields as follows; 
+  - **Pending/Filled** : The router sets these based on the pre-transfer value, this ensures the user pays the cost of the tax.
+  - **AmountSent** : The router sets this based on the pre/post transfer relationship, this ensures that the true amount settled after taxes is captured. 
