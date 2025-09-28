@@ -158,3 +158,13 @@ Checks exact principal amount transferred from `CCLlistingTemplate` to `CCLiquid
 - Depositor fixed to `this`; `step` user-managed for resumption.
 - History per-batch start + per-order in exec (avoids double-volume).
 - Fees scale to incentivize liquidity: e.g., doubling pool halves max fee, stabilizing large orders.
+
+### Critical vs Non-Critical Issues
+The system is designed to revert for critical errors in liquid settlement process, but skip an order with error emisson if minor issues are found. 
+- **Critical Errors**: 
+  - **Invalid Listing or Configuration:** The `onlyValidListing` call at `CCAgent` must pass. `Agent` must be set.
+  - **Failed Liquidity or Fee Updates:** The `_prepareLiquidityUpdates` function uses try/catch and reverts on if a `ccUpdate` call failure. 
+  - **Failed Token Transfers:** The `_prepareLiquidityUpdates` function will revert if the `transactToken/Native` call fails. 
+- **Non-Critical Errors**: 
+  - **Invalid Pricing:** The `_processSingleOrder` function checks if the order's impact price exceeds its max/min prices, it emits a PriceOutOfBounds event, returns false and stops processing the order. 
+  - **Insufficient Liquidity:** If there is insufficient liquidity (xLiquid or yLiquid) for an order, processing for it will stop and the InsufficientBalance event will be emitted.

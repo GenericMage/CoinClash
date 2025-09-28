@@ -195,3 +195,7 @@ The system is capable of partially filling an order and continuing an order that
 Certain tokens take a tax on each transfer, which can undercut the order settlement mechanism if not properly handled. The router handles the following fields as follows; 
   - **Pending/Filled** : The router sets these based on the pre-transfer value, this ensures the user pays the cost of the tax.
   - **AmountSent** : The router sets this based on the pre/post transfer relationship, this ensures that the true amount settled after taxes is captured. 
+- **Error Handling:**
+The system employs a dual error-handling strategy for settlement.
+  * **Graceful Skipping**: For non-critical, order-specific issues like an invalid price, the contract emits an `OrderFailed` event and skips that order, allowing the settlement batch to continue processing other valid orders.
+  * **Critical Reverts**: For system-level failures, such as a missing Uniswap router address or a failed fund transfer or `ccUpdate ` call failure, the entire transaction reverts to prevent inconsistent states and ensure protocol integrity.
