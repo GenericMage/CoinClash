@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.18
-// Changes: 
+// Version: 0.1.19
+// Changes:
+// - v0.1.19 (29/09): Fixed amountSent calculation in _applyOrderUpdate by capturing preBalance before swap in _executeOrderSwap and passing it to _applyOrderUpdate. Modified _processBuyOrder and _processSellOrder to handle preBalance.
 // - v0.1.18: Renamed OrderFailed with OrderSkipped (29/9).
 // - v0.1.17: Modified _validateOrderParams to handle non-reverting _checkPricing, emitting OrderFailed and returning empty context instead of reverting.
 // - v0.1.16: Added OrderFailed event for graceful degradation, modified _checkPricing to emit event instead of reverting, updated _applyOrderUpdate to compute amountSent with pre/post balance checks and set status based on pending amount.
@@ -180,70 +181,69 @@ function _checkPricing(
         return _updateFilledAndStatus(context, isBuyOrder, pendingAmount);
     }
 
-// Modified _applyOrderUpdate to fix amountSent, status, and token address TypeError
-function _applyOrderUpdate(
-    address listingAddress,
-    ICCListing listingContract,
-    OrderProcessContext memory context,
-    bool isBuyOrder,
-    SettlementContext memory settlementContext // Added parameter
-) internal view returns (
-    ICCListing.BuyOrderUpdate[] memory buyUpdates,
-    ICCListing.SellOrderUpdate[] memory sellUpdates
-) {
-    uint256 preBalance = _computeAmountSent(
-        isBuyOrder ? settlementContext.tokenB : settlementContext.tokenA, // Fixed token access
-        context.recipientAddress,
-        context.swapAmount
-    );
-    (buyUpdates, sellUpdates) = _prepareUpdateData(context, isBuyOrder);
-    uint256 postBalance = _computeAmountSent(
-        isBuyOrder ? settlementContext.tokenB : settlementContext.tokenA, // Fixed token access
-        context.recipientAddress,
-        context.swapAmount
-    );
-    uint256 amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
-    if (isBuyOrder && buyUpdates.length > 0) {
-        buyUpdates[0].amountSent = amountSent;
-        buyUpdates[1].status = buyUpdates[0].pending <= 0 ? 3 : 2;
-    } else if (!isBuyOrder && sellUpdates.length > 0) {
-        sellUpdates[0].amountSent = amountSent;
-        sellUpdates[1].status = sellUpdates[0].pending <= 0 ? 3 : 2;
+    // Modified _applyOrderUpdate to use preBalance from _executeOrderSwap
+    function _applyOrderUpdate(
+        address listingAddress,
+        ICCListing listingContract,
+        OrderProcessContext memory context,
+        bool isBuyOrder,
+        SettlementContext memory settlementContext,
+        uint256 preBalance // Added preBalance parameter
+    ) internal view returns (
+        ICCListing.BuyOrderUpdate[] memory buyUpdates,
+        ICCListing.SellOrderUpdate[] memory sellUpdates
+    ) {
+        // Computes amountSent using preBalance from before swap
+        (buyUpdates, sellUpdates) = _prepareUpdateData(context, isBuyOrder);
+        uint256 postBalance = _computeAmountSent(
+            isBuyOrder ? settlementContext.tokenB : settlementContext.tokenA,
+            context.recipientAddress,
+            context.swapAmount
+        );
+        uint256 amountSent = postBalance > preBalance ? postBalance - preBalance : 0;
+        if (isBuyOrder && buyUpdates.length > 0) {
+            buyUpdates[0].amountSent = amountSent;
+            buyUpdates[1].status = buyUpdates[0].pending <= 0 ? 3 : 2;
+        } else if (!isBuyOrder && sellUpdates.length > 0) {
+            sellUpdates[0].amountSent = amountSent;
+            sellUpdates[1].status = sellUpdates[0].pending <= 0 ? 3 : 2;
+        }
+        return (buyUpdates, sellUpdates);
     }
-    return (buyUpdates, sellUpdates);
-}
 
-    // Modified _processBuyOrder to include settlementContext in _applyOrderUpdate call
-function _processBuyOrder(
-    address listingAddress,
-    uint256 orderIdentifier,
-    ICCListing listingContract,
-    SettlementContext memory settlementContext
-) internal returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
-    if (uniswapV2Router == address(0)) {
-        revert(string(abi.encodePacked("Missing Uniswap V2 router for buy order ", uint2str(orderIdentifier))));
+    // Modified _processBuyOrder to capture preBalance before swap
+    function _processBuyOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        ICCListing listingContract,
+        SettlementContext memory settlementContext
+    ) internal returns (ICCListing.BuyOrderUpdate[] memory buyUpdates) {
+        if (uniswapV2Router == address(0)) {
+            revert(string(abi.encodePacked("Missing Uniswap V2 router for buy order ", uint2str(orderIdentifier))));
+        }
+        OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
+        context = _computeSwapAmount(listingAddress, true, context, settlementContext);
+        uint256 preBalance = _computeAmountSent(settlementContext.tokenB, context.recipientAddress, context.swapAmount); // Capture preBalance
+        context = _executeOrderSwap(listingAddress, true, context, settlementContext);
+        (buyUpdates, ) = _applyOrderUpdate(listingAddress, listingContract, context, true, settlementContext, preBalance);
+        return buyUpdates;
     }
-    OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, true, listingContract);
-    context = _computeSwapAmount(listingAddress, true, context, settlementContext);
-    context = _executeOrderSwap(listingAddress, true, context, settlementContext);
-    (buyUpdates, ) = _applyOrderUpdate(listingAddress, listingContract, context, true, settlementContext);
-    return buyUpdates;
-}
 
-// Modified _processSellOrder to include settlementContext in _applyOrderUpdate call
-function _processSellOrder(
-    address listingAddress,
-    uint256 orderIdentifier,
-    ICCListing listingContract,
-    SettlementContext memory settlementContext
-) internal returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
-    if (uniswapV2Router == address(0)) {
-        revert(string(abi.encodePacked("Missing Uniswap V2 router for sell order ", uint2str(orderIdentifier))));
+    // Modified _processSellOrder to capture preBalance before swap
+    function _processSellOrder(
+        address listingAddress,
+        uint256 orderIdentifier,
+        ICCListing listingContract,
+        SettlementContext memory settlementContext
+    ) internal returns (ICCListing.SellOrderUpdate[] memory sellUpdates) {
+        if (uniswapV2Router == address(0)) {
+            revert(string(abi.encodePacked("Missing Uniswap V2 router for sell order ", uint2str(orderIdentifier))));
+        }
+        OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
+        context = _computeSwapAmount(listingAddress, false, context, settlementContext);
+        uint256 preBalance = _computeAmountSent(settlementContext.tokenA, context.recipientAddress, context.swapAmount); // Capture preBalance
+        context = _executeOrderSwap(listingAddress, false, context, settlementContext);
+        (, sellUpdates) = _applyOrderUpdate(listingAddress, listingContract, context, false, settlementContext, preBalance);
+        return sellUpdates;
     }
-    OrderProcessContext memory context = _validateOrderParams(listingAddress, orderIdentifier, false, listingContract);
-    context = _computeSwapAmount(listingAddress, false, context, settlementContext);
-    context = _executeOrderSwap(listingAddress, false, context, settlementContext);
-    (, sellUpdates) = _applyOrderUpdate(listingAddress, listingContract, context, false, settlementContext);
-    return sellUpdates;
-}
 }
