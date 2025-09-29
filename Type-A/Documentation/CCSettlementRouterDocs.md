@@ -5,17 +5,18 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.19 (updated 2025-09-29)
+**Version:** 0.1.20 (updated 2025-09-29)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
 **Compatible Contracts:**
 - `CCListingTemplate.sol` (v0.3.9)
 - `CCMainPartial.sol` (v0.1.5)
-- `CCUniPartial.sol` (v0.1.23)
+- `CCUniPartial.sol` (v0.1.24)
 - `CCSettlementPartial.sol` (v0.1.17)
 
 ### Changes
+- **v0.1.20**: Updated to reflect `CCUniPartial.sol` v0.1.24 (fixed `_createBuyOrderUpdates` and `_createSellOrderUpdates` to accumulate `amountSent` by adding prior `amountSent` from `getBuyOrderAmounts`/`getSellOrderAmounts`), 
 - **v0.1.19**: Updated to reflect `CCUniPartial.sol` v0.1.23 (restored `_computeCurrentPrice` to resolve `DeclarationError` in `_prepareSwapData`/`_prepareSellSwapData`), v0.1.22 (removed redundant denormalization in `_prepBuyOrderUpdate`/`_prepSellOrderUpdate`, used pre/post balance checks for `amountSent`). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.18**: Updated to reflect `CCSettlementRouter.sol` v0.1.10 (patched `_validateOrder` to handle non-reverting `_checkPricing`, emitting `OrderFailed` and skipping invalid orders), `CCSettlementPartial.sol` v0.1.17 (patched `_validateOrderParams` to handle non-reverting `_checkPricing`, emitting `OrderFailed` and skipping invalid orders). Compatible with `CCListingTemplate.sol` v0.3.9.
 - **v0.1.17**: Updated to reflect `CCSettlementPartial.sol` v0.1.17 (fixed TypeError in `_applyOrderUpdate` using `settlementContext.tokenA/tokenB`, made `_applyOrderUpdate` view), v0.1.16 (added `OrderFailed` event, modified `_checkPricing` to emit instead of revert, updated `_applyOrderUpdate` for `amountSent` and status). Compatible with `CCListingTemplate.sol` v0.3.9.
@@ -85,8 +86,8 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - **_executeSellTokenSwap(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.SellOrderUpdate[] memory**: Executes token-to-token swap for sell order.
 - **_executeBuyETHSwap(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.BuyOrderUpdate[] memory**: Executes ETH-to-token swap for buy order.
 - **_executeSellETHSwapInternal(SwapContext memory context, uint256 orderIdentifier, uint256 pendingAmount) → ICCListing.SellOrderUpdate[] memory**: Executes token-to-ETH swap for sell order.
-- **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory**: Creates `BuyOrderUpdate` structs.
-- **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory**: Creates `SellOrderUpdate` structs.
+- **_createBuyOrderUpdates(uint256 orderIdentifier, BuyOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.BuyOrderUpdate[] memory**: Creates `BuyOrderUpdate` structs, accumulates `amountSent` from prior `amountSent` (v0.1.24).
+- **_createSellOrderUpdates(uint256 orderIdentifier, SellOrderUpdateContext memory updateContext, uint256 pendingAmount, uint256 filled) → ICCListing.SellOrderUpdate[] memory**: Creates `SellOrderUpdate` structs, accumulates `amountSent` from prior `amountSent` (v0.1.24).
 - **uint2str(uint256 _i) → string memory str**: Converts uint256 to string for error messages.
 
 ## Key Calculations
