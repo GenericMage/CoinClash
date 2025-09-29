@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.17
+// Version: 0.1.18
 // Changes: 
+// - v0.1.18: Renamed OrderFailed with OrderSkipped (29/9).
 // - v0.1.17: Modified _validateOrderParams to handle non-reverting _checkPricing, emitting OrderFailed and returning empty context instead of reverting.
 // - v0.1.16: Added OrderFailed event for graceful degradation, modified _checkPricing to emit event instead of reverting, updated _applyOrderUpdate to compute amountSent with pre/post balance checks and set status based on pending amount.
 // - v0.1.15: Moved uint2str, getTokenAndDecimals,  prepBuyOrderUpdate and prepSellOrderUpdate to unipartial to resolve declaration error. 
@@ -32,7 +33,7 @@ contract CCSettlementPartial is CCUniPartial {
         ICCListing.SellOrderUpdate[] sellUpdates;
     }
 
-event OrderFailed(uint256 orderId, string reason);
+event OrderSkipped(uint256 orderId, string reason);
 
 // Modified _checkPricing to emit event instead of reverting
 function _checkPricing(
@@ -51,11 +52,11 @@ function _checkPricing(
     }
     uint256 currentPrice = listingContract.prices(0);
     if (currentPrice == 0) {
-        emit OrderFailed(orderIdentifier, "Invalid current price");
+        emit OrderSkipped(orderIdentifier, "Invalid current price");
         return false;
     }
     if (currentPrice < minPrice || currentPrice > maxPrice) {
-        emit OrderFailed(orderIdentifier, "Price out of bounds");
+        emit OrderSkipped(orderIdentifier, "Price out of bounds");
         return false;
     }
     return true;
@@ -91,7 +92,7 @@ function _checkPricing(
         : listingContract.getSellOrderPricing(orderId);
     context.currentPrice = listingContract.prices(0);
     if (context.pendingAmount == 0 || context.status != 1) {
-        emit OrderFailed(orderId, "No pending amount or invalid status");
+        emit OrderSkipped(orderId, "No pending amount or invalid status");
         return context; // Skip invalid order
     }
     if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pendingAmount)) {

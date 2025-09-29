@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.10
+// Version: 0.1.11
 // Changes:
+// - v0.1.11: Renamed OrderFailed with OrderSkipped (29/9).
 // - v0.1.10: Modified _validateOrder to handle non-reverting _checkPricing, emitting OrderFailed and skipping invalid orders instead of reverting.
 // - v0.1.9: Refactored settleOrders into helper functions (_initSettlement, _createHistoricalEntry, _processOrderBatch) to resolve stack-too-deep error, using SettlementState struct to manage state. 
 // - v0.1.8: Restructured settleOrders to fetch static data (tokenA, tokenB, decimalsA, decimalsB, uniswapV2Pair) once via SettlementContext. Ensured transactToken is called via _prepBuyOrderUpdate/_prepSellOrderUpdate. Removed NonCriticalNoPendingOrder, NonCriticalZeroSwapAmount events. Ensured each order’s operations complete before next. Compatible with CCUniPartial.sol v0.1.15, CCSettlementPartial.sol v0.1.12, CCMainPartial.sol v0.1.5.
@@ -40,7 +41,7 @@ struct SettlementState {
     (context.pending, , ) = isBuyOrder ? listingContract.getBuyOrderAmounts(orderId) : listingContract.getSellOrderAmounts(orderId);
     (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
     if (context.pending == 0 || context.status != 1) {
-        emit OrderFailed(orderId, "No pending amount or invalid status");
+        emit OrderSkipped(orderId, "No pending amount or invalid status");
         return context; // Skip invalid order
     }
     if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
@@ -159,7 +160,7 @@ function _processOrderBatch(
         context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
         (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
         if (!success && bytes(updateReason).length > 0) {
-            revert(updateReason);
+            revert(updateReason); //Only reverts on catastrophic failure
         }
         if (success) {
             count++;

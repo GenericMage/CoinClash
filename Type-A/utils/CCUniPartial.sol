@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.21
-// Changes: 
+// Version: 0.1.22
+// Changes:
+// - v0.1.22: Removed denormalization in _prepBuyOrderUpdate/_prepSellOrderUpdate as amountIn is already denormalized in _computeMaxAmountIn. Updated amountSent to use pre/post balance checks (29/9).
 // - v0.1.21: Updated _finalizeTokenSwap and _finalizeSellTokenSwap to compute amountSent with pre/post balance checks, adjusted status based on pending amount.
 // - v0.1.20: added uint2str, getTokenAndDecimals, prepBuyOrderUpdate and prepSellOrderUpdate to unipartial to resolve declaration error. 
 // - v0.1.18: Patched _prepareSwapData/_prepareSellSwapData to compute amountOutMin using amountInReceived from _prepBuyOrderUpdate/_prepSellOrderUpdate to handle transfer taxes. 
@@ -178,17 +179,17 @@ function _prepBuyOrderUpdate(
     if (result.orderStatus != 1) {
         revert(string(abi.encodePacked("Invalid status for buy order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
     }
-    uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
+    uint256 preBalance = result.tokenAddress == address(0) ? address(this).balance : IERC20(result.tokenAddress).balanceOf(address(this));
     if (result.tokenAddress == address(0)) {
-        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, address(this)) {
-            result.amountSent = address(this).balance; // Use actual contract balance
+        try listingContract.transactNative{value: amountReceived}(amountReceived, address(this)) {
+            result.amountSent = address(this).balance - preBalance; // Use balance difference
             result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Native transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
         }
     } else {
-        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, address(this)) {
-            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)); // Use actual contract balance
+        try listingContract.transactToken(result.tokenAddress, amountReceived, address(this)) {
+            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)) - preBalance; // Use balance difference
             result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed for buy order ", uint2str(orderIdentifier), ": ", reason)));
@@ -217,17 +218,17 @@ function _prepSellOrderUpdate(
     if (result.orderStatus != 1) {
         revert(string(abi.encodePacked("Invalid status for sell order ", uint2str(orderIdentifier), ": ", uint2str(result.orderStatus))));
     }
-    uint256 denormalizedAmount = denormalize(amountReceived, result.tokenDecimals);
+    uint256 preBalance = result.tokenAddress == address(0) ? address(this).balance : IERC20(result.tokenAddress).balanceOf(address(this));
     if (result.tokenAddress == address(0)) {
-        try listingContract.transactNative{value: denormalizedAmount}(denormalizedAmount, address(this)) {
-            result.amountSent = address(this).balance; // Use actual contract balance
+        try listingContract.transactNative{value: amountReceived}(amountReceived, address(this)) {
+            result.amountSent = address(this).balance - preBalance; // Use balance difference
             result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Native transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
         }
     } else {
-        try listingContract.transactToken(result.tokenAddress, denormalizedAmount, address(this)) {
-            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)); // Use actual contract balance
+        try listingContract.transactToken(result.tokenAddress, amountReceived, address(this)) {
+            result.amountSent = IERC20(result.tokenAddress).balanceOf(address(this)) - preBalance; // Use balance difference
             result.amountIn = result.amountSent;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Token transfer failed for sell order ", uint2str(orderIdentifier), ": ", reason)));
@@ -238,11 +239,13 @@ function _prepSellOrderUpdate(
     }
     result.normalizedReceived = normalize(result.amountSent, result.tokenDecimals);
 }
-    function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
-        ICCListing listingContract = ICCListing(listingAddress);
-        price = listingContract.prices(0);
-        require(price > 0, "Invalid price from listing");
-    }
+
+function _computeCurrentPrice(address listingAddress) internal view returns (uint256 price) {
+    // Retrieves current price from listing contract
+    ICCListing listingContract = ICCListing(listingAddress);
+    price = listingContract.prices(0);
+    require(price > 0, "Invalid price from listing");
+}
 
     // Computes swap impact using normalized token balances
 function _computeSwapImpact(
