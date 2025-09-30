@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.11
+// Version: 0.1.12 (30/09)
 // Changes:
+// - v0.1.12 (30/09): Modified _validateOrder to set context.status = 0 when pricing fails. Updated _processOrderBatch to skip orders with context.status == 0 to prevent silent failures.
 // - v0.1.11: Renamed OrderFailed with OrderSkipped (29/9).
 // - v0.1.10: Modified _validateOrder to handle non-reverting _checkPricing, emitting OrderFailed and skipping invalid orders instead of reverting.
 // - v0.1.9: Refactored settleOrders into helper functions (_initSettlement, _createHistoricalEntry, _processOrderBatch) to resolve stack-too-deep error, using SettlementState struct to manage state. 
@@ -42,10 +43,12 @@ struct SettlementState {
     (, , context.status) = isBuyOrder ? listingContract.getBuyOrderCore(orderId) : listingContract.getSellOrderCore(orderId);
     if (context.pending == 0 || context.status != 1) {
         emit OrderSkipped(orderId, "No pending amount or invalid status");
-        return context; // Skip invalid order
+        context.status = 0; // Mark as invalid
+        return context;
     }
     if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
-        return context; // Skip if pricing fails
+        context.status = 0; // Mark as invalid when pricing fails
+        return context;
     }
 }
 
@@ -157,10 +160,13 @@ function _processOrderBatch(
     count = 0;
     for (uint256 i = state.step; i < orderIds.length && count < state.maxIterations; i++) {
         OrderContext memory context = _validateOrder(state.listingAddress, orderIds[i], state.isBuyOrder, listingContract);
+        if (context.status == 0) {
+            continue; // Skip invalid orders
+        }
         context = _processOrder(state.listingAddress, state.isBuyOrder, listingContract, context, settlementContext);
         (bool success, string memory updateReason) = _updateOrder(listingContract, context, state.isBuyOrder);
         if (!success && bytes(updateReason).length > 0) {
-            revert(updateReason); //Only reverts on catastrophic failure
+            revert(updateReason);
         }
         if (success) {
             count++;

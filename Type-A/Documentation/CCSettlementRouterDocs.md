@@ -5,7 +5,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 **SPDX License:** BSL 1.1 - Peng Protocol 2025
 
-**Version:** 0.1.21 (updated 2025-09-29)
+**Version:** 0.1.22 (updated 2025-09-30)
 
 **Inheritance Tree:** `CCSettlementRouter` → `CCSettlementPartial` → `CCUniPartial` → `CCMainPartial`
 
@@ -16,6 +16,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 - `CCSettlementPartial.sol` (v0.1.19)
 
 ### Changes
+- **v0.1.22**: Updated to reflect `CCSettlementRouter.sol` v0.1.12 (patched `_validateOrder` to set `context.status = 0` when pricing fails, updated `_processOrderBatch` to skip orders with `context.status == 0` to prevent silent failures). 
 - **v0.1.21**: Updated to reflect `CCSettlementPartial.sol` v0.1.19 (fixed `amountSent` calculation in `_applyOrderUpdate` by capturing `preBalance` before swap in `_executeOrderSwap` and passing it to `_applyOrderUpdate`).
 - **v0.1.20**: Updated to reflect `CCUniPartial.sol` v0.1.24 (fixed `_createBuyOrderUpdates` and `_createSellOrderUpdates` to accumulate `amountSent` by adding prior `amountSent` from `getBuyOrderAmounts`/`getSellOrderAmounts`), 
 - **v0.1.19**: Updated to reflect `CCUniPartial.sol` v0.1.23 (restored `_computeCurrentPrice` to resolve `DeclarationError` in `_prepareSwapData`/`_prepareSellSwapData`), v0.1.22 (removed redundant denormalization in `_prepBuyOrderUpdate`/`_prepSellOrderUpdate`, used pre/post balance checks for `amountSent`). Compatible with `CCListingTemplate.sol` v0.3.9.
@@ -46,7 +47,7 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
     - `_initSettlement` → Fetches order IDs, validates router.
     - `_createHistoricalEntry` → Creates `HistoricalUpdate` using `volumeBalances`, `prices`, `historicalDataLengthView`, `getHistoricalDataView`.
     - `_processOrderBatch` → Iterates orders, calls `_validateOrder`, `_processOrder`, `_updateOrder`.
-    - `_validateOrder` → Fetches order data, checks pricing via `_checkPricing`, emits `OrderSkipped` and skips invalid orders.
+    - `_validateOrder` → Fetches order data, checks pricing via `_checkPricing`, emits `OrderSkipped` and sets `context.status = 0` for invalid orders (v0.1.12).
     - `_processOrder` → Calls `_processBuyOrder` or `_processSellOrder`.
     - `_processBuyOrder` → Validates via `_validateOrderParams`, computes swap via `_computeSwapAmount`, captures `preBalance`, executes via `_executeOrderSwap`, applies via `_applyOrderUpdate`.
     - `_processSellOrder` → Similar flow for sell orders.
@@ -57,12 +58,12 @@ The `CCSettlementRouter` contract, implemented in Solidity (`^0.8.2`), facilitat
 
 ## Internal Functions
 ### CCSettlementRouter
-- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context**: Fetches order data, validates pricing via `_checkPricing`, emits `OrderFailed` and skips invalid orders (v0.1.10).
+- **_validateOrder(address listingAddress, uint256 orderId, bool isBuyOrder, ICCListing listingContract) → OrderContext memory context**: Fetches order data, validates pricing via `_checkPricing`, emits `OrderSkipped` and sets `context.status = 0` for invalid orders (v0.1.12).
 - **_processOrder(address listingAddress, bool isBuyOrder, ICCListing listingContract, OrderContext memory context, SettlementContext memory settlementContext) → OrderContext memory**: Delegates to `_processBuyOrder` or `_processSellOrder`.
 - **_updateOrder(ICCListing listingContract, OrderContext memory context, bool isBuyOrder) → (bool success, string memory reason)**: Applies `ccUpdate` with `buyUpdates` or `sellUpdates`, returns success or error reason.
 - **_initSettlement(address listingAddress, bool isBuyOrder, uint256 step, ICCListing listingContract) → (SettlementState memory state, uint256[] memory orderIds)**: Initializes settlement state, fetches order IDs.
 - **_createHistoricalEntry(ICCListing listingContract) → ICCListing.HistoricalUpdate[] memory**: Creates historical data entry with live `price`, `xBalance`, `yBalance`, `xVolume`, `yVolume`.
-- **_processOrderBatch(SettlementState memory state, uint256[] memory orderIds, ICCListing listingContract, SettlementContext memory settlementContext) → uint256 count**: Processes batch of orders, returns count of successful settlements.
+- **_processOrderBatch(SettlementState memory state, uint256[] memory orderIds, ICCListing listingContract, SettlementContext memory settlementContext) → uint256 count**: Processes batch of orders, skips orders with `context.status == 0`, returns count of successful settlements (v0.1.12).
 
 ### CCSettlementPartial
 - **_checkPricing(address listingAddress, uint256 orderIdentifier, bool isBuyOrder, uint256 pendingAmount) → bool**: Emits `OrderSkipped` if price is invalid or out of bounds, returns false instead of reverting (v0.1.16).
@@ -196,5 +197,5 @@ Certain tokens take a tax on each transfer, which can undercut the order settlem
   - **AmountSent** : The router sets this based on the pre/post transfer relationship, this ensures that the true amount settled after taxes is captured. 
 - **Error Handling:**
 The system employs a dual error-handling strategy for settlement.
-  * **Graceful Skipping**: For non-critical, order-specific issues like an invalid price, the contract emits an `OrderFailed` event and skips that order, allowing the settlement batch to continue processing other valid orders.
+  * **Graceful Skipping**: For non-critical, order-specific issues like an invalid price, the contract emits an `OrderSkipped` event and skips that order, allowing the settlement batch to continue processing other valid orders.
   * **Critical Reverts**: For system-level failures, such as a missing Uniswap router address or a failed fund transfer or `ccUpdate ` call failure, the entire transaction reverts to prevent inconsistent states and ensure protocol integrity.
