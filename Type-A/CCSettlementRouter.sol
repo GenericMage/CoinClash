@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// Version: 0.1.12 (30/09)
+// Version: 0.1.12 (01/10)
 // Changes:
+// - v0.1.12 (01/10): Removed unnecessary pendingAmount param in validateOrder call to checkPricing.
 // - v0.1.12 (30/09): Modified _validateOrder to set context.status = 0 when pricing fails. Updated _processOrderBatch to skip orders with context.status == 0 to prevent silent failures.
 // - v0.1.11: Renamed OrderFailed with OrderSkipped (29/9).
 // - v0.1.10: Modified _validateOrder to handle non-reverting _checkPricing, emitting OrderFailed and skipping invalid orders instead of reverting.
@@ -46,7 +47,7 @@ struct SettlementState {
         context.status = 0; // Mark as invalid
         return context;
     }
-    if (!_checkPricing(listingAddress, orderId, isBuyOrder, context.pending)) {
+    if (!_checkPricing(listingAddress, orderId, isBuyOrder)) {
         context.status = 0; // Mark as invalid when pricing fails
         return context;
     }
